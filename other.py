@@ -1267,27 +1267,57 @@ class GRU_P(nn.Module):
             ]
         }
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 100):
+        super().__init__()
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """
+        return x + self.pe[:x.size(0)]
 
 class Transformer(nn.Module):
-    # 127 params with default settings
-    lr: float = 4e-2
+    lr: float = 1e-5
     wd: float = 1e-5
-    n_epoch: int = 5
+    n_epoch: int = 32
 
     def __init__(self, state_dict=None):
         super().__init__()
+        self.n_curves = 1
         self.n_input = 2
-        self.n_hidden = 2
-        self.n_out = 1
-        self.n_layers = 1
-        self.transformer = nn.Transformer(
-            d_model=self.n_input,
-            nhead=self.n_input,
-            num_encoder_layers=self.n_layers,
-            num_decoder_layers=self.n_layers,
-            dim_feedforward=self.n_hidden,
+        self.embedding_layer_hidden = 10
+        self.n_emb = 10
+        self.n_head = 2
+        self.dim_feedforward = self.n_emb * self.n_head
+        self.n_layers = 2
+
+        self.embedding_layer = torch.nn.Sequential(
+            torch.nn.Linear(self.n_input, self.embedding_layer_hidden),
+            torch.nn.ReLU(),
+            torch.nn.LayerNorm(self.embedding_layer_hidden),
+            torch.nn.Linear(self.embedding_layer_hidden, self.embedding_layer_hidden),
+            torch.nn.ReLU(),
+            torch.nn.LayerNorm(self.embedding_layer_hidden),
+            torch.nn.Linear(self.embedding_layer_hidden, self.n_emb),
         )
-        self.fc = nn.Linear(self.n_input, self.n_out)
+        self.positional_encoder = PositionalEncoding(self.n_emb)
+        decoder_layer = torch.nn.TransformerEncoderLayer(d_model=self.n_emb,
+                                                         nhead=self.n_head, 
+                                                         dim_feedforward=self.dim_feedforward,
+                                                         dropout=0.0,
+                                                         norm_first=True)
+        self.transformer = torch.nn.TransformerEncoder(decoder_layer, num_layers=self.n_layers)
+        self.w_fc = nn.Linear(self.n_emb, self.n_curves + 2)
+        self.s_fc = nn.Linear(self.n_emb, self.n_curves)
+        self.d_fc = nn.Linear(self.n_emb, self.n_curves)
 
         if state_dict is not None:
             self.load_state_dict(state_dict)
@@ -1303,31 +1333,47 @@ class Transformer(nn.Module):
             except FileNotFoundError:
                 pass
 
-    def forward(self, src):
-        tgt = torch.zeros(1, src.shape[1], self.n_input).to(device=DEVICE)
-        output = self.transformer(src, tgt)
-        output = self.fc(output)
-        output = torch.exp(output).repeat(src.shape[0], 1, 1)
-        return output, None
+    def forward(self, x_SNE, seq_lens_N):
+        (S, N, E) = x_SNE.shape
+        mask = torch.nn.Transformer.generate_square_subsequent_mask(S, device=DEVICE)
+        # src_key_padding_mask = torch.ones((N, S), dtype=torch.bool)
+        # for i, seq_len in enumerate(seq_lens_N):
+        #     src_key_padding_mask[i, :seq_len] = False
+        # src_key_padding_mask = src_key_padding_mask.to(DEVICE)
+        src_key_padding_mask = torch.arange(S, device=DEVICE).expand(N, S) >= seq_lens_N.unsqueeze(1)
+
+        x_SNE = x_SNE.clone() # x[...] assigns in-place so we must clone first
+        x_SNE[..., 0] = torch.log(1 + x_SNE[..., 0])
+        x_SNE = self.embedding_layer(x_SNE)
+        x_SNE = self.positional_encoder(x_SNE)
+        x_SNE = self.transformer(src=x_SNE, mask=None, src_key_padding_mask=src_key_padding_mask, is_causal=False)
+
+        w_SNH2 = torch.nn.functional.softmax(self.w_fc(x_SNE), dim=-1)
+        w_SNH = w_SNH2[:, :, :-2]
+        base_SN = w_SNH2[:, :, -1]
+        s_SNH = torch.exp(torch.clamp(self.s_fc(x_SNE), min=-25, max=25))
+        d_SNH = torch.exp(torch.clamp(self.d_fc(x_SNE), min=-25, max=25))
+        return w_SNH, base_SN, s_SNH, d_SNH
 
     def iter(
         self,
-        sequences: Tensor,
-        delta_ts: Tensor,
-        seq_lens: Tensor,
+        sequences_SNE: Tensor,
+        delta_NH: Tensor,
+        seq_lens_N: Tensor,
         real_batch_size: int,
     ) -> dict[str, Tensor]:
-        outputs, _ = self.forward(sequences)
-        stabilities = outputs[
-            seq_lens - 1,
-            torch.arange(real_batch_size, device=DEVICE),
-            0,
-        ]
-        retentions = self.forgetting_curve(delta_ts, stabilities)
-        return {"retentions": retentions, "stabilities": stabilities}
+        w_lnh, base_ln, s_lnh, d_lnh  = self.forward(sequences_SNE, seq_lens_N)
+        (_, n, h) = w_lnh.shape
+        delta_nh = delta_NH.unsqueeze(-1).expand(n, h)
+        w_nh = w_lnh[seq_lens_N-1, torch.arange(n, device=DEVICE)]
+        base_n = base_ln[seq_lens_N-1, torch.arange(n, device=DEVICE)]
+        s_nh = s_lnh[seq_lens_N-1, torch.arange(n, device=DEVICE)]
+        d_nh = d_lnh[seq_lens_N-1, torch.arange(n, device=DEVICE)]
+        retentions = self.forgetting_curve(delta_nh, base_n, w_nh, s_nh, d_nh)
+        return {"retentions": retentions, "stabilities": s_nh}
 
-    def forgetting_curve(self, t, s):
-        return (1 + FACTOR * t / s) ** DECAY
+    def forgetting_curve(self, t_nh, base_n, w_nh, s_nh, d_nh):
+        return (1-1e-7)*(base_n + torch.sum(w_nh*(1 + t_nh/(1e-7 + s_nh)) ** -d_nh, dim=-1))
 
 
 class HLR(nn.Module):
