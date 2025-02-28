@@ -66,7 +66,7 @@ Log Loss and RMSE (bins) measure calibration: how well predicted probabilities o
 
 - Other:
     - AVG: an "algorithm" that outputs a constant equal to the user's average retention. Has no practical applications and is intended only to serve as a baseline.
-    - MOVING-AVG: a variant of AVG that updates a moving average immediately after every review. It serves as a baseline for algorithms that can update in real time. Currently, none of the algorithms in the benchmark fits this property.
+    - MOVING-AVG: a variant of AVG that updates a moving average immediately after every review. It serves as a baseline for algorithms that can update in real time. Currently, none of the algorithms in the benchmark fits this criteria.
     - RMSE-BINS-EXPLOIT: an algorithm that exploits the calculation of RMSE (bins) by simulating the bins and keeping the error term close to 0.
 
 For further information regarding the FSRS algorithm, please refer to the following wiki page: [The Algorithm](https://github.com/open-spaced-repetition/fsrs4anki/wiki/The-Algorithm).
