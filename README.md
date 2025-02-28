@@ -66,6 +66,7 @@ Log Loss and RMSE (bins) measure calibration: how well predicted probabilities o
 
 - Other:
     - AVG: an "algorithm" that outputs a constant equal to the user's average retention. Has no practical applications and is intended only to serve as a baseline.
+    - MOVING-AVG: a variant of AVG that updates a moving average immediately after every review. It serves as a baseline for algorithms that can update in real time. Currently, none of the algorithms in the benchmark fits this property.
     - RMSE-BINS-EXPLOIT: an algorithm that exploits the calculation of RMSE (bins) by simulating the bins and keeping the error term close to 0.
 
 For further information regarding the FSRS algorithm, please refer to the following wiki page: [The Algorithm](https://github.com/open-spaced-repetition/fsrs4anki/wiki/The-Algorithm).
@@ -97,6 +98,7 @@ For the sake of brevity, the following abbreviations are used in the "Input feat
 | --- | --- | --- | --- | --- | --- |
 | **LSTM** | 8869 | **0.312±0.0078** | 0.035±0.0011 | **0.733±0.0038** | FIL, G, SR, AT |
 | GRU-P-short | 297 | 0.320±0.0080 | 0.042±0.0013 | 0.710±0.0047 | IL, G, SR|
+| MOVING-AVG | 0 | 0.322±0.0083 | 0.052±0.0015 | 0.692±0.0050 | --- |
 | GRU-P | 297 | 0.325±0.0081 | 0.043±0.0013 | 0.699±0.0046 | IL, G |
 | FSRS-5 recency | 19 | 0.326±0.0082 | 0.049±0.0015 | 0.706±0.0041 | IL, G, SR |
 | FSRS-rs | 19 | 0.326±0.0082 | 0.049±0.0015 | 0.705±0.0041 | IL, G, SR |
@@ -134,6 +136,7 @@ For the sake of brevity, the following abbreviations are used in the "Input feat
 | Algorithm | Parameters | Log Loss | RMSE (bins) | AUC | Input features |
 | --- | --- | --- | --- | --- | --- |
 | **LSTM** | 8869 | **0.333±0.0042** | 0.0538±0.00096 | **0.733±0.0021** | FIL, G, SR, AT |
+| MOVING-AVG | 0 | 0.337±0.0043 | 0.0591±0.00085 | 0.700±0.0026 | --- |
 | GRU-P-short | 297 | 0.346±0.0042 | 0.062±0.0011 | 0.699±0.0026 | IL, G, SR|
 | GRU-P | 297 | 0.352±0.0042 | 0.063±0.0011 | 0.687±0.0025 | IL, G |
 | FSRS-5 recency | 19 | 0.354±0.0044 | 0.072±0.0012 | 0.704±0.0023 | IL, G, SR|

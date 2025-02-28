@@ -65,6 +65,7 @@ model_list = (
     "RNN",
     "AVG",
     "RMSE-BINS-EXPLOIT",
+    "MOVING-AVG",
     "90%",
     "DASH",
     "DASH[MCM]",
@@ -2642,6 +2643,47 @@ def rmse_bins_exploit(user_id):
     stats, raw = evaluate(y, p, save_tmp, model_name, user_id)
     return stats, raw
 
+def moving_avg(user_id):
+    model_name = "MOVING-AVG"
+    dataset = pd.read_parquet(
+        DATA_PATH / "revlogs", filters=[("user_id", "=", user_id)]
+    )
+    dataset = create_features(dataset, model_name)
+    if dataset.shape[0] < 6:
+        return Exception("Not enough data")
+
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    save_tmp = []
+
+    # Get the first index of the reviews that the benchmark uses
+    first_test_index = int(1e9)
+    for _, test_index in tscv.split(dataset):
+        first_test_index = min(first_test_index, test_index.min())
+        test_set = dataset.iloc[test_index].copy()
+        save_tmp.append(test_set)
+
+    x = 1.2
+    w = 0.3
+    p = []
+    y = []
+
+    for i in range(len(dataset)):
+        row = dataset.iloc[i].copy()
+        y_pred = 1 / (np.e ** -x + 1)
+        if i >= first_test_index:
+            p.append(y_pred)
+            y.append(row["y"])
+
+        # gradient step
+        if row["y"] == 1:
+            x += w / (np.e ** x + 1)
+        else:
+            x -= w * (np.e ** x) / (np.e ** x + 1)
+
+    save_tmp = pd.concat(save_tmp)
+    save_tmp["p"] = p
+    stats, raw = evaluate(y, p, save_tmp, model_name, user_id)
+    return stats, raw
 
 def create_features_helper(df, model_name, secs_ivl=SECS_IVL):
     df["review_th"] = range(1, df.shape[0] + 1)
@@ -2943,6 +2985,8 @@ def process(user_id):
         return baseline(user_id)
     if MODEL_NAME == "RMSE-BINS-EXPLOIT":
         return rmse_bins_exploit(user_id)
+    if MODEL_NAME == "MOVING-AVG":
+        return moving_avg(user_id)
     df_revlogs = pd.read_parquet(
         DATA_PATH / "revlogs", filters=[("user_id", "=", user_id)]
     )

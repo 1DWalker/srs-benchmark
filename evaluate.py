@@ -71,7 +71,7 @@ def weighted_avg_and_std(values, weights):
     average = np.average(values, weights=weights)
     # Bevington, P. R., Data Reduction and Error Analysis for the Physical Sciences, 336 pp., McGraw-Hill, 1969
     # https://seismo.berkeley.edu/~kirchner/Toolkits/Toolkit_12.pdf
-    n_eff = np.square(np.sum(weights)) / np.sum(np.square(weights))
+    n_eff = np.square(np.sum(np.float64(weights))) / np.sum(np.square(np.float64(weights)))
     variance = np.average((values - average) ** 2, weights=weights) * (
         n_eff / (n_eff - 1)
     )
@@ -107,6 +107,7 @@ if __name__ == "__main__":
             ("LSTM-short-secs-equalize_test_with_non_secs", 8869, "FIL, G, SR, AT"),
             ("GRU-P-short", 297, "IL, G, SR"),
             ("GRU-P", 297, "IL, G"),
+            ("MOVING-AVG", 0, "---"),
             ("FSRS-5-recency", 19, "IL, G, SR"),
             ("FSRS-5-preset", 19, "IL, G, SR"),
             ("FSRS-rs", 19, "IL, G, SR"),
