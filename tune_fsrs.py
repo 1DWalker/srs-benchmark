@@ -3,6 +3,7 @@ from itertools import accumulate
 import logging
 import math
 from multiprocessing import Manager, Process
+import multiprocessing
 import signal
 import sys
 import os
@@ -1214,60 +1215,63 @@ def evaluate(y, p, df, file_name, user_id, w_list=None):
 NUM_FSRS_PARAMS = 21
 
 
-def objective(trial, df_list):
-    # per-parameter lr
-    lrs = []
-    for i in range(NUM_FSRS_PARAMS):
-        lr_i = trial.suggest_float(f"lr_{i}", 5e-3, 4e-1, log=True)
-        # lr_i = 4e-2
-        lrs.append(lr_i)
+# def objective(trial, df_list):
+#     # per-parameter lr
+#     lrs = []
+#     for i in range(NUM_FSRS_PARAMS):
+#         lr_i = trial.suggest_float(f"lr_{i}", 5e-3, 4e-1, log=True)
+#         # lr_i = 4e-2
+#         lrs.append(lr_i)
 
-    # betas
-    beta1 = trial.suggest_float(f"beta1", 0.9**10, 0.9 ** (1.0 / 10), log=True)
-    beta2 = trial.suggest_float(f"beta2", 0.7, 0.999, log=True)
-    beta1s = NUM_FSRS_PARAMS * [beta1]
-    beta2s = NUM_FSRS_PARAMS * [beta2]
-    epsilon = trial.suggest_float(f"eps", 1e-5, 1e-0, log=True)
-    epsilons = NUM_FSRS_PARAMS * [epsilon]
+#     # betas
+#     beta1 = trial.suggest_float(f"beta1", 0.9**10, 0.9 ** (1.0 / 10), log=True)
+#     beta2 = trial.suggest_float(f"beta2", 0.7, 0.999, log=True)
+#     beta1s = NUM_FSRS_PARAMS * [beta1]
+#     beta2s = NUM_FSRS_PARAMS * [beta2]
+#     epsilon = trial.suggest_float(f"eps", 1e-5, 1e-0, log=True)
+#     epsilons = NUM_FSRS_PARAMS * [epsilon]
 
-    # beta1s, beta2s = [], []
-    # for i in range(NUM_FSRS_PARAMS):
-    # beta1_i = trial.suggest_float(f"beta1_{i}", 0.85, 0.95, log=True)
-    # beta2_i = trial.suggest_float(f"beta2_{i}", 0.9, 0.9999, log=True)
-    # beta1s.append(beta1_i)
-    # beta2s.append(beta2_i)
-    params = {
-        "lrs": np.array(lrs),
-        "beta1s": np.array(beta1s),
-        "beta2s": np.array(beta2s),
-        "epsilons": np.array(epsilons),
-    }
-    logloss_tot = 0
-    size_tot = 0
-    encountered_nan = False
-    for df_i, df in enumerate(df_list):
-        user = df.iloc[0]["user_id"]
-        if not encountered_nan:
-            try:
-                stats, raw = process(user, df, params)
-                logloss_tot += stats["metrics"]["LogLoss"] * stats["size"]
-                size_tot += stats["size"]
-            except ValueError as e:
-                print("ValueError encountered. LRs might be too high.")
-                encountered_nan = True
+#     # beta1s, beta2s = [], []
+#     # for i in range(NUM_FSRS_PARAMS):
+#     # beta1_i = trial.suggest_float(f"beta1_{i}", 0.85, 0.95, log=True)
+#     # beta2_i = trial.suggest_float(f"beta2_{i}", 0.9, 0.9999, log=True)
+#     # beta1s.append(beta1_i)
+#     # beta2s.append(beta2_i)
+#     params = {
+#         "lrs": np.array(lrs),
+#         "beta1s": np.array(beta1s),
+#         "beta2s": np.array(beta2s),
+#         "epsilons": np.array(epsilons),
+#     }
+#     logloss_tot = 0
+#     size_tot = 0
+#     encountered_nan = False
+#     for df_i, df in enumerate(df_list):
+#         user = df.iloc[0]["user_id"]
+#         if not encountered_nan:
+#             try:
+#                 stats, raw = process(user, df, params)
+#                 logloss_tot += stats["metrics"]["LogLoss"] * stats["size"]
+#                 size_tot += stats["size"]
+#             except ValueError as e:
+#                 print("ValueError encountered. LRs might be too high.")
+#                 encountered_nan = True
 
-        if encountered_nan:
-            trial.report(3.0, step=df_i)
-        else:
-            trial.report(logloss_tot / size_tot, step=df_i)
+#         if encountered_nan:
+#             trial.report(3.0, step=df_i)
+#         else:
+#             trial.report(logloss_tot / size_tot, step=df_i)
 
-        if trial.should_prune():
-            raise optuna.TrialPruned()
+#         if trial.should_prune():
+#             raise optuna.TrialPruned()
 
-    if encountered_nan:
-        return 3.0
-    else:
-        return logloss_tot / size_tot
+#     if encountered_nan:
+#         return 3.0
+#     else:
+#         return logloss_tot / size_tot
+
+def evaluate_params(dataset, params):
+    return 1.2
 
 
 def get_initial_trial():
@@ -1291,69 +1295,48 @@ def process_user(user_id):
     return user_id, dataset
 
 
+def df_worker(user_id, job_queue):
+    """ Each one worker handles the memory and computation pertaining to exactly one user
+    """
+    print("processing:", user_id)
+    dataset = process_user(user_id)
+    print("ready:", user_id)
+
+    while True:
+        job = job_queue.get()
+        if job is None:
+            break
+            
+        params, result_queue = job
+        print("got job", params)
+        result = evaluate_params(dataset, params)
+        result_queue.put(result)
+
+def suggest_params(trial):
+    return {}
+
+def objective(trial, manager, job_queues):
+    print("start objective")
+    params = suggest_params(trial)
+    for job_queue in job_queues:
+        result_queue = manager.Queue()
+        job_queue.put((params, result_queue))
+        result = result_queue.get()
+        print("got result", result)
+
+    print("done objective")
+    return 3.5
+
 STUDY_NAME = "parallel_study"
 STORAGE_NAME = "sqlite:///tune_fsrs.db"
 
-
-def worker(df_list):
-    study = optuna.load_study(study_name=STUDY_NAME, storage=STORAGE_NAME)
-
-    def optuna_objective(trial):
-        return objective(trial, df_list)
-
-    print("Starting.")
-    study.optimize(optuna_objective, n_trials=200)
-    print("Done.")
-
-
-TEST_PARAMS = {
-    "lr_0": 0.02887941955994941,
-    "lr_1": 0.037152333178821745,
-    "lr_2": 0.0452426395201018,
-    "lr_3": 0.0062638290192849385,
-    "lr_4": 0.01595614358197305,
-    "lr_5": 0.029006369272735734,
-    "lr_6": 0.03017335571179629,
-    "lr_7": 0.013653237330260696,
-    "lr_8": 0.007541889554669387,
-    "lr_9": 0.1152730204075021,
-    "lr_10": 0.21627126593607962,
-    "lr_11": 0.034879204298883526,
-    "lr_12": 0.021655819452612825,
-    "lr_13": 0.020472188888984555,
-    "lr_14": 0.1588866725898003,
-    "lr_15": 0.35609112182403,
-    "lr_16": 0.008881909067942093,
-    "lr_17": 0.3669070249105741,
-    "lr_18": 0.044315234532481734,
-    "lr_19": 0.023894271387049876,
-    "lr_20": 0.15607166828673724,
-    "beta1": 0.3851528873001343,
-    "beta2": 0.722735224132699,
-    "eps": 0.00029831234921299117,
-}
-
 if __name__ == "__main__":
     assert MODEL_NAME == "FSRS-6"
-    users = [i for i in range(1, 5)]
-    # users.remove(9000)
+    users = [i for i in range(1, 4)]  
+    # users.remove(9000) 
     # users.remove(9013)
 
     df_dict = {}
-    with ThreadPoolExecutor(max_workers=PROCESSES) as executor:
-        futures = [
-            executor.submit(
-                process_user,
-                user_id,
-            )
-            for user_id in users
-        ]
-        for future in tqdm(as_completed(futures), total=len(futures)):
-            user_id, dataset = future.result()
-            df_dict[user_id] = dataset
-
-    df_list = [df_dict[user_id] for user_id in users]
-    df_list.sort(key=len)
 
     study = optuna.create_study(
         study_name=STUDY_NAME,
@@ -1363,19 +1346,23 @@ if __name__ == "__main__":
         pruner=optuna.pruners.HyperbandPruner(),
     )
     study.enqueue_trial(get_initial_trial())
-    study.enqueue_trial(TEST_PARAMS)
     optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
     # worker(df_list)
+    job_queues = [multiprocessing.Queue() for _ in range(len(users))]
+    job_processes = [
+        Process(target=df_worker, args=(user_id, job_queue)) for user_id, job_queue in zip(users, job_queues)
+    ]
+    for p in job_processes:
+        p.start()
 
+    print("starting objective")
     with Manager() as manager:
-        shared_list = manager.list()
-        for df in df_list:
-            shared_list.append(df)
+        def optuna_objective(trial):
+            return objective(trial, manager, job_queues)
+        study.optimize(optuna_objective, n_trials=3, n_jobs=4)
 
-        processes = [
-            Process(target=worker, args=(shared_list,)) for _ in range(PROCESSES)
-        ]
-        for p in processes:
-            p.start()
-        for p in processes:
-            p.join()
+    for job_queue in job_queues:
+        job_queue.put(None)
+    for p in job_processes:
+        p.join()
+
