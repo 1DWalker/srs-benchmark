@@ -315,7 +315,7 @@ class FSRS6ParameterClipper:
         self.frequency = frequency
 
     def __call__(self, module):
-        if hasattr(module, "w"):
+        if hasattr(module, "w_params"):
             with torch.no_grad():
                 w = module.w_params
                 w[0].data = w[0].clamp(S_MIN, 100)
@@ -339,7 +339,6 @@ class FSRS6ParameterClipper:
                 w[18].data = w[18].clamp(0, 2)
                 w[19].data = w[19].clamp(0, 0.8)
                 w[20].data = w[20].clamp(0.1, 0.8)
-            # module.w_params = w
 
 
 class FSRS6(FSRS):
@@ -565,11 +564,35 @@ class Trainer:
         self.model = MODEL.to(device=DEVICE)
         if isinstance(MODEL, (FSRS6)):
             self.model.pretrain(train_set)  # type: ignore
-        # self.optimizer = torch.optim.Adam(
-        #     self.model.parameters(), lr=torch.tensor(hyperparams["lrs"]), fused=True
-        # )
-        print("TODO lrs")
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=4e-2)
+        groups = []
+        for i, (_, param) in enumerate(self.model.named_parameters()):
+            groups.append(
+                {"params": param, "weight_decay": 0.0, "lr": hyperparams["lrs"][i]}
+            )
+        self.optimizer = torch.optim.Adam(groups)
+        self.optimizer.zero_grad()
+        # for param in self.model.parameters():
+        #     if param.requires_grad and param not in self.optimizer.state:
+        #         self.optimizer.state[param] = {
+        #             "step": torch.tensor(0),
+        #             "exp_avg": torch.zeros_like(param),
+        #             "exp_avg_sq": torch.zeros_like(param),  # or ones_like if you prefer
+        #         }
+        # for i, (name, param) in enumerate(self.model.named_parameters()):
+        #     # print(name)
+        #     state = self.optimizer.state[param]
+        #     # print("state", state)
+        #     # exit()
+        #     state["exp_avg_sq"].fill_(hyperparams["exp_avg_sqs"][i])
+        #     # state[param] = {
+        #     #     "exp_avg": torch.tensor(0),
+        #     #     "exp_avg_sq": torch.tensor(hyperparams["exp_avg_sqs"][i]),
+        #     #     "step": torch.tensor(0),
+        #     # }
+        # state[param]["exp_avg"] = torch.tensor(0)
+        # state[param]["exp_avg_sq"] = torch.tensor(hyperparams["exp_avg_sqs"][i])
+        # state[param]["step"] = torch.tensor(0)
+
         self.clipper = MODEL.clipper if hasattr(MODEL, "clipper") else None
         self.batch_size = batch_size
         self.max_seq_len = max_seq_len
@@ -633,6 +656,15 @@ class Trainer:
         if weighted_loss < best_loss:
             best_loss = weighted_loss
             best_w = w
+
+        # print("here opt")
+        state = self.optimizer.state_dict()["state"]
+        exp_avg_sq = []
+        for k, v in state.items():
+            exp_avg_sq.append(v["exp_avg_sq"])
+
+        print("Final exp avg sq", exp_avg_sq)
+
         return best_w
 
     def eval(self):
@@ -1106,7 +1138,6 @@ def process(user_id, dataset, params):
                         hyperparams=params,
                     )
                     partition_weights[partition] = trainer.train()
-                    print("WEIGHTS", partition_weights[partition])
             except Exception as e:
                 if str(e).endswith("inadequate."):
                     if verbose_inadequate_data:
@@ -1208,13 +1239,21 @@ NUM_FSRS_PARAMS = 21
 
 
 def objective(trial, df_list):
+    # per-parameter lr
     lrs = []
     for i in range(NUM_FSRS_PARAMS):
-        lr_i = trial.suggest_float(f"lr_{i}", 5e-3, 5e-1)
+        lr_i = trial.suggest_float(f"lr_{i}", 5e-3, 2e-1, log=True)
         lrs.append(lr_i)
+
+    # per-parameter exp_avg_sq - recall that ADAM with default params has beta2 = 0.999, so we help initialize it here
+    exp_avg_sqs = []
+    for i in range(NUM_FSRS_PARAMS):
+        exp_avg_sq_i = trial.suggest_float(f"exp_avg_sq_{i}", 1e-5, 1e2, log=True)
+        exp_avg_sqs.append(exp_avg_sq_i)
 
     params = {
         "lrs": np.array(lrs),
+        "exp_avg_sqs": np.array(exp_avg_sqs),
     }
     logloss_tot = 0
     size_tot = 0
@@ -1235,6 +1274,7 @@ def get_initial_trial():
     params = {}
     for i in range(NUM_FSRS_PARAMS):
         params[f"lr_{i}"] = 4e-2
+        params[f"exp_avg_sq_{i}"] = 1e-5
     print(params)
     return params
 
@@ -1276,5 +1316,5 @@ if __name__ == "__main__":
         return objective(trial, df_list)
 
     print("Starting.")
-    study.optimize(optuna_objective, n_trials=2)
+    study.optimize(optuna_objective, n_trials=200)
     print("Done.")
