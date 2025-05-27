@@ -622,8 +622,6 @@ class Trainer:
             if weighted_loss < best_loss:
                 best_loss = weighted_loss
                 best_w = w
-                for name, param in best_w.items():
-                    assert (param >= 0).all(), "best w 1"
             for i, batch in enumerate(self.train_data_loader):
                 self.model.train()
                 self.optimizer.zero_grad()
@@ -639,17 +637,10 @@ class Trainer:
                 self.scheduler.step()
                 if self.clipper:
                     self.model.apply(self.clipper)
-
-                for name, param in self.model.state_dict().items():
-                    assert (param >= 0).all(), "neg weights after clip"
         weighted_loss, w = self.eval()
         if weighted_loss < best_loss:
             best_loss = weighted_loss
             best_w = w
-            for name, param in best_w.items():
-                assert (param >= 0).all(), "best w 2"
-        for name, param in best_w.items():
-            assert (param >= 0).all(), "best w 3"
 
         return best_w
 
@@ -685,9 +676,6 @@ class Trainer:
             self.avg_eval_losses.append(losses[1])
 
             w = copy.deepcopy(self.model.state_dict())
-            for name, param in self.model.state_dict().items():
-                assert (param >= 0).all(), "neg weights after eval"
-
             weighted_loss = (
                 losses[0] * len(self.train_set) + losses[1] * len(self.test_set)
             ) / (len(self.train_set) + len(self.test_set))
