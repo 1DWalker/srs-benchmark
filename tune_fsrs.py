@@ -2,6 +2,8 @@ import copy
 from itertools import accumulate
 import logging
 import math
+from multiprocessing import Process
+import signal
 import sys
 import os
 import optuna
@@ -23,7 +25,6 @@ from statsmodels.nonparametric.smoothers_lowess import lowess  # type: ignore
 import warnings
 from reptile_trainer import get_inner_opt, finetune
 from script import cum_concat, remove_non_continuous_rows, remove_outliers, sort_jsonl
-import multiprocessing as mp
 import pyarrow.parquet as pq  # type: ignore
 from config import create_parser
 from utils import catch_exceptions, rmse_matrix
@@ -1224,7 +1225,7 @@ def objective(trial, df_list):
 
     # betas
     beta1 = trial.suggest_float(f"beta1", 0.9**10, 0.9 ** (1.0 / 10), log=True)
-    beta2 = trial.suggest_float(f"beta2", 0.7, 0.9999, log=True)
+    beta2 = trial.suggest_float(f"beta2", 0.7, 0.999, log=True)
     beta1s = NUM_FSRS_PARAMS * [beta1]
     beta2s = NUM_FSRS_PARAMS * [beta2]
     epsilon = trial.suggest_float(f"eps", 1e-5, 1e-0, log=True)
@@ -1278,9 +1279,24 @@ def process_user(user_id):
     return user_id, dataset
 
 
+STUDY_NAME = "parallel_study"
+STORAGE_NAME = "sqlite:///tune_fsrs.db"
+
+
+def worker(df_list):
+    study = optuna.load_study(study_name=STUDY_NAME, storage=STORAGE_NAME)
+
+    def optuna_objective(trial):
+        return objective(trial, df_list)
+
+    print("Starting.")
+    study.optimize(optuna_objective, n_trials=200)
+    print("Done.")
+
+
 if __name__ == "__main__":
     assert MODEL_NAME == "FSRS-6"
-    users = [i for i in range(1, 2)]
+    users = [i for i in range(3, 4)]
 
     df_dict = {}
     with ThreadPoolExecutor() as executor:
@@ -1298,14 +1314,17 @@ if __name__ == "__main__":
     df_list = [df_dict[user_id] for user_id in users]
 
     study = optuna.create_study(
-        direction="minimize", pruner=optuna.pruners.MedianPruner()
+        study_name=STUDY_NAME,
+        direction="minimize",
+        storage=STORAGE_NAME,
+        load_if_exists=True,
+        pruner=optuna.pruners.HyperbandPruner(),
     )
-    optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
     study.enqueue_trial(get_initial_trial())
+    optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
 
-    def optuna_objective(trial):
-        return objective(trial, df_list)
-
-    print("Starting.")
-    study.optimize(optuna_objective, n_trials=200)
-    print("Done.")
+    processes = [Process(target=worker, args=(df_list,)) for _ in range(PROCESSES)]
+    for p in processes:
+        p.start()
+    for p in processes:
+        p.join()
