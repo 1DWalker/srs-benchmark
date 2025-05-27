@@ -2,7 +2,7 @@ import copy
 from itertools import accumulate
 import logging
 import math
-from multiprocessing import Process
+from multiprocessing import Manager, Process
 import signal
 import sys
 import os
@@ -1114,10 +1114,6 @@ def process(user_id, dataset, params):
                         hyperparams=params,
                     )
                     partition_weights[partition] = trainer.train()
-                    print("weights", partition_weights[partition])
-                    for name, param in partition_weights[partition].items():
-                        assert (param >= 0).all(), "neg weights after ."
-
             except Exception as e:
                 if str(e).endswith("inadequate."):
                     if verbose_inadequate_data:
@@ -1311,38 +1307,40 @@ def worker(df_list):
 
 
 TEST_PARAMS = {
-    "lr_0": 0.016177384447800675,
-    "lr_1": 0.1707061273142042,
-    "lr_2": 0.06707101642492873,
-    "lr_3": 0.15430275870041393,
-    "lr_4": 0.02993275032551017,
-    "lr_5": 0.012204786010969916,
-    "lr_6": 0.1675268292405444,
-    "lr_7": 0.39517432783032763,
-    "lr_8": 0.01237788929131578,
-    "lr_9": 0.006107253999689876,
-    "lr_10": 0.1010752152937203,
-    "lr_11": 0.0833382535109321,
-    "lr_12": 0.019452990211649722,
-    "lr_13": 0.006899844322187149,
-    "lr_14": 0.3243853096633517,
-    "lr_15": 0.02129906354817224,
-    "lr_16": 0.09736974913886626,
-    "lr_17": 0.012795033098247408,
-    "lr_18": 0.010609181291426146,
-    "lr_19": 0.17264348274791047,
-    "lr_20": 0.3531538053435248,
-    "beta1": 0.5132884932202296,
-    "beta2": 0.7521293622919385,
-    "eps": 0.0002993057988564082,
+    "lr_0": 0.02887941955994941,
+    "lr_1": 0.037152333178821745,
+    "lr_2": 0.0452426395201018,
+    "lr_3": 0.0062638290192849385,
+    "lr_4": 0.01595614358197305,
+    "lr_5": 0.029006369272735734,
+    "lr_6": 0.03017335571179629,
+    "lr_7": 0.013653237330260696,
+    "lr_8": 0.007541889554669387,
+    "lr_9": 0.1152730204075021,
+    "lr_10": 0.21627126593607962,
+    "lr_11": 0.034879204298883526,
+    "lr_12": 0.021655819452612825,
+    "lr_13": 0.020472188888984555,
+    "lr_14": 0.1588866725898003,
+    "lr_15": 0.35609112182403,
+    "lr_16": 0.008881909067942093,
+    "lr_17": 0.3669070249105741,
+    "lr_18": 0.044315234532481734,
+    "lr_19": 0.023894271387049876,
+    "lr_20": 0.15607166828673724,
+    "beta1": 0.3851528873001343,
+    "beta2": 0.722735224132699,
+    "eps": 0.00029831234921299117,
 }
 
 if __name__ == "__main__":
     assert MODEL_NAME == "FSRS-6"
-    users = [i for i in range(1, 2)]
+    users = [i for i in range(1, 5)]
+    # users.remove(9000)
+    # users.remove(9013)
 
     df_dict = {}
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=PROCESSES) as executor:
         futures = [
             executor.submit(
                 process_user,
@@ -1355,6 +1353,7 @@ if __name__ == "__main__":
             df_dict[user_id] = dataset
 
     df_list = [df_dict[user_id] for user_id in users]
+    df_list.sort(key=len)
 
     study = optuna.create_study(
         study_name=STUDY_NAME,
@@ -1363,13 +1362,20 @@ if __name__ == "__main__":
         load_if_exists=True,
         pruner=optuna.pruners.HyperbandPruner(),
     )
-    # study.enqueue_trial(get_initial_trial())
+    study.enqueue_trial(get_initial_trial())
     study.enqueue_trial(TEST_PARAMS)
     optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
     # worker(df_list)
 
-    processes = [Process(target=worker, args=(df_list,)) for _ in range(PROCESSES)]
-    for p in processes:
-        p.start()
-    for p in processes:
-        p.join()
+    with Manager() as manager:
+        shared_list = manager.list()
+        for df in df_list:
+            shared_list.append(df)
+
+        processes = [
+            Process(target=worker, args=(shared_list,)) for _ in range(PROCESSES)
+        ]
+        for p in processes:
+            p.start()
+        for p in processes:
+            p.join()
