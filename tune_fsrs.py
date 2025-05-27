@@ -1,6 +1,7 @@
 import copy
 from itertools import accumulate
 import logging
+import math
 import sys
 import os
 import optuna
@@ -301,10 +302,12 @@ class FSRS(nn.Module):
             init_s0 = [
                 item[1] for item in sorted(rating_stability.items(), key=lambda x: x[0])
             ]
-        self.w.data[0:4] = Tensor(
-            list(map(lambda x: max(min(INIT_S_MAX, x), S_MIN), init_s0))
-        )
-        self.init_w_tensor = self.w.data.clone().to(DEVICE)
+        stabilities = list(map(lambda x: max(min(INIT_S_MAX, x), S_MIN), init_s0))
+        for i in range(4):
+            self.w_params[i].data = torch.tensor(
+                stabilities[i], dtype=torch.float, device=DEVICE
+            )
+        self.init_w_tensor = torch.stack(list(self.w_params)).clone().to(DEVICE)
 
 
 class FSRS6ParameterClipper:
@@ -313,29 +316,30 @@ class FSRS6ParameterClipper:
 
     def __call__(self, module):
         if hasattr(module, "w"):
-            w = module.w.data
-            w[0] = w[0].clamp(S_MIN, 100)
-            w[1] = w[1].clamp(S_MIN, 100)
-            w[2] = w[2].clamp(S_MIN, 100)
-            w[3] = w[3].clamp(S_MIN, 100)
-            w[4] = w[4].clamp(1, 10)
-            w[5] = w[5].clamp(0.001, 4)
-            w[6] = w[6].clamp(0.001, 4)
-            w[7] = w[7].clamp(0.001, 0.75)
-            w[8] = w[8].clamp(0, 4.5)
-            w[9] = w[9].clamp(0, 0.8)
-            w[10] = w[10].clamp(0.001, 3.5)
-            w[11] = w[11].clamp(0.001, 5)
-            w[12] = w[12].clamp(0.001, 0.25)
-            w[13] = w[13].clamp(0.001, 0.9)
-            w[14] = w[14].clamp(0, 4)
-            w[15] = w[15].clamp(0, 1)
-            w[16] = w[16].clamp(1, 6)
-            w[17] = w[17].clamp(0, 2)
-            w[18] = w[18].clamp(0, 2)
-            w[19] = w[19].clamp(0, 0.8)
-            w[20] = w[20].clamp(0.1, 0.8)
-            module.w.data = w
+            with torch.no_grad():
+                w = module.w_params
+                w[0].data = w[0].clamp(S_MIN, 100)
+                w[1].data = w[1].clamp(S_MIN, 100)
+                w[2].data = w[2].clamp(S_MIN, 100)
+                w[3].data = w[3].clamp(S_MIN, 100)
+                w[4].data = w[4].clamp(1, 10)
+                w[5].data = w[5].clamp(0.001, 4)
+                w[6].data = w[6].clamp(0.001, 4)
+                w[7].data = w[7].clamp(0.001, 0.75)
+                w[8].data = w[8].clamp(0, 4.5)
+                w[9].data = w[9].clamp(0, 0.8)
+                w[10].data = w[10].clamp(0.001, 3.5)
+                w[11].data = w[11].clamp(0.001, 5)
+                w[12].data = w[12].clamp(0.001, 0.25)
+                w[13].data = w[13].clamp(0.001, 0.9)
+                w[14].data = w[14].clamp(0, 4)
+                w[15].data = w[15].clamp(0, 1)
+                w[16].data = w[16].clamp(1, 6)
+                w[17].data = w[17].clamp(0, 2)
+                w[18].data = w[18].clamp(0, 2)
+                w[19].data = w[19].clamp(0, 0.8)
+                w[20].data = w[20].clamp(0.1, 0.8)
+            # module.w_params = w
 
 
 class FSRS6(FSRS):
@@ -395,8 +399,13 @@ class FSRS6(FSRS):
 
     def __init__(self, w: List[float] = init_w):
         super(FSRS6, self).__init__()
-        self.w = nn.Parameter(torch.tensor(w, dtype=torch.float32))
-        self.init_w_tensor = self.w.data.clone().to(DEVICE)
+        self.w_params = torch.nn.ParameterList(
+            [
+                torch.tensor(w[i], dtype=torch.float, requires_grad=True)
+                for i in range(len(w))
+            ]
+        )
+        self.init_w_tensor = torch.stack(list(self.w_params)).clone().to(DEVICE)
 
     def iter(
         self,
@@ -405,6 +414,7 @@ class FSRS6(FSRS):
         seq_lens: Tensor,
         real_batch_size: int,
     ) -> dict[str, Tensor]:
+        self.w = torch.stack(list(self.w_params))
         outputs, _ = self.forward(sequences)
         stabilities, difficulties = outputs[
             seq_lens - 1,
@@ -527,14 +537,6 @@ class FSRS6(FSRS):
     def mean_reversion(self, init: Tensor, current: Tensor) -> Tensor:
         return self.w[7] * init + (1 - self.w[7]) * current
 
-    def state_dict(self):
-        return list(
-            map(
-                lambda x: round(float(x), 4),
-                dict(self.named_parameters())["w"].data,
-            )
-        )
-
 
 def iter(model, batch):
     sequences, delta_ts, labels, seq_lens, weights = batch
@@ -553,6 +555,7 @@ class Trainer:
         MODEL: nn.Module,
         train_set: pd.DataFrame,
         test_set: Optional[pd.DataFrame],
+        hyperparams,
         n_epoch: int = 1,
         lr: float = 1e-2,
         wd: float = 1e-4,
@@ -562,7 +565,11 @@ class Trainer:
         self.model = MODEL.to(device=DEVICE)
         if isinstance(MODEL, (FSRS6)):
             self.model.pretrain(train_set)  # type: ignore
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        # self.optimizer = torch.optim.Adam(
+        #     self.model.parameters(), lr=torch.tensor(hyperparams["lrs"]), fused=True
+        # )
+        print("TODO lrs")
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=4e-2)
         self.clipper = MODEL.clipper if hasattr(MODEL, "clipper") else None
         self.batch_size = batch_size
         self.max_seq_len = max_seq_len
@@ -1096,8 +1103,10 @@ def process(user_id, dataset, params):
                         lr=model.lr,
                         wd=model.wd,
                         batch_size=batch_size,
+                        hyperparams=params,
                     )
                     partition_weights[partition] = trainer.train()
+                    print("WEIGHTS", partition_weights[partition])
             except Exception as e:
                 if str(e).endswith("inadequate."):
                     if verbose_inadequate_data:
@@ -1120,7 +1129,9 @@ def process(user_id, dataset, params):
         for partition in testset["partition"].unique():
             partition_testset = testset[testset["partition"] == partition].copy()
             weights = w.get(partition, None)
-            my_collection = Collection(Model(weights) if weights else Model())
+            model = Model()
+            model.load_state_dict(weights)
+            my_collection = Collection(model)
             retentions, stabilities, difficulties = my_collection.batch_predict(
                 partition_testset
             )
@@ -1265,5 +1276,5 @@ if __name__ == "__main__":
         return objective(trial, df_list)
 
     print("Starting.")
-    study.optimize(optuna_objective, n_trials=1)
+    study.optimize(optuna_objective, n_trials=2)
     print("Done.")
