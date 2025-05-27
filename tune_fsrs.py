@@ -1,7 +1,9 @@
 import copy
 from itertools import accumulate
+import logging
 import sys
 import os
+import optuna
 import pandas as pd
 import numpy as np
 from typing import List, Optional, Union
@@ -1008,7 +1010,7 @@ def create_features(df, model_name="FSRSv3", secs_ivl=SECS_IVL):
         return create_features_helper(df, model_name, secs_ivl)
 
 
-def process(user_id, dataset):
+def process(user_id, dataset, params):
     Model = FSRS6
 
     # dataset = create_features(df_revlogs, MODEL_NAME, SECS_IVL)
@@ -1191,11 +1193,39 @@ def evaluate(y, p, df, file_name, user_id, w_list=None):
     return stats, raw
 
 
+NUM_FSRS_PARAMS = 21
+
+
 def objective(trial, df_list):
-    NUM_PARAMS = 21
-    for df in df_list:
+    lrs = []
+    for i in range(NUM_FSRS_PARAMS):
+        lr_i = trial.suggest_float(f"lr_{i}", 5e-3, 5e-1)
+        lrs.append(lr_i)
+
+    params = {
+        "lrs": np.array(lrs),
+    }
+    logloss_tot = 0
+    size_tot = 0
+    for df_i, df in enumerate(df_list):
         user = df.iloc[0]["user_id"]
-        stats, raw = process(user, df)
+        stats, raw = process(user, df, params)
+        logloss_tot += stats["metrics"]["LogLoss"] * stats["size"]
+        size_tot += stats["size"]
+
+        trial.report(logloss_tot / size_tot, step=df_i)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+    return logloss_tot / size_tot
+
+
+def get_initial_trial():
+    params = {}
+    for i in range(NUM_FSRS_PARAMS):
+        params[f"lr_{i}"] = 4e-2
+    print(params)
+    return params
 
 
 def process_user(user_id):
@@ -1224,4 +1254,16 @@ if __name__ == "__main__":
             df_dict[user_id] = dataset
 
     df_list = [df_dict[user_id] for user_id in users]
-    objective(None, df_list)
+
+    study = optuna.create_study(
+        direction="minimize", pruner=optuna.pruners.MedianPruner()
+    )
+    optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
+    study.enqueue_trial(get_initial_trial())
+
+    def optuna_objective(trial):
+        return objective(trial, df_list)
+
+    print("Starting.")
+    study.optimize(optuna_objective, n_trials=1)
+    print("Done.")
