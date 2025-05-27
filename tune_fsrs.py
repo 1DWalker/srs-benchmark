@@ -1027,6 +1027,17 @@ def create_features(df, model_name="FSRSv3", secs_ivl=SECS_IVL):
 
 
 def process(user_id, dataset, params):
+    lrs = [params[f"lr_{i}"] for i in range(NUM_FSRS_PARAMS)]
+    beta1s = NUM_FSRS_PARAMS * [params["beta1"]]
+    beta2s = NUM_FSRS_PARAMS * [params["beta2"]]
+    epsilons = NUM_FSRS_PARAMS * [params["eps"]]
+    params_transformed = {
+        "lrs": np.array(lrs),
+        "beta1s": np.array(beta1s),
+        "beta2s": np.array(beta2s),
+        "epsilons": np.array(epsilons),
+    }
+
     Model = FSRS6
 
     # dataset = create_features(df_revlogs, MODEL_NAME, SECS_IVL)
@@ -1112,7 +1123,7 @@ def process(user_id, dataset, params):
                         lr=model.lr,
                         wd=model.wd,
                         batch_size=batch_size,
-                        hyperparams=params,
+                        hyperparams=params_transformed,
                     )
                     partition_weights[partition] = trainer.train()
             except Exception as e:
@@ -1215,76 +1226,12 @@ def evaluate(y, p, df, file_name, user_id, w_list=None):
 NUM_FSRS_PARAMS = 21
 
 
-# def objective(trial, df_list):
-#     # per-parameter lr
-#     lrs = []
-#     for i in range(NUM_FSRS_PARAMS):
-#         lr_i = trial.suggest_float(f"lr_{i}", 5e-3, 4e-1, log=True)
-#         # lr_i = 4e-2
-#         lrs.append(lr_i)
-
-#     # betas
-#     beta1 = trial.suggest_float(f"beta1", 0.9**10, 0.9 ** (1.0 / 10), log=True)
-#     beta2 = trial.suggest_float(f"beta2", 0.7, 0.999, log=True)
-#     beta1s = NUM_FSRS_PARAMS * [beta1]
-#     beta2s = NUM_FSRS_PARAMS * [beta2]
-#     epsilon = trial.suggest_float(f"eps", 1e-5, 1e-0, log=True)
-#     epsilons = NUM_FSRS_PARAMS * [epsilon]
-
-#     # beta1s, beta2s = [], []
-#     # for i in range(NUM_FSRS_PARAMS):
-#     # beta1_i = trial.suggest_float(f"beta1_{i}", 0.85, 0.95, log=True)
-#     # beta2_i = trial.suggest_float(f"beta2_{i}", 0.9, 0.9999, log=True)
-#     # beta1s.append(beta1_i)
-#     # beta2s.append(beta2_i)
-#     params = {
-#         "lrs": np.array(lrs),
-#         "beta1s": np.array(beta1s),
-#         "beta2s": np.array(beta2s),
-#         "epsilons": np.array(epsilons),
-#     }
-#     logloss_tot = 0
-#     size_tot = 0
-#     encountered_nan = False
-#     for df_i, df in enumerate(df_list):
-#         user = df.iloc[0]["user_id"]
-#         if not encountered_nan:
-#             try:
-#                 stats, raw = process(user, df, params)
-#                 logloss_tot += stats["metrics"]["LogLoss"] * stats["size"]
-#                 size_tot += stats["size"]
-#             except ValueError as e:
-#                 print("ValueError encountered. LRs might be too high.")
-#                 encountered_nan = True
-
-#         if encountered_nan:
-#             trial.report(3.0, step=df_i)
-#         else:
-#             trial.report(logloss_tot / size_tot, step=df_i)
-
-#         if trial.should_prune():
-#             raise optuna.TrialPruned()
-
-#     if encountered_nan:
-#         return 3.0
-#     else:
-#         return logloss_tot / size_tot
-
-def evaluate_params(dataset, params):
-    return 1.2
-
-
-def get_initial_trial():
-    params = {}
-    params["beta1"] = 0.9
-    params["beta2"] = 0.999
-    params["eps"] = 1e-8
-    for i in range(NUM_FSRS_PARAMS):
-        params[f"lr_{i}"] = 4e-2
-        # params[f"beta1_{i}"] = 0.9
-        # params[f"beta2_{i}"] = 0.999
-    print(params)
-    return params
+def evaluate_params(user_id, dataset, params):
+    try:
+        stats, _ = process(user_id, dataset, params)
+        return stats["metrics"]["LogLoss"], stats["size"], False
+    except ValueError as e:
+        return 0, 0, True
 
 
 def process_user(user_id):
@@ -1298,8 +1245,8 @@ def process_user(user_id):
 def df_worker(user_id, job_queue):
     """ Each one worker handles the memory and computation pertaining to exactly one user
     """
-    print("processing:", user_id)
-    dataset = process_user(user_id)
+    print("processing df:", user_id)
+    user_id, dataset = process_user(user_id)
     print("ready:", user_id)
 
     while True:
@@ -1308,26 +1255,62 @@ def df_worker(user_id, job_queue):
             break
             
         params, result_queue = job
-        print("got job", params)
-        result = evaluate_params(dataset, params)
+        print("got job", user_id, params)
+        result = evaluate_params(user_id, dataset, params)
         result_queue.put(result)
 
+def get_initial_params():
+    params = {}
+    params["beta1"] = 0.9
+    params["beta2"] = 0.999
+    params["eps"] = 1e-8
+    for i in range(NUM_FSRS_PARAMS):
+        params[f"lr_{i}"] = 4e-2
+        # params[f"beta1_{i}"] = 0.9
+        # params[f"beta2_{i}"] = 0.999
+    return params
+
 def suggest_params(trial):
-    return {}
+    params = {}
+    # per-parameter lr
+    for i in range(NUM_FSRS_PARAMS):
+        params[f"lr_{i}"] = trial.suggest_float(f"lr_{i}", 5e-3, 4e-1, log=True)
+
+    params["beta1"] = trial.suggest_float(f"beta1", 0.9**10, 0.9 ** (1.0 / 10), log=True)
+    params["beta2"] = trial.suggest_float(f"beta2", 0.7, 0.999, log=True)
+    params["eps"] = trial.suggest_float(f"eps", 1e-5, 1e-0, log=True)
+    return params
 
 def objective(trial, manager, job_queues):
     print("start objective")
     params = suggest_params(trial)
-    for job_queue in job_queues:
+    logloss_tot, size_tot = 0, 0
+    encountered_nan = False
+    for job_i, job_queue in enumerate(job_queues):
         result_queue = manager.Queue()
         job_queue.put((params, result_queue))
-        result = result_queue.get()
-        print("got result", result)
+        value, size, error = result_queue.get()
+        print("jobi, value, size, error", job_i, value, size, error)
+        if error:
+            encountered_nan = True
+        else:
+            logloss_tot += value * size
+            size_tot += size
 
-    print("done objective")
-    return 3.5
+        if encountered_nan:
+            trial.report(3.0, step=job_i)
+        else:
+            trial.report(logloss_tot / size_tot, step=job_i)
 
-STUDY_NAME = "parallel_study"
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+    if encountered_nan:
+        return 3.0
+    else:
+        return logloss_tot / size_tot
+
+STUDY_NAME = "tune_fsrs_study"
 STORAGE_NAME = "sqlite:///tune_fsrs.db"
 
 if __name__ == "__main__":
@@ -1345,7 +1328,7 @@ if __name__ == "__main__":
         load_if_exists=True,
         pruner=optuna.pruners.HyperbandPruner(),
     )
-    study.enqueue_trial(get_initial_trial())
+    study.enqueue_trial(get_initial_params())
     optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
     # worker(df_list)
     job_queues = [multiprocessing.Queue() for _ in range(len(users))]
