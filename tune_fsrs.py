@@ -567,31 +567,15 @@ class Trainer:
         groups = []
         for i, (_, param) in enumerate(self.model.named_parameters()):
             groups.append(
-                {"params": param, "weight_decay": 0.0, "lr": hyperparams["lrs"][i]}
+                {
+                    "params": param,
+                    "weight_decay": 0.0,
+                    "lr": hyperparams["lrs"][i],
+                    "betas": (hyperparams["beta1s"][i], hyperparams["beta2s"][i]),
+                    "eps": hyperparams["epsilons"][i],
+                }
             )
         self.optimizer = torch.optim.Adam(groups)
-        self.optimizer.zero_grad()
-        # for param in self.model.parameters():
-        #     if param.requires_grad and param not in self.optimizer.state:
-        #         self.optimizer.state[param] = {
-        #             "step": torch.tensor(0),
-        #             "exp_avg": torch.zeros_like(param),
-        #             "exp_avg_sq": torch.zeros_like(param),  # or ones_like if you prefer
-        #         }
-        # for i, (name, param) in enumerate(self.model.named_parameters()):
-        #     # print(name)
-        #     state = self.optimizer.state[param]
-        #     # print("state", state)
-        #     # exit()
-        #     state["exp_avg_sq"].fill_(hyperparams["exp_avg_sqs"][i])
-        #     # state[param] = {
-        #     #     "exp_avg": torch.tensor(0),
-        #     #     "exp_avg_sq": torch.tensor(hyperparams["exp_avg_sqs"][i]),
-        #     #     "step": torch.tensor(0),
-        #     # }
-        # state[param]["exp_avg"] = torch.tensor(0)
-        # state[param]["exp_avg_sq"] = torch.tensor(hyperparams["exp_avg_sqs"][i])
-        # state[param]["step"] = torch.tensor(0)
 
         self.clipper = MODEL.clipper if hasattr(MODEL, "clipper") else None
         self.batch_size = batch_size
@@ -656,14 +640,6 @@ class Trainer:
         if weighted_loss < best_loss:
             best_loss = weighted_loss
             best_w = w
-
-        # print("here opt")
-        state = self.optimizer.state_dict()["state"]
-        exp_avg_sq = []
-        for k, v in state.items():
-            exp_avg_sq.append(v["exp_avg_sq"])
-
-        print("Final exp avg sq", exp_avg_sq)
 
         return best_w
 
@@ -1242,18 +1218,29 @@ def objective(trial, df_list):
     # per-parameter lr
     lrs = []
     for i in range(NUM_FSRS_PARAMS):
-        lr_i = trial.suggest_float(f"lr_{i}", 5e-3, 2e-1, log=True)
+        lr_i = trial.suggest_float(f"lr_{i}", 5e-3, 4e-1, log=True)
+        # lr_i = 4e-2
         lrs.append(lr_i)
 
-    # per-parameter exp_avg_sq - recall that ADAM with default params has beta2 = 0.999, so we help initialize it here
-    exp_avg_sqs = []
-    for i in range(NUM_FSRS_PARAMS):
-        exp_avg_sq_i = trial.suggest_float(f"exp_avg_sq_{i}", 1e-5, 1e2, log=True)
-        exp_avg_sqs.append(exp_avg_sq_i)
+    # betas
+    beta1 = trial.suggest_float(f"beta1", 0.9**10, 0.9 ** (1.0 / 10), log=True)
+    beta2 = trial.suggest_float(f"beta2", 0.7, 0.9999, log=True)
+    beta1s = NUM_FSRS_PARAMS * [beta1]
+    beta2s = NUM_FSRS_PARAMS * [beta2]
+    epsilon = trial.suggest_float(f"eps", 1e-5, 1e-0, log=True)
+    epsilons = NUM_FSRS_PARAMS * [epsilon]
 
+    # beta1s, beta2s = [], []
+    # for i in range(NUM_FSRS_PARAMS):
+    # beta1_i = trial.suggest_float(f"beta1_{i}", 0.85, 0.95, log=True)
+    # beta2_i = trial.suggest_float(f"beta2_{i}", 0.9, 0.9999, log=True)
+    # beta1s.append(beta1_i)
+    # beta2s.append(beta2_i)
     params = {
         "lrs": np.array(lrs),
-        "exp_avg_sqs": np.array(exp_avg_sqs),
+        "beta1s": np.array(beta1s),
+        "beta2s": np.array(beta2s),
+        "epsilons": np.array(epsilons),
     }
     logloss_tot = 0
     size_tot = 0
@@ -1272,9 +1259,13 @@ def objective(trial, df_list):
 
 def get_initial_trial():
     params = {}
+    params["beta1"] = 0.9
+    params["beta2"] = 0.999
+    params["eps"] = 1e-8
     for i in range(NUM_FSRS_PARAMS):
         params[f"lr_{i}"] = 4e-2
-        params[f"exp_avg_sq_{i}"] = 1e-5
+        # params[f"beta1_{i}"] = 0.9
+        # params[f"beta2_{i}"] = 0.999
     print(params)
     return params
 
