@@ -622,6 +622,8 @@ class Trainer:
             if weighted_loss < best_loss:
                 best_loss = weighted_loss
                 best_w = w
+                for name, param in best_w.items():
+                    assert (param >= 0).all(), "best w 1"
             for i, batch in enumerate(self.train_data_loader):
                 self.model.train()
                 self.optimizer.zero_grad()
@@ -637,10 +639,17 @@ class Trainer:
                 self.scheduler.step()
                 if self.clipper:
                     self.model.apply(self.clipper)
+
+                for name, param in self.model.state_dict().items():
+                    assert (param >= 0).all(), "neg weights after clip"
         weighted_loss, w = self.eval()
         if weighted_loss < best_loss:
             best_loss = weighted_loss
             best_w = w
+            for name, param in best_w.items():
+                assert (param >= 0).all(), "best w 2"
+        for name, param in best_w.items():
+            assert (param >= 0).all(), "best w 3"
 
         return best_w
 
@@ -675,7 +684,9 @@ class Trainer:
             self.avg_train_losses.append(losses[0])
             self.avg_eval_losses.append(losses[1])
 
-            w = self.model.state_dict()
+            w = copy.deepcopy(self.model.state_dict())
+            for name, param in self.model.state_dict().items():
+                assert (param >= 0).all(), "neg weights after eval"
 
             weighted_loss = (
                 losses[0] * len(self.train_set) + losses[1] * len(self.test_set)
@@ -1115,6 +1126,10 @@ def process(user_id, dataset, params):
                         hyperparams=params,
                     )
                     partition_weights[partition] = trainer.train()
+                    print("weights", partition_weights[partition])
+                    for name, param in partition_weights[partition].items():
+                        assert (param >= 0).all(), "neg weights after ."
+
             except Exception as e:
                 if str(e).endswith("inadequate."):
                     if verbose_inadequate_data:
@@ -1245,17 +1260,30 @@ def objective(trial, df_list):
     }
     logloss_tot = 0
     size_tot = 0
+    encountered_nan = False
     for df_i, df in enumerate(df_list):
         user = df.iloc[0]["user_id"]
-        stats, raw = process(user, df, params)
-        logloss_tot += stats["metrics"]["LogLoss"] * stats["size"]
-        size_tot += stats["size"]
+        if not encountered_nan:
+            try:
+                stats, raw = process(user, df, params)
+                logloss_tot += stats["metrics"]["LogLoss"] * stats["size"]
+                size_tot += stats["size"]
+            except ValueError as e:
+                print("ValueError encountered. LRs might be too high.")
+                encountered_nan = True
 
-        trial.report(logloss_tot / size_tot, step=df_i)
+        if encountered_nan:
+            trial.report(3.0, step=df_i)
+        else:
+            trial.report(logloss_tot / size_tot, step=df_i)
+
         if trial.should_prune():
             raise optuna.TrialPruned()
 
-    return logloss_tot / size_tot
+    if encountered_nan:
+        return 3.0
+    else:
+        return logloss_tot / size_tot
 
 
 def get_initial_trial():
@@ -1294,9 +1322,36 @@ def worker(df_list):
     print("Done.")
 
 
+TEST_PARAMS = {
+    "lr_0": 0.016177384447800675,
+    "lr_1": 0.1707061273142042,
+    "lr_2": 0.06707101642492873,
+    "lr_3": 0.15430275870041393,
+    "lr_4": 0.02993275032551017,
+    "lr_5": 0.012204786010969916,
+    "lr_6": 0.1675268292405444,
+    "lr_7": 0.39517432783032763,
+    "lr_8": 0.01237788929131578,
+    "lr_9": 0.006107253999689876,
+    "lr_10": 0.1010752152937203,
+    "lr_11": 0.0833382535109321,
+    "lr_12": 0.019452990211649722,
+    "lr_13": 0.006899844322187149,
+    "lr_14": 0.3243853096633517,
+    "lr_15": 0.02129906354817224,
+    "lr_16": 0.09736974913886626,
+    "lr_17": 0.012795033098247408,
+    "lr_18": 0.010609181291426146,
+    "lr_19": 0.17264348274791047,
+    "lr_20": 0.3531538053435248,
+    "beta1": 0.5132884932202296,
+    "beta2": 0.7521293622919385,
+    "eps": 0.0002993057988564082,
+}
+
 if __name__ == "__main__":
     assert MODEL_NAME == "FSRS-6"
-    users = [i for i in range(3, 4)]
+    users = [i for i in range(1, 2)]
 
     df_dict = {}
     with ThreadPoolExecutor() as executor:
@@ -1320,8 +1375,10 @@ if __name__ == "__main__":
         load_if_exists=True,
         pruner=optuna.pruners.HyperbandPruner(),
     )
-    study.enqueue_trial(get_initial_trial())
+    # study.enqueue_trial(get_initial_trial())
+    study.enqueue_trial(TEST_PARAMS)
     optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
+    # worker(df_list)
 
     processes = [Process(target=worker, args=(df_list,)) for _ in range(PROCESSES)]
     for p in processes:
