@@ -1374,6 +1374,7 @@ def run_study():
         pruner=optuna.pruners.HyperbandPruner(),
     )
     study.enqueue_trial(get_initial_params())
+    study.enqueue_trial(DEFAULT_PARAMS)
     optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
     # worker(df_list)
     job_queues = [multiprocessing.Queue() for _ in range(len(users))]
