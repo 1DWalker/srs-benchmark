@@ -29,6 +29,7 @@ from script import cum_concat, remove_non_continuous_rows, remove_outliers, sort
 import pyarrow.parquet as pq  # type: ignore
 from config import create_parser
 from utils import catch_exceptions, rmse_matrix
+import multiprocessing as mp
 
 parser = create_parser()
 args = parser.parse_args()
@@ -111,19 +112,7 @@ max_seq_len: int = 64
 verbose: bool = False
 verbose_inadequate_data: bool = False
 
-FILE_NAME = (
-    MODEL_NAME
-    + ("-dry-run" if DRY_RUN else "")
-    + ("-short" if SHORT_TERM else "")
-    + ("-secs" if SECS_IVL else "")
-    + ("-recency" if RECENCY else "")
-    + ("-no_test_same_day" if NO_TEST_SAME_DAY else "")
-    + ("-no_train_same_day" if NO_TRAIN_SAME_DAY else "")
-    + ("-equalize_test_with_non_secs" if EQUALIZE_TEST_WITH_NON_SECS else "")
-    + ("-train_equals_test" if TRAIN_EQUALS_TEST else "")
-    + ("-" + PARTITIONS if PARTITIONS != "none" else "")
-    + ("-dev" if DEV_MODE else "")
-)
+FILE_NAME = "FSRS-6-recency-finetune"
 OPT_NAME = FILE_NAME + "_opt"
 
 S_MIN = 0.001
@@ -1169,9 +1158,12 @@ def process(user_id, dataset, params):
         save_tmp.to_csv(f"evaluation/{FILE_NAME}/{user_id}.tsv", sep="\t", index=False)
 
     stats, raw = evaluate(y, p, save_tmp, FILE_NAME, user_id, w_list)
-    print(stats)
     return stats, raw
 
+def process_helper(user_id, params):
+    _, dataset = process_user(user_id)
+    result = process(user_id, dataset, params)
+    return result
 
 def evaluate(y, p, df, file_name, user_id, w_list=None):
     if PLOT:
@@ -1281,15 +1273,14 @@ def suggest_params(trial):
     params["eps"] = trial.suggest_float(f"eps", 1e-5, 1e-0, log=True)
     return params
 
-def objective(trial, manager, job_queues):
+def objective(trial, client_queue, job_queues):
     print("start objective")
     params = suggest_params(trial)
     logloss_tot, size_tot = 0, 0
     encountered_nan = False
     for job_i, job_queue in enumerate(job_queues):
-        result_queue = manager.Queue()
-        job_queue.put((params, result_queue))
-        value, size, error = result_queue.get()
+        job_queue.put((params, client_queue))
+        value, size, error = client_queue.get()
         print("jobi, value, size, error", job_i, value, size, error)
         if error:
             encountered_nan = True
@@ -1310,15 +1301,69 @@ def objective(trial, manager, job_queues):
     else:
         return logloss_tot / size_tot
 
+
 STUDY_NAME = "tune_fsrs_study"
 STORAGE_NAME = "sqlite:///tune_fsrs.db"
 
-if __name__ == "__main__":
-    assert MODEL_NAME == "FSRS-6"
-    users = [i for i in range(1, 4)]  
-    # users.remove(9000) 
-    # users.remove(9013)
+def client_objective(client_queue, job_queues):
+    study = optuna.load_study(
+        study_name=STUDY_NAME, storage=STORAGE_NAME
+    )
+    def wrapped_objective(trial):
+        return objective(trial, client_queue, job_queues)
+    study.optimize(wrapped_objective, n_trials=50)
 
+DEFAULT_PARAMS = {
+    "lr_0": 0.04232526353285015,
+    "lr_1": 0.018071402315090596,
+    "lr_2": 0.03696240120421783,
+    "lr_3": 0.36841601454236467,
+    "lr_4": 0.018598660732186002,
+    "lr_5": 0.10558528010073817,
+    "lr_6": 0.07879291986536108,
+    "lr_7": 0.011903823247578839,
+    "lr_8": 0.2719418212045639,
+    "lr_9": 0.0348359305634087,
+    "lr_10": 0.19330382206116,
+    "lr_11": 0.22833436339206423,
+    "lr_12": 0.16231466982357884,
+    "lr_13": 0.10465332655521999,
+    "lr_14": 0.3771611557849378,
+    "lr_15": 0.01026903032179946,
+    "lr_16": 0.1727116013790487,
+    "lr_17": 0.08916834244799876,
+    "lr_18": 0.07179382712871524,
+    "lr_19": 0.016634894837644184,
+    "lr_20": 0.02750637304588124,
+    "beta1": 0.4816029833277879,
+    "beta2": 0.7150904771090394,
+    "eps": 0.13578469413257385
+}
+
+def run_study():
+    print("Setting n_splits to 2.")
+    global n_splits
+    n_splits = 2
+
+    assert MODEL_NAME == "FSRS-6"
+    # users = [i for i in range(1, 4)]  
+    # users = [9000]  
+    users = [9001, 9002, 9004, 9007, 9008, 9009, 9010, 9011, 9014, 9015, 9016, 9017, 9018, 9019, 9020, 9022, 9023, 9025, 9026, 9027, 9028, 9029, 9030, 9032, 9034, 9035, 9036, 9037, 9038, 9039, 9040, 9041, 9042, 9043, 9044, 9045, 9046, 9047, 9049, 9050, 9051, 9052, 9053, 9054, 9056, 9060, 9061, 9062, 9063, 9065, 9066, 9067, 9068, 9069, 9070, 9071, 9072, 9073, 9074, 9075, 9077, 9078, 9079, 9080, 9081, 9082, 9083, 9085, 9088, 9089, 9090, 9091, 9092, 9093, 9094, 9096, 9097, 9098, 9099]
+    users = users[:20]
+    print("Number of users:", len(users))
+    # exit()
+    # accept = []
+    # for user_id in range(9000, 9100):
+    #     _, dataset = process_user(user_id)
+    #     print(user_id, len(dataset))
+    #     if len(dataset) <= 50000:
+    #         print("accept", user_id)
+    #         accept.append(user_id)
+    #         print(np.array(accept))
+    #         print(accept)
+
+    # exit()
+    
     df_dict = {}
 
     study = optuna.create_study(
@@ -1338,14 +1383,76 @@ if __name__ == "__main__":
     for p in job_processes:
         p.start()
 
-    print("starting objective")
+    print("Use the following commands to visualize the run.")
+    print("pip install optuna-dashboard")
+    print(f"optuna-dashboard {STORAGE_NAME}")
     with Manager() as manager:
-        def optuna_objective(trial):
-            return objective(trial, manager, job_queues)
-        study.optimize(optuna_objective, n_trials=3, n_jobs=4)
+        client_queues = [manager.Queue() for _ in range(PROCESSES)]
+        client_processes = [Process(target=client_objective, args=(client_queue, job_queues)) for client_queue in client_queues]
+        for p in client_processes:
+            p.start()
+        for p in client_processes:
+            p.join()
 
     for job_queue in job_queues:
         job_queue.put(None)
     for p in job_processes:
         p.join()
 
+def get_result():
+    mp.set_start_method("spawn", force=True)
+    unprocessed_users = []
+    dataset = pq.ParquetDataset(DATA_PATH / "revlogs")
+    Path(f"evaluation/{FILE_NAME}").mkdir(parents=True, exist_ok=True)
+    Path("result").mkdir(parents=True, exist_ok=True)
+    Path("raw").mkdir(parents=True, exist_ok=True)
+    result_file = Path(f"result/{FILE_NAME}.jsonl")
+    raw_file = Path(f"raw/{FILE_NAME}.jsonl")
+    if result_file.exists():
+        data = sort_jsonl(result_file)
+        processed_user = set(map(lambda x: x["user"], data))
+    else:
+        processed_user = set()
+
+    if RAW and raw_file.exists():
+        sort_jsonl(raw_file)
+
+    for user_id in dataset.partitioning.dictionaries[0]:
+        if user_id.as_py() in processed_user:
+            continue
+        unprocessed_users.append(user_id.as_py())
+
+    unprocessed_users.sort()
+
+    with ProcessPoolExecutor(max_workers=PROCESSES) as executor:
+        futures = [
+            executor.submit(
+                process_helper,
+                user_id, 
+                DEFAULT_PARAMS
+            )
+            for user_id in unprocessed_users
+        ]
+        for future in (
+            pbar := tqdm(as_completed(futures), total=len(futures), smoothing=0.03)
+        ):
+            try:
+                result = future.result()
+                print(result)
+                stats, raw = result
+                with open(result_file, "a") as f:
+                    f.write(json.dumps(stats, ensure_ascii=False) + "\n")
+                if raw:
+                    with open(raw_file, "a") as f:
+                        f.write(json.dumps(raw, ensure_ascii=False) + "\n")
+                pbar.set_description(f"Processed {stats['user']}")
+            except Exception as e:
+                tqdm.write(str(e))
+
+    sort_jsonl(result_file)
+    if RAW:
+        sort_jsonl(raw_file)
+
+if __name__ == "__main__":
+    run_study()
+    # get_result()
