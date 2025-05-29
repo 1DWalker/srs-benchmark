@@ -472,7 +472,12 @@ def extract_p(stats: SrsRWKVIterStatistics):
     p_curves = stats.p_curve.squeeze(0).cpu().numpy()
     p_imms = stats.p_imm.squeeze(0).cpu().numpy()
     p_imm_alls = stats.p_imm_all.squeeze(0).cpu().numpy()
-    ws = stats.w.squeeze(0).cpu()
+    w_cpu = stats.w.squeeze(0).cpu()
+    ws = []
+
+    for i in range(len(is_querys)):
+        if is_querys[i] == 0:
+            ws.append(w_cpu[i])
 
     for i in range(len(label_review_ths)):
         label_review_th = label_review_ths[i]

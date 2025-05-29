@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import log_loss, roc_auc_score, root_mean_squared_error
 import torch
+from full_db_config import FULL_DB_PATH, FULL_DB_SIZE
 from rwkv.architecture import DEFAULT_ANKI_RWKV_CONFIG
 from rwkv.data_fetcher import DataFetcher
 from rwkv.model.srs_model import SrsRWKV, extract_p
@@ -213,7 +214,7 @@ def run(
                         **dict_stats.label_elapsed_seconds,
                     }
                     imm_ps_all = {**imm_ps_all, **dict_stats.imm_ps_all}
-                    w_list.append(dict_stats.w)
+                    w_list.extend(dict_stats.w)
                     if len(dict_stats.label_ratings) > 300000:
                         print("Emptying cache.")
                         torch.cuda.empty_cache()
@@ -260,15 +261,22 @@ def run(
 
             write(ahead_stats, ahead_users_result, ahead_path_result)
             write(imm_stats, imm_users_result, imm_path_result)
-            if config.RAW:
-                db = lmdb.open(config.RAW_DB_PATH, map_size=config.RAW_DB_SIZE)
-                w_tensor = torch.cat(w_list, dim=0)
-                w_equalized = w_tensor[equalize_review_ths]
-                with db.begin(write=True) as txn:
-                    save_tensor(txn, f"{user_id}_w", w_equalized)
 
-                write(ahead_raw, ahead_users_raw, ahead_path_raw)
-                write(imm_raw, imm_users_raw, imm_path_raw)
+
+            if config.RAW:
+                w_tensor = torch.stack(w_list, dim=0)
+                db = lmdb.open(FULL_DB_PATH, FULL_DB_SIZE)
+                with db.begin(write=True) as txn:
+                    save_tensor(txn, f"{user_id}_RWKV_w", w_tensor)
+                print("Saved raw.")
+
+                # db = lmdb.open(config.RAW_DB_PATH, map_size=config.RAW_DB_SIZE)
+                # w_equalized = w_tensor[equalize_review_ths]
+                # with db.begin(write=True) as txn:
+                #     save_tensor(txn, f"{user_id}_w", w_equalized)
+
+                # write(ahead_raw, ahead_users_raw, ahead_path_raw)
+                # write(imm_raw, imm_users_raw, imm_path_raw)
 
 
 def sort_jsonl(file):
