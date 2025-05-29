@@ -26,6 +26,9 @@ def rwkv_forgetting_curve(label_elapsed_seconds, w):
 
 @torch.inference_mode()
 def main():
+    print("Setting random seed.")
+    random.seed(123)
+
     user_id = 1
     env = lmdb.open(FULL_DB_PATH, readonly=True, lock=False)
     # info = env.info()
@@ -72,7 +75,7 @@ def main():
         possible_card_ids = [x for x in possible_card_ids if len(card_id_locs[x]) > 3]
         random.shuffle(possible_card_ids)
 
-        possible_card_ids = [2379] * 100
+        # possible_card_ids = [2379] * 100
 
         for card_id in possible_card_ids[:10]:
             print("Running", card_id)
@@ -83,11 +86,11 @@ def main():
             for i in locs:
                 tot_time_seconds += elapsed_seconds_list[i]
                 cumulative_seconds.append(tot_time_seconds)
-                print(i, fsrs_s[i], fsrs_decay[i], elapsed_seconds_list[i] / 86400, ys[i])
+                # print(i, fsrs_s[i], fsrs_decay[i], elapsed_seconds_list[i] / 86400, ys[i])
 
             cumulative_seconds = np.array(cumulative_seconds)
 
-            t_space = list(np.linspace(1, tot_time_seconds * 1.3, num=300))
+            t_space = list(np.linspace(1, tot_time_seconds * 1.3, num=1000))
             # Add some extra values so RWKV's instant forgetting will appear & lapses aren't skipped
             for t in cumulative_seconds:
                 if t - 0.01 > 1e-5:
@@ -97,31 +100,53 @@ def main():
             t_space.sort()
             t_space = np.array(t_space)
 
-            fsrs_p = []
-            rwkv_p = []
-            for t_i, t in enumerate(t_space):
-                cum_i = 0
-                while cum_i < len(cumulative_seconds) and t > cumulative_seconds[cum_i]:
-                    cum_i += 1
-                cum_i -= 1
-                i = locs[cum_i]
-                fsrs_p.append(fsrs6_forgetting_curve((t - cumulative_seconds[cum_i]) / 86400, fsrs_s[i], fsrs_decay[i]))
-                rwkv_p.append(rwkv_forgetting_curve(torch.tensor(t - cumulative_seconds[cum_i]), rwkv_w[i]))
+            curve_spaces = []
+            fsrs_subcurves = []
+            rwkv_subcurves = []
+            # fsrs_p = []
+            # rwkv_p = []
+            tot = 0
+            for cum_i in range(len(cumulative_seconds)):
+                space_subcurve = []
+                fsrs_subcurve = []
+                rwkv_subcurve = []
+                for t_i, t in enumerate(t_space):
+                    if t >= cumulative_seconds[cum_i] and (cum_i == len(cumulative_seconds) - 1 or cumulative_seconds[cum_i + 1] > t):
+                        tot += 1
+                        i = locs[cum_i]
+                        space_subcurve.append(t)
+                        fsrs_subcurve.append(fsrs6_forgetting_curve((t - cumulative_seconds[cum_i]) / 86400, fsrs_s[i], fsrs_decay[i]))
+                        rwkv_subcurve.append(rwkv_forgetting_curve(torch.tensor(t - cumulative_seconds[cum_i]), rwkv_w[i]))
+                
+                curve_spaces.append(np.array(space_subcurve))
+                fsrs_subcurves.append(np.array(fsrs_subcurve))
+                rwkv_subcurves.append(np.array(rwkv_subcurve))
+            assert tot == len(t_space)
 
-            # Create the plot
             plt.clf()
-            plt.plot(t_space / 86400, fsrs_p, label='FSRS-6-recency')
-            plt.plot(t_space / 86400, rwkv_p, label='RWKV')
+            plt.figure(figsize=(12, 4))
+            # Create the plot
+            for curve_i, (curve_space, fsrs_subcurve, rwkv_subcurve) in enumerate(zip(curve_spaces, fsrs_subcurves, rwkv_subcurves)):
+                FSRS_COLOR = '#1f77b4' 
+                RWKV_COLOR = '#ff7f0e'
+                if curve_i == 0:
+                    plt.plot(curve_space / 86400, fsrs_subcurve, label='FSRS-6-recency', color=FSRS_COLOR)
+                    plt.plot(curve_space / 86400, rwkv_subcurve, label='RWKV', color=RWKV_COLOR)
+                else:
+                    # No label to avoid duplicates in the legend
+                    plt.plot(curve_space / 86400, fsrs_subcurve, color=FSRS_COLOR)
+                    plt.plot(curve_space / 86400, rwkv_subcurve, color=RWKV_COLOR)
+
             for i, review_time_seconds in zip(locs[1:], cumulative_seconds[1:]):
                 # Require half a day
                 if elapsed_seconds_list[i] < 60*60*12:
                     continue
                 color = 'r' if ys[i] == 0 else 'g'
-                print(i, ys[i], color)
                 plt.axvline(x=review_time_seconds / 86400, color=color, linestyle='--')
 
 
             # Add labels and title
+            plt.ylim(top=1.0)
             plt.xlabel('Days')
             plt.ylabel('R')
             plt.title(f'predicted R vs time. User: {user_id}, Card_id: {card_id}')
@@ -130,9 +155,10 @@ def main():
             plt.legend()
 
             # Show the plot
-            plt.show()
-            exit()
-            # plt.savefig(f'plots/forgetting-curves/{user_id}_{card_id}.png', dpi=600)
+            # plt.show()
+            plt.savefig(f'plots/forgetting-curves/{user_id}_{card_id}.png', dpi=600, bbox_inches='tight')
+            print("Saved.")
+            # exit()
 
 if __name__ == '__main__':
     main()
