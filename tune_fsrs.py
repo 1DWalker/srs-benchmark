@@ -294,11 +294,12 @@ class FSRS(nn.Module):
                 item[1] for item in sorted(rating_stability.items(), key=lambda x: x[0])
             ]
         stabilities = list(map(lambda x: max(min(INIT_S_MAX, x), S_MIN), init_s0))
-        for i in range(4):
-            self.w_params[i].data = torch.tensor(
-                stabilities[i], dtype=torch.float, device=DEVICE
-            )
-        self.init_w_tensor = torch.stack(list(self.w_params)).clone().to(DEVICE)
+        with torch.no_grad():
+            for i in range(4):
+                self.w_params[i].data = torch.tensor(
+                    stabilities[i], dtype=torch.float32, device=DEVICE
+                )
+            self.init_w_tensor = torch.stack(list(self.w_params)).clone().to(DEVICE)
 
 
 class FSRS6ParameterClipper:
@@ -391,7 +392,7 @@ class FSRS6(FSRS):
         super(FSRS6, self).__init__()
         self.w_params = torch.nn.ParameterList(
             [
-                torch.tensor(w[i], dtype=torch.float, requires_grad=True)
+                torch.tensor(w[i], dtype=torch.float32, requires_grad=True)
                 for i in range(len(w))
             ]
         )
@@ -1092,29 +1093,18 @@ def process(user_id, dataset, params):
                     partition_weights[partition] = model.state_dict()
                     continue
 
-                if MODEL_NAME == "LSTM":
-                    model = model.to(DEVICE)
-                    inner_opt = get_inner_opt(
-                        model.parameters(), path=f"./pretrain/{OPT_NAME}_pretrain.pth"
-                    )
-                    trained_model = finetune(
-                        train_partition, model, inner_opt.state_dict()
-                    )
-                    partition_weights[partition] = copy.deepcopy(
-                        trained_model.state_dict()
-                    )
-                else:
-                    trainer = Trainer(
-                        model,
-                        train_partition,
-                        None,
-                        n_epoch=model.n_epoch,
-                        lr=model.lr,
-                        wd=model.wd,
-                        batch_size=batch_size,
-                        hyperparams=params_transformed,
-                    )
-                    partition_weights[partition] = trainer.train()
+                trainer = Trainer(
+                    model,
+                    train_partition,
+                    None,
+                    n_epoch=model.n_epoch,
+                    lr=model.lr,
+                    wd=model.wd,
+                    batch_size=batch_size,
+                    hyperparams=params_transformed,
+                )
+                partition_weights[partition] = trainer.train()
+                print(partition_weights[partition])
             except Exception as e:
                 if str(e).endswith("inadequate."):
                     if verbose_inadequate_data:
@@ -1314,31 +1304,12 @@ def client_objective(client_queue, job_queues):
     study.optimize(wrapped_objective, n_trials=50)
 
 DEFAULT_PARAMS = {
-    "lr_0": 0.04232526353285015,
-    "lr_1": 0.018071402315090596,
-    "lr_2": 0.03696240120421783,
-    "lr_3": 0.36841601454236467,
-    "lr_4": 0.018598660732186002,
-    "lr_5": 0.10558528010073817,
-    "lr_6": 0.07879291986536108,
-    "lr_7": 0.011903823247578839,
-    "lr_8": 0.2719418212045639,
-    "lr_9": 0.0348359305634087,
-    "lr_10": 0.19330382206116,
-    "lr_11": 0.22833436339206423,
-    "lr_12": 0.16231466982357884,
-    "lr_13": 0.10465332655521999,
-    "lr_14": 0.3771611557849378,
-    "lr_15": 0.01026903032179946,
-    "lr_16": 0.1727116013790487,
-    "lr_17": 0.08916834244799876,
-    "lr_18": 0.07179382712871524,
-    "lr_19": 0.016634894837644184,
-    "lr_20": 0.02750637304588124,
-    "beta1": 0.4816029833277879,
-    "beta2": 0.7150904771090394,
-    "eps": 0.13578469413257385
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "eps": 1e-8,
 }
+for i in range(21):
+    DEFAULT_PARAMS[f"lr_{i}"] = 4e-2
 
 def run_study():
     print("Setting n_splits to 2.")
@@ -1424,6 +1395,7 @@ def get_result():
         unprocessed_users.append(user_id.as_py())
 
     unprocessed_users.sort()
+    unprocessed_users = [1]
 
     with ProcessPoolExecutor(max_workers=PROCESSES) as executor:
         futures = [
@@ -1455,5 +1427,5 @@ def get_result():
         sort_jsonl(raw_file)
 
 if __name__ == "__main__":
-    run_study()
-    # get_result()
+    # run_study()
+    get_result()
