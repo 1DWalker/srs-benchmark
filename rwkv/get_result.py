@@ -195,6 +195,7 @@ def run(
             label_elapsed_seconds = {}
             imm_ps_all = {}
             w_list = []
+            ahead_logits_list = []
             for batch_i, batch in enumerate(batches):
                 print("batch_i, batch:", batch_i, batch)
                 batch = data_fetcher.get(f"validate-{user_id}-{batch_i}")
@@ -215,6 +216,7 @@ def run(
                     }
                     imm_ps_all = {**imm_ps_all, **dict_stats.imm_ps_all}
                     w_list.extend(dict_stats.w)
+                    ahead_logits_list.extend(dict_stats.ahead_logits)
                     if len(dict_stats.label_ratings) > 300000:
                         print("Emptying cache.")
                         torch.cuda.empty_cache()
@@ -265,9 +267,11 @@ def run(
 
             if config.RAW:
                 w_tensor = torch.stack(w_list, dim=0)
+                ahead_logits_tensor = torch.stack(ahead_logits_list, dim=0)
                 db = lmdb.open(FULL_DB_PATH, FULL_DB_SIZE)
                 with db.begin(write=True) as txn:
                     save_tensor(txn, f"{user_id}_RWKV_w", w_tensor)
+                    save_tensor(txn, f"{user_id}_RWKV_ahead_logits", ahead_logits_tensor)
                 print("Saved raw.")
 
                 # db = lmdb.open(config.RAW_DB_PATH, map_size=config.RAW_DB_SIZE)

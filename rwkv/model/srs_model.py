@@ -42,6 +42,7 @@ class SrsRWKVIterStatistics(NamedTuple):
     p_imm: torch.Tensor
     p_imm_all: torch.Tensor
     w: torch.Tensor
+    ahead_logits: torch.Tensor
     label_rating: torch.Tensor
     label_elapsed_seconds: torch.Tensor
     label_review_th: torch.Tensor
@@ -402,6 +403,7 @@ class SrsRWKV(ModuleType):
             ahead_logits_mag_loss_avg=ahead_logits_mag_avg.detach(),
             ahead_logits_diff_loss_avg=ahead_logits_diff_avg.detach(),
             w=out_w.detach(),
+            ahead_logits=out_ahead_logits.detach(),
             label_review_th=batch_label_review_th.detach(),
             label_elapsed_seconds=label_elapsed_seconds.detach(),
             label_rating=label_rating.detach(),
@@ -452,7 +454,8 @@ class AnkiRWKVDictStatistics:
     imm_ps_all: dict
     label_ratings: dict[int, float]
     label_elapsed_seconds: dict[int, float]
-    w: dict
+    w: list
+    ahead_logits: list
 
 
 def extract_p(stats: SrsRWKVIterStatistics):
@@ -473,11 +476,14 @@ def extract_p(stats: SrsRWKVIterStatistics):
     p_imms = stats.p_imm.squeeze(0).cpu().numpy()
     p_imm_alls = stats.p_imm_all.squeeze(0).cpu().numpy()
     w_cpu = stats.w.squeeze(0).cpu()
+    ahead_logits_cpu = stats.ahead_logits.squeeze(0).cpu()
     ws = []
+    ahead_logits_list = []
 
     for i in range(len(is_querys)):
         if is_querys[i] == 0:
             ws.append(w_cpu[i])
+            ahead_logits_list.append(ahead_logits_cpu[i])
 
     for i in range(len(label_review_ths)):
         label_review_th = label_review_ths[i]
@@ -504,6 +510,7 @@ def extract_p(stats: SrsRWKVIterStatistics):
         label_ratings=label_ratings_dict,
         label_elapsed_seconds=label_elapsed_seconds_dict,
         w=ws,
+        ahead_logits=ahead_logits_list
     )
 
 

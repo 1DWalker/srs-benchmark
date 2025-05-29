@@ -11,7 +11,7 @@ def fsrs6_forgetting_curve(t, s, decay):
     factor = 0.9 ** (1 / -decay) - 1
     return (1 + factor * t / s) ** -decay
 
-def rwkv_forgetting_curve(label_elapsed_seconds, w):
+def rwkv_raw_forgetting_curve(label_elapsed_seconds, w):
     num_curves = 128
     s_point_spread = 18.5
     s_max = 22
@@ -24,6 +24,43 @@ def rwkv_forgetting_curve(label_elapsed_seconds, w):
         w * 0.9 ** (label_elapsed_seconds / s_space), dim=-1
     )
 
+def rwkv_forgetting_curve(label_elapsed_seconds, w, out_ahead_logits):
+    label_elapsed_seconds = label_elapsed_seconds.unsqueeze(0).unsqueeze(0)
+    w = w.unsqueeze(0)
+    out_ahead_logits = out_ahead_logits.unsqueeze(0)
+    def interp(out_ahead_logits, label_elapsed_seconds):
+        label_elapsed_seconds = torch.clamp(label_elapsed_seconds.contiguous(), min=1)
+        max_e = 21
+        point_spread = 18.5
+        num_points = 128
+        point_space_raw = torch.exp(
+            torch.linspace(
+                0, point_spread, num_points, device=out_ahead_logits.device
+            )
+        )
+        point_space = 0.5 + (point_space_raw - 1) * (
+            np.e ** (max_e - point_spread)
+        )
+        right_idx = torch.searchsorted(point_space, label_elapsed_seconds)
+        left_idx = torch.clamp(right_idx - 1, min=0)
+        xl, xr = point_space[left_idx], point_space[right_idx]
+        yl = torch.gather(out_ahead_logits, dim=-1, index=left_idx)
+        yr = torch.gather(out_ahead_logits, dim=-1, index=right_idx)
+        res = 1e-5 + (1 - 2 * 1e-5) * (
+            yl + (yr - yl) * (label_elapsed_seconds - xl) / (xr - xl)
+        )
+        return res
+
+    curve_probs_raw = rwkv_raw_forgetting_curve(label_elapsed_seconds, w)
+    curve_logits_raw = torch.log(
+        curve_probs_raw / (1 - curve_probs_raw)
+    )  # inverse sigmoid
+    ahead_logit_residual = interp(out_ahead_logits, label_elapsed_seconds)
+    curve_logits = curve_logits_raw + ahead_logit_residual
+    return torch.sigmoid(curve_logits).item()
+
+
+
 @torch.inference_mode()
 def main():
     # transfer_lmdb("full_db", "full_db_2")
@@ -31,13 +68,14 @@ def main():
     print("Setting random seed.")
     random.seed(123)
 
-    user_id = 15
+    user_id = 11
     env = lmdb.open(FULL_DB_PATH, readonly=True, lock=False)
     print_env_size(env)
 
     with env.begin() as txn:
         print("start")
         rwkv_w = load_tensor(txn, f"{user_id}_RWKV_w", device=torch.device("cpu"))
+        rwkv_ahead_logits = load_tensor(txn, f"{user_id}_RWKV_ahead_logits", device=torch.device("cpu"))
         fsrs_s = load_tensor(txn, f"{user_id}_FSRS-6-recency_s", device=torch.device("cpu")).numpy()
         fsrs_decay = load_tensor(txn, f"{user_id}_FSRS-6-recency_decay", device=torch.device("cpu")).numpy()
         card_ids = load_tensor(txn, f"{user_id}_card_id", device=torch.device("cpu")).numpy()
@@ -70,7 +108,7 @@ def main():
 
         # possible_card_ids = [7372] * 100
 
-        for card_id in possible_card_ids[:10]:
+        for card_id in possible_card_ids[:20]:
             print("Running", card_id)
 
             locs = card_id_locs[card_id]
@@ -95,6 +133,7 @@ def main():
 
             curve_spaces = []
             fsrs_subcurves = []
+            rwkv_raw_subcurves = []
             rwkv_subcurves = []
             # fsrs_p = []
             # rwkv_p = []
@@ -102,6 +141,7 @@ def main():
             for cum_i in range(len(cumulative_seconds)):
                 space_subcurve = []
                 fsrs_subcurve = []
+                rwkv_raw_subcurve = []
                 rwkv_subcurve = []
                 for t_i, t in enumerate(t_space):
                     if t >= cumulative_seconds[cum_i] and (cum_i == len(cumulative_seconds) - 1 or cumulative_seconds[cum_i + 1] > t):
@@ -109,24 +149,29 @@ def main():
                         i = locs[cum_i]
                         space_subcurve.append(t)
                         fsrs_subcurve.append(fsrs6_forgetting_curve((t - cumulative_seconds[cum_i]) / 86400, fsrs_s[i], fsrs_decay[i]))
-                        rwkv_subcurve.append(rwkv_forgetting_curve(torch.tensor(t - cumulative_seconds[cum_i]), rwkv_w[i]))
+                        rwkv_raw_subcurve.append(rwkv_raw_forgetting_curve(torch.tensor(t - cumulative_seconds[cum_i]), rwkv_w[i]))
+                        rwkv_subcurve.append(rwkv_forgetting_curve(torch.tensor(t - cumulative_seconds[cum_i]), rwkv_w[i], rwkv_ahead_logits[i]))
                 
                 curve_spaces.append(np.array(space_subcurve))
                 fsrs_subcurves.append(np.array(fsrs_subcurve))
+                rwkv_raw_subcurves.append(np.array(rwkv_raw_subcurve))
                 rwkv_subcurves.append(np.array(rwkv_subcurve))
             assert tot == len(t_space)
 
             plt.clf()
             plt.figure(figsize=(12, 4))
             # Create the plot
-            for curve_i, (curve_space, fsrs_subcurve, rwkv_subcurve) in enumerate(zip(curve_spaces, fsrs_subcurves, rwkv_subcurves)):
+            for curve_i, (curve_space, fsrs_subcurve, rwkv_raw_subcurve, rwkv_subcurve) in enumerate(zip(curve_spaces, fsrs_subcurves, rwkv_raw_subcurves, rwkv_subcurves)):
                 FSRS_COLOR = '#1f77b4' 
-                RWKV_COLOR = '#ff7f0e'
+                RWKV_RAW_COLOR = '#ff7f0e'
+                RWKV_COLOR = '#2ca02c'
                 if curve_i == 0:
+                    plt.plot(curve_space / 86400, rwkv_raw_subcurve, label='RWKV-raw', color=RWKV_RAW_COLOR)
                     plt.plot(curve_space / 86400, rwkv_subcurve, label='RWKV', color=RWKV_COLOR)
                     plt.plot(curve_space / 86400, fsrs_subcurve, label='FSRS-6-recency', color=FSRS_COLOR)
                 else:
                     # No label to avoid duplicates in the legend
+                    plt.plot(curve_space / 86400, rwkv_raw_subcurve, color=RWKV_RAW_COLOR)
                     plt.plot(curve_space / 86400, rwkv_subcurve, color=RWKV_COLOR)
                     plt.plot(curve_space / 86400, fsrs_subcurve, color=FSRS_COLOR)
 
