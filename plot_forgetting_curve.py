@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from full_db_config import FULL_DB_PATH
-from utils import load_tensor, print_env_size
+from utils import load_tensor, print_env_size, transfer_lmdb
 
 def fsrs6_forgetting_curve(t, s, decay):
     factor = 0.9 ** (1 / -decay) - 1
@@ -26,6 +26,8 @@ def rwkv_forgetting_curve(label_elapsed_seconds, w):
 
 @torch.inference_mode()
 def main():
+    # transfer_lmdb("full_db", "full_db_2")
+    # exit()
     print("Setting random seed.")
     random.seed(123)
 
@@ -66,7 +68,7 @@ def main():
         possible_card_ids = [x for x in possible_card_ids if len(card_id_locs[x]) > 3]
         random.shuffle(possible_card_ids)
 
-        possible_card_ids = [7372] * 100
+        # possible_card_ids = [7372] * 100
 
         for card_id in possible_card_ids[:10]:
             print("Running", card_id)
