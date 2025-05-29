@@ -3483,7 +3483,7 @@ def process(user_id):
     y = dataset_full["y"].to_numpy()
     card_id = dataset_full["card_id"].to_numpy()
     elapsed_seconds = dataset_full["elapsed_seconds"].to_numpy()
-    index_next_review = dataset_full["review_th"].shift(-1).fillna(-1)
+    same_day_review = (dataset_full["elapsed_days"] == 0).to_numpy()
 
     for i, (w, testset) in enumerate(zip(w_list, testsets)):
         weights = w.get(partition, None)
@@ -3491,18 +3491,14 @@ def process(user_id):
         _, stabilities, difficulties, decays = my_collection.batch_predict(
             testset
         )
-        if stabilities:
-            testset["s"] = stabilities
-        if difficulties:
-            testset["d"] = difficulties
         s[testset["review_th"].to_numpy() - 1] = stabilities
         decay_list[testset["review_th"].to_numpy() - 1] = decays
-    return user_id, s, decay_list, y, card_id, elapsed_seconds, index_next_review
+    return user_id, s, decay_list, y, card_id, elapsed_seconds, same_day_review
 
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
-    unprocessed_users = [1]
+    unprocessed_users = list(range(1, 21))
     env = lmdb.open(FULL_DB_PATH, FULL_DB_SIZE)
 
     with ProcessPoolExecutor(max_workers=PROCESSES) as executor:
@@ -3522,17 +3518,16 @@ if __name__ == "__main__":
                     tqdm.write(error)
                 else:
                     if "FSRS" in MODEL_NAME:
-                        user_id, s, decays, y, card_id, elapsed_seconds, index_next_review = result
+                        user_id, s, decays, y, card_id, elapsed_seconds, same_day_review = result
                         with env.begin(write=True) as txn:
                             save_tensor(txn, f"{user_id}_{FILE_NAME}_s", torch.tensor(s))
                             save_tensor(txn, f"{user_id}_{FILE_NAME}_decay", torch.tensor(decays))
                             save_tensor(txn, f"{user_id}_y", torch.tensor(y))
                             save_tensor(txn, f"{user_id}_card_id", torch.tensor(card_id))
                             save_tensor(txn, f"{user_id}_elapsed_seconds", torch.tensor(elapsed_seconds))
-                            save_tensor(txn, f"{user_id}_index_next_review", torch.tensor(index_next_review))
+                            save_tensor(txn, f"{user_id}_same_day_review", torch.tensor(same_day_review))
                         pbar.set_description(f"Processed {user_id}")
                     else:
                         raise ValueError(f"{MODEL_NAME} not supported.")
-
             except Exception as e:
                 tqdm.write(str(e))
