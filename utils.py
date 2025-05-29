@@ -1,4 +1,5 @@
 from io import BytesIO
+import lmdb
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import root_mean_squared_error  # type: ignore
@@ -137,3 +138,23 @@ def save_tensor(txn, key, tensor):
     buffer = BytesIO()
     torch.save(tensor, buffer)
     txn.put(key.encode(), buffer.getvalue())
+
+def print_env_size(env):
+    info = env.info()
+    stat = env.stat()
+
+    allocated_space = info['map_size']  # in bytes
+    used_space = (info['last_pgno'] + 1) * stat['psize']  # in bytes
+
+    print(f"Allocated space: {allocated_space / (1024**2):.2f} MB")
+    print(f"Used space: {used_space / (1024**2):.2f} MB")
+
+def transfer_lmdb(src_path, dst_path):
+    """Useful for compacting the db"""
+    with lmdb.open(src_path, readonly=True, lock=False) as src_env:
+        with lmdb.open(dst_path, map_size=src_env.info()['map_size']) as dst_env:
+            with src_env.begin() as src_txn:
+                with dst_env.begin(write=True) as dst_txn:
+                    cursor = src_txn.cursor()
+                    for key, value in cursor:
+                        dst_txn.put(key, value)
