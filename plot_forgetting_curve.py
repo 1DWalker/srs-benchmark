@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from full_db_config import FULL_DB_PATH
-from utils import load_tensor
+from utils import load_tensor, print_env_size
 
 def fsrs6_forgetting_curve(t, s, decay):
     factor = 0.9 ** (1 / -decay) - 1
@@ -19,7 +19,7 @@ def rwkv_forgetting_curve(label_elapsed_seconds, w):
         torch.linspace(0, s_point_spread, num_curves, device=w.device)
     )
     s_space = 0.1 + (s_space_raw - 1) * (np.e ** (s_max - s_point_spread))
-    label_elapsed_seconds = torch.max(torch.tensor(1.0), label_elapsed_seconds)
+    label_elapsed_seconds = torch.max(torch.tensor(0.001), label_elapsed_seconds)
     return 1e-5 + (1 - 2 * 1e-5) * torch.sum(
         w * 0.9 ** (label_elapsed_seconds / s_space), dim=-1
     )
@@ -29,19 +29,9 @@ def main():
     print("Setting random seed.")
     random.seed(123)
 
-    user_id = 1
+    user_id = 15
     env = lmdb.open(FULL_DB_PATH, readonly=True, lock=False)
-    # info = env.info()
-    # stat = env.stat()
-
-    # allocated_space = info['map_size']  # in bytes
-    # used_space = (info['last_pgno'] + 1) * stat['psize']  # in bytes
-
-    # print(f"Allocated space: {allocated_space / (1024**2):.2f} MB")
-    # print(f"Used space: {used_space / (1024**2):.2f} MB")
-
-    # env.close()
-    # exit()
+    print_env_size(env)
 
     with env.begin() as txn:
         print("start")
@@ -51,6 +41,7 @@ def main():
         card_ids = load_tensor(txn, f"{user_id}_card_id", device=torch.device("cpu")).numpy()
         ys = load_tensor(txn, f"{user_id}_y", device=torch.device("cpu")).numpy()
         elapsed_seconds_list = load_tensor(txn, f"{user_id}_elapsed_seconds", device=torch.device("cpu")).numpy()
+        same_day_review = load_tensor(txn, f"{user_id}_same_day_review", device=torch.device("cpu")).numpy()
         card_id_locs = {}
         for i, card_id in enumerate(card_ids):
             if fsrs_s[i] != -1:
@@ -75,7 +66,7 @@ def main():
         possible_card_ids = [x for x in possible_card_ids if len(card_id_locs[x]) > 3]
         random.shuffle(possible_card_ids)
 
-        # possible_card_ids = [2379] * 100
+        possible_card_ids = [7372] * 100
 
         for card_id in possible_card_ids[:10]:
             print("Running", card_id)
@@ -90,7 +81,7 @@ def main():
 
             cumulative_seconds = np.array(cumulative_seconds)
 
-            t_space = list(np.linspace(1, tot_time_seconds * 1.3, num=1000))
+            t_space = list(np.linspace(0.01, tot_time_seconds * 1.3, num=1000))
             # Add some extra values so RWKV's instant forgetting will appear & lapses aren't skipped
             for t in cumulative_seconds:
                 if t - 0.01 > 1e-5:
@@ -130,19 +121,17 @@ def main():
                 FSRS_COLOR = '#1f77b4' 
                 RWKV_COLOR = '#ff7f0e'
                 if curve_i == 0:
-                    plt.plot(curve_space / 86400, fsrs_subcurve, label='FSRS-6-recency', color=FSRS_COLOR)
                     plt.plot(curve_space / 86400, rwkv_subcurve, label='RWKV', color=RWKV_COLOR)
+                    plt.plot(curve_space / 86400, fsrs_subcurve, label='FSRS-6-recency', color=FSRS_COLOR)
                 else:
                     # No label to avoid duplicates in the legend
-                    plt.plot(curve_space / 86400, fsrs_subcurve, color=FSRS_COLOR)
                     plt.plot(curve_space / 86400, rwkv_subcurve, color=RWKV_COLOR)
+                    plt.plot(curve_space / 86400, fsrs_subcurve, color=FSRS_COLOR)
 
             for i, review_time_seconds in zip(locs[1:], cumulative_seconds[1:]):
-                # Require half a day
-                if elapsed_seconds_list[i] < 60*60*12:
-                    continue
-                color = 'r' if ys[i] == 0 else 'g'
-                plt.axvline(x=review_time_seconds / 86400, color=color, linestyle='--')
+                if not same_day_review[i]:
+                    color = 'r' if ys[i] == 0 else 'g'
+                    plt.axvline(x=review_time_seconds / 86400, color=color, linestyle='--')
 
 
             # Add labels and title
