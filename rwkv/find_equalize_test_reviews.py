@@ -16,19 +16,19 @@ lmdb_env = lmdb.open(
 
 
 def process(user_id):
+    key_df_len = f"{user_id}_df_len"
     key_review_ths = f"{user_id}_review_ths"
     key_rmse_bins = f"{user_id}_rmse_bins"
+    key_split = f"{user_id}_split"
     with lmdb_env.begin(write=False) as txn:
-        if (
-            txn.get(key_review_ths.encode()) is not None
-            and txn.get(key_rmse_bins.encode()) is not None
-        ):
-            print(f"Found for {user_id}.")
+        if txn.get(f"{user_id}_done".encode()) is not None:
+            print(f"Already done for {user_id}")
             return
 
     df = pd.read_parquet(
         config.DATA_PATH / "revlogs", filters=[("user_id", "=", user_id)]
     )
+    original_df_len = len(df)
     df = create_features(df.copy(), model_name="FSRS-5")
     if len(df) == 0:  # that one user
         return
@@ -49,20 +49,31 @@ def process(user_id):
     tscv = TimeSeriesSplit(n_splits=5)
     test_label_review_th = []
     test_label_rmse_bins = []
+    test_label_split_test_range = []
     for _, (_, non_secs_test_index) in enumerate(tscv.split(df)):
+        review_ths = []
         for i in non_secs_test_index:
             row = df.iloc[i]
             review_th = row["review_th"]
+            review_ths.append(review_th)
             test_label_review_th.append(review_th)
             test_label_rmse_bins.append(bins_ind[bins[i]])
 
+        test_label_split_test_range.append(min(review_ths))
+    test_label_split_test_range.append(int(1e9))
+
     assert sorted(test_label_review_th) == test_label_review_th
+    df_len_tensor = torch.tensor(original_df_len, dtype=torch.int32)
     review_ths_tensor = torch.tensor(test_label_review_th, dtype=torch.int32)
     rmse_bins_tensor = torch.tensor(test_label_rmse_bins, dtype=torch.int32)
+    split_tensor = torch.tensor(test_label_split_test_range, dtype=torch.int32)
 
     with lmdb_env.begin(write=True) as txn:
+        save_tensor(txn, key_df_len, df_len_tensor)
         save_tensor(txn, key_review_ths, review_ths_tensor)
         save_tensor(txn, key_rmse_bins, rmse_bins_tensor)
+        save_tensor(txn, key_split, split_tensor)
+        txn.put(f"{user_id}_done".encode(), "true".encode())
 
     print("Done:", user_id)
 
