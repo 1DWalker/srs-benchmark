@@ -17,36 +17,32 @@ class RWKV7_WKV(torch.autograd.Function):
         assert all(
             i.dtype == dtype for i in [r_BTHK, k_BTHK, v_BTHK, a_BTHK, k_deformed_BTHK]
         )
-        if r_BTHK.is_cuda:
-            if r_BTHK.dtype == torch.bfloat16:
-                out, state_checkpoints = (
-                    torch.ops.rwkv.rwkv7_wkv_forward_bfloat16.default(
-                        r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
-                    )
-                )
-            elif r_BTHK.dtype == torch.float:
-                out, state_checkpoints = torch.ops.rwkv.rwkv7_wkv_forward_float.default(
+        if r_BTHK.dtype == torch.bfloat16:
+            out, state_checkpoints = (
+                torch.ops.rwkv.rwkv7_wkv_forward_bfloat16.default(
                     r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
                 )
-            elif r_BTHK.dtype == torch.half:
-                out, state_checkpoints = torch.ops.rwkv.rwkv7_wkv_forward_half.default(
-                    r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
-                )
-
-            ctx.save_for_backward(
-                r_BTHK,
-                k_BTHK,
-                v_BTHK,
-                w_BTHK,
-                a_BTHK,
-                k_deformed_BTHK,
-                skip_BT,
-                state_checkpoints,
             )
-            return out
-        else:
-            raise ValueError("Not supported. TODO")
-            # return reference_rwkv7(r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK)
+        elif r_BTHK.dtype == torch.float:
+            out, state_checkpoints = torch.ops.rwkv.rwkv7_wkv_forward_float.default(
+                r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
+            )
+        elif r_BTHK.dtype == torch.half:
+            out, state_checkpoints = torch.ops.rwkv.rwkv7_wkv_forward_half.default(
+                r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
+            )
+
+        ctx.save_for_backward(
+            r_BTHK,
+            k_BTHK,
+            v_BTHK,
+            w_BTHK,
+            a_BTHK,
+            k_deformed_BTHK,
+            skip_BT,
+            state_checkpoints,
+        )
+        return out
 
     @staticmethod
     def backward(ctx, grad_BTHK):
@@ -60,6 +56,7 @@ class RWKV7_WKV(torch.autograd.Function):
             skip_BT,
             state_checkpoints,
         ) = ctx.saved_tensors
+        assert r_BTHK.is_cuda
         if r_BTHK.dtype == torch.bfloat16:
             r_grad, k_grad, v_grad, w_grad, a_grad, k_deformed_grad = (
                 torch.ops.rwkv.rwkv7_wkv_backward_bfloat16.default(

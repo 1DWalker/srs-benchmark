@@ -19,11 +19,11 @@ def __nop(ob):
     return ob
 
 
-# ModuleType = torch.nn.Module
-# FunctionType = __nop
+ModuleType = torch.nn.Module
+FunctionType = __nop
 
-ModuleType = torch.jit.ScriptModule
-FunctionType = torch.jit.script_method
+# ModuleType = torch.jit.ScriptModule
+# FunctionType = torch.jit.script_method
 
 
 @dataclass
@@ -352,14 +352,17 @@ class RWKV7TimeMixer(ModuleType):
         k_deformed_BTHK = k_BTHK
         k_BTHK = k_BTHK * a_BTHK
 
-        if r_BTHK.is_cuda:
-            out_BTHK = RWKV7_WKV.apply(
-                r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
-            )
-        else:
-            out_BTHK = reference_rwkv7(
-                r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
-            )
+        out_BTHK = RWKV7_WKV.apply(
+            r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
+        )
+        # if r_BTHK.is_cuda:
+        #     out_BTHK = RWKV7_WKV.apply(
+        #         r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
+        #     )
+        # else:
+        #     out_BTHK = reference_rwkv7(
+        #         r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
+        #     )
 
         out_BTC = self.out_group_norm(out_BTHK.view(B * T, C)).view(B, T, C)
         bonus_BTC = (
