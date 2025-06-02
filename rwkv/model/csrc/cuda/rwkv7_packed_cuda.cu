@@ -10,6 +10,18 @@
 
 using namespace nvcuda;
 
+template <int CHUNK_LEN=32>
+std::tuple<at::Tensor, int64_t> get_checkpoint_indices(const at::Tensor& indices_I, int T) {
+    at::Tensor indices_appended = torch::cat({indices_I, torch::tensor({T}, indices_I.options().requires_grad(false))}, 0);
+    at::Tensor indices_space_I = torch::floor_divide(indices_appended.slice(0, 1) - indices_appended.slice(0, 0, indices_I.size(0)), CHUNK_LEN);
+    int64_t total_checkpoints = indices_space_I.sum().item<int64_t>();
+    at::Tensor prefixsum = torch::cumsum(indices_space_I, 0);
+    torch::Tensor zero = torch::zeros({1}, indices_I.options().requires_grad(false));
+    at::Tensor prepended = torch::cat({zero, prefixsum}, 0);
+    at::Tensor shifted = prepended.slice(0, 0, indices_I.size(0));
+    return std::make_tuple<>(shifted, total_checkpoints);
+}
+
 namespace rwkv {
 template <int CHUNK_LEN=32, typename F>
 std::tuple<at::Tensor, at::Tensor> rwkv7_packed_wkv_forward_cuda(
@@ -21,11 +33,14 @@ std::tuple<at::Tensor, at::Tensor> rwkv7_packed_wkv_forward_cuda(
     const at::Tensor& a_THK,
     const at::Tensor& k_deformed_THK
     ) {
-    printf("Here forward\n");
+    printf("start\n");
+    const int I = indices_I.size(0);
+    TORCH_INTERNAL_ASSERT(indices_I.dtype() == torch::kLong);
     const int T = r_THK.size(0);
     const int H = r_THK.size(1);
     const int K = r_THK.size(2);
     TORCH_INTERNAL_ASSERT(r_THK.device().type() == at::DeviceType::CUDA);
+    const int64_t* indices_ptr = (int64_t*)indices_I.data_ptr();
     const F* r_ptr = (F*)r_THK.data_ptr();
     const F* k_ptr = (F*)k_THK.data_ptr();
     const F* v_ptr = (F*)v_THK.data_ptr();
@@ -35,9 +50,16 @@ std::tuple<at::Tensor, at::Tensor> rwkv7_packed_wkv_forward_cuda(
     
     at::Tensor out_THK = torch::empty(r_THK.sizes(), r_THK.options());
     F* out_ptr = (F*)out_THK.data_ptr();
-    int L = (T + CHUNK_LEN) / CHUNK_LEN;
-    at::Tensor state_checkpoints_LHKK = torch::empty({L, H, K, K}, r_THK.options().dtype(torch::kFloat32)).requires_grad_(false);
+    auto [checkpoint_indices_I, total_checkpoints] = get_checkpoint_indices<CHUNK_LEN>(indices_I, T);
+    std::cout << checkpoint_indices_I << '\n';
+    std::cout << "checkpoints " << total_checkpoints << '\n';
+    printf("Total checkpoints %d\n", total_checkpoints);
+    at::Tensor state_checkpoints_LHKK = torch::empty({total_checkpoints, H, K, K}, r_THK.options().dtype(torch::kFloat32)).requires_grad_(false);
     float* state_checkpoints_ptr = state_checkpoints_LHKK.data_ptr<float>();
+
+    dim3 block_dim(32, 32);
+    dim3 grid_dim(I, H);
+    // rwkv7_wkv_forward_kernel<CHUNK_LEN><<<grid_dim, block_dim>>>(B, T, H, r_ptr, k_ptr, v_ptr, w_ptr, a_ptr, k_deformed_ptr, out_ptr, L, state_checkpoints_ptr);
     return std::make_tuple(out_THK, state_checkpoints_LHKK);
 }
 
