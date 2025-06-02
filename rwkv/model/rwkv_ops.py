@@ -240,3 +240,12 @@ def reference_rwkv7(r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, ski
         skip_B111 = skip_BT111[:, t]
         state_BHKK = torch.where(skip_B111, state_BHKK, next_state_BHKK)
     return out_BTHK.to(out_dtype)
+
+def reference_rwkv7_packed(indices_I, r_THK, k_THK, v_THK, w_THK, a_THK, k_deformed_THK):
+    sizes_I = torch.cat((indices_I, torch.tensor([indices_I.size(0)])))
+    sizes_I = (sizes_I[1:] - sizes_I[:1]).tolist()
+    print("indices", indices_I)
+    print("sizes", sizes_I)
+    exit()
+    pass
+            
