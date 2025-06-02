@@ -125,11 +125,15 @@ namespace rwkv {
         m.def("rwkv7_wkv_backward_bfloat16(Tensor r_BTHK, Tensor k_BTHK, Tensor v_BTHK, Tensor w_BTHK, Tensor a_BTHK, Tensor k_deformed_BTHK, Tensor skip_BTH, Tensor state_checkpoints_BLHKK, Tensor grad_BTHK) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
         m.def("rwkv7_wkv_forward_half(Tensor r_BTHK, Tensor k_BTHK, Tensor v_BTHK, Tensor w_BTHK, Tensor a_BTHK, Tensor k_deformed_BTHK, Tensor skip_BTH) -> (Tensor, Tensor)");
         m.def("rwkv7_wkv_backward_half(Tensor r_BTHK, Tensor k_BTHK, Tensor v_BTHK, Tensor w_BTHK, Tensor a_BTHK, Tensor k_deformed_BTHK, Tensor skip_BTH, Tensor state_checkpoints_BLHKK, Tensor grad_BTHK) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
+        m.def("rwkv7_packed_wkv_forward_float(Tensor indices_I, Tensor r_THK, Tensor k_THK, Tensor V_THK, Tensor w_THK, Tensor a_THK, Tensor k_deformed_THK) -> (Tensor, Tensor)");
+        m.def("rwkv7_packed_wkv_backward_float(Tensor indices_I, Tensor r_THK, Tensor k_THK, Tensor V_THK, Tensor w_THK, Tensor a_THK, Tensor k_deformed_THK, Tensor state_checkpoints_LHKK, Tensor grad_THK) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
+        m.def("rwkv7_packed_wkv_forward_bfloat16(Tensor indices_I, Tensor r_THK, Tensor k_THK, Tensor V_THK, Tensor w_THK, Tensor a_THK, Tensor k_deformed_THK) -> (Tensor, Tensor)");
+        m.def("rwkv7_packed_wkv_backward_bfloat16(Tensor indices_I, Tensor r_THK, Tensor k_THK, Tensor V_THK, Tensor w_THK, Tensor a_THK, Tensor k_deformed_THK, Tensor state_checkpoints_LHKK, Tensor grad_THK) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
+        m.def("rwkv7_packed_wkv_forward_half(Tensor indices_I, Tensor r_THK, Tensor k_THK, Tensor V_THK, Tensor w_THK, Tensor a_THK, Tensor k_deformed_THK) -> (Tensor, Tensor)");
+        m.def("rwkv7_packed_wkv_backward_half(Tensor indices_I, Tensor r_THK, Tensor k_THK, Tensor V_THK, Tensor w_THK, Tensor a_THK, Tensor k_deformed_THK, Tensor state_checkpoints_LHKK, Tensor grad_THK) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
     }
     const int CHECKPOINT_LEN = 32;
     TORCH_LIBRARY_IMPL(rwkv, CPU, m) {
         m.impl("rwkv7_wkv_forward_float", &rwkv7_wkv_forward_cpu<CHECKPOINT_LEN, float>);
-    //     // m.impl("rwkv7_wkv_forward_bfloat16", &rwkv7_wkv_forward_cpu<CHECKPOINT_LEN, __nv_bfloat16>);
-    //     // m.impl("rwkv7_wkv_forward_half", &rwkv7_wkv_forward_cpu<CHECKPOINT_LEN, __half>);
     }
 }

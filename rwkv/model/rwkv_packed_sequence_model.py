@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import math
 import torch
 
-from rwkv.model.rwkv_ops import RWKV7_WKV, reference_rwkv7_packed
+from rwkv.model.rwkv_ops import RWKV7_Packed_WKV, reference_rwkv7_packed
 
 
 torch.manual_seed(2025)
@@ -25,6 +25,7 @@ FunctionType = __nop
 class RWKV7PackedConfig:
     d_model: int
     n_heads: int
+    n_layers: int
     channel_mixer_factor: float
     decay_lora: int
     a_lora: int  # a = in-context learning rate
@@ -37,26 +38,24 @@ class RWKVPacked(torch.nn.Module):
         self.blocks = torch.nn.ModuleList(
             [
                 RWKV7PackedLayer(config, layer_id)
-                for layer_id in range(
-                    config.layer_offset, config.layer_offset + config.n_layers
-                )
+                for layer_id in range(config.n_layers)
             ]
         )
 
-        @FunctionType
-        def forward(self, in_TC, indices_I):
-            T, C = in_TC.shape
-            x_TC, v0_TC = in_TC, torch.empty_like(in_TC)
-            time_shift_select_T = torch.arange(T, device=in_TC.device, requires_grad=False) - 1
-            time_shift_select_T[indices_I] = indices_I
-            for _, block in enumerate(self.blocks):
-                x_TC, v0_TC = block(
-                    in_TC=x_TC,
-                    indices_I=indices_I,
-                    v0_TC=v0_TC,
-                    time_shift_select_T = time_shift_select_T,
-                )
-            return x_TC
+    @FunctionType
+    def forward(self, in_TC, indices_I):
+        T, C = in_TC.shape
+        x_TC, v0_TC = in_TC, torch.empty_like(in_TC)
+        time_shift_select_T = torch.arange(T, device=in_TC.device, requires_grad=False) - 1
+        time_shift_select_T[indices_I] = indices_I
+        for _, block in enumerate(self.blocks):
+            x_TC, v0_TC = block(
+                in_TC=x_TC,
+                indices_I=indices_I,
+                v0_TC=v0_TC,
+                time_shift_select_T = time_shift_select_T,
+            )
+        return x_TC
 
 
 class RWKV7PackedLayer(ModuleType):
@@ -84,7 +83,7 @@ class RWKV7PackedChannelMixer(ModuleType):
         assert config.d_model // config.n_heads == 32
         self.d_model = config.d_model
         with torch.no_grad():
-            ratio_1_to_almost_0 = 1.0 - (layer_id / config.total_layers)
+            ratio_1_to_almost_0 = 1.0 - (layer_id / config.n_layers)
             self.layer_norm = torch.nn.LayerNorm(config.d_model)
             self.time_shift = torch.nn.ZeroPad2d((0, 0, 1, -1))
 
@@ -104,8 +103,6 @@ class RWKV7PackedChannelMixer(ModuleType):
                 -0.5 / (config.d_model**0.5), 0.5 / (config.d_model**0.5)
             )
             self.W_v.weight.data.zero_()
-
-            self.dropout = torch.nn.Dropout(p=config.dropout)
 
     @FunctionType
     def forward(self, in_TC, time_shift_select_T):
@@ -159,7 +156,7 @@ class LoraMLP(ModuleType):
     def __init__(self, name, config: RWKV7PackedConfig, d_lora, out_dim, layer_id):
         super().__init__()
         C = out_dim
-        ratio_0_to_1 = layer_id / (config.total_layers - 1)
+        ratio_0_to_1 = layer_id / (config.n_layers - 1)
 
         with torch.no_grad():
             self.A = torch.nn.Linear(config.d_model, d_lora, bias=False)
@@ -286,7 +283,7 @@ class RWKV7PackedTimeMixer(ModuleType):
 
     @FunctionType
     def forward(self, in_TC, indices_I, v0_TC, time_shift_select_T):
-        B, T, C = in_TC.shape
+        T, C = in_TC.shape
         H, K = self.H, self.K
 
         x_TC = self.layer_norm(in_TC)
@@ -327,22 +324,22 @@ class RWKV7PackedTimeMixer(ModuleType):
         v_THK = v_scale_TH.unsqueeze(-1) * torch.nn.functional.normalize(
             v_TC.view(T, H, K), dim=-1, p=2.0
         )
-        w_THK = w_TC.view(B, T, H, K)
-        a_THK = a_TC.view(B, T, H, K)
+        w_THK = w_TC.view(T, H, K)
+        a_THK = a_TC.view(T, H, K)
         k_deformed_THK = k_THK
         k_THK = k_THK * a_THK
 
         # TODO
-        # out_THK = RWKV7_WKV.apply(
-        #     r_THK, k_THK, v_THK, w_THK, a_THK, k_deformed_THK, skip_BT
-        # )
-        out_THK = reference_rwkv7_packed(
+        out_THK = RWKV7_Packed_WKV.apply(
             indices_I, r_THK, k_THK, v_THK, w_THK, a_THK, k_deformed_THK
         )
+        # out_THK = reference_rwkv7_packed(
+        #     indices_I, r_THK, k_THK, v_THK, w_THK, a_THK, k_deformed_THK
+        # )
 
         out_TC = self.out_group_norm(out_THK.view(T, C)).view(T, C)
         bonus_TC = (
             (r_THK * self.bonus * k_THK).sum(dim=-1, keepdim=True) * v_THK
-        ).view(B, T, C)
+        ).view(T, C)
         out_TC = self.W_o(g_TC * (out_TC + bonus_TC))
         return in_TC + out_TC, v0_TC
