@@ -1,104 +1,85 @@
+"""
+To handle card parallelism, we implement a version of RWKV that can handle a PackedSequence-like data structure.
+"""
+
 from dataclasses import dataclass
 import math
 import torch
 
-from rwkv.model.rwkv_ops import RWKV7_WKV, reference_rwkv7
+from rwkv.model.rwkv_ops import RWKV7_WKV
 
-"""
-IMPORTANT: the CUDA implementation in this repository only supports head dimensions of 32. d_model // n_heads == 32.
-
-Sources:
-https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v5/src/model.py#L766
-https://github.com/SmerkyG/RWKV_Explained/blob/main/rwkv7.py
-"""
 
 torch.manual_seed(2025)
-
 
 def __nop(ob):
     return ob
 
 
-# ModuleType = torch.nn.Module
-# FunctionType = __nop
+ModuleType = torch.nn.Module
+FunctionType = __nop
 
-ModuleType = torch.jit.ScriptModule
-FunctionType = torch.jit.script_method
-
+# ModuleType = torch.jit.ScriptModule
+# FunctionType = torch.jit.script_method
 
 @dataclass
-class RWKV7Config:
-    d_model: (
-        int  # The model dimension. d_model / n_heads is the dimension for each head.
-    )
+class RWKV7PackedConfig:
+    d_model: int
     n_heads: int
-    n_layers: int
     channel_mixer_factor: float
-
-    # For stacking RWKV7 on top of one-another. We allow sending in the total number of layers and a layer offset so that we can achieve better initialization
-    layer_offset: int
-    total_layers: int
-
     decay_lora: int
     a_lora: int  # a = in-context learning rate
     v0_mix_amt_lora: int
     gate_lora: int
 
-    dropout: float
-    dropout_layer: float
-
-
-class RWKV7(ModuleType):
-    def __init__(self, config: RWKV7Config):
+class RWKVPacked(torch.nn.Module):
+    def __init__(self, config: RWKV7PackedConfig):
         super().__init__()
         self.blocks = torch.nn.ModuleList(
             [
-                RWKV7Layer(config, layer_id)
+                RWKV7PackedLayer(config, layer_id)
                 for layer_id in range(
                     config.layer_offset, config.layer_offset + config.n_layers
                 )
             ]
         )
 
-    @FunctionType
-    def forward(self, in_BTC, time_shift_select_BT, skip_BT):
-        x_BTC, v0_BTC = in_BTC, torch.empty_like(in_BTC)
-        for _, block in enumerate(self.blocks):
-            x_BTC, v0_BTC = block(
-                in_BTC=x_BTC,
-                v0_BTC=v0_BTC,
-                time_shift_select_BT=time_shift_select_BT,
-                skip_BT=skip_BT,
-            )
-        return x_BTC
+        @FunctionType
+        def forward(self, in_TC, indices_I):
+            T, C = in_TC.shape
+            x_TC, v0_TC = in_TC, torch.empty_like(in_TC)
+            time_shift_select_T = torch.arange(T, device=in_TC.device, requires_grad=False) - 1
+            time_shift_select_T[indices_I] = indices_I
+            for _, block in enumerate(self.blocks):
+                x_TC, v0_TC = block(
+                    in_TC=x_TC,
+                    indices_I=indices_I,
+                    v0_TC=v0_TC,
+                    time_shift_select_T = time_shift_select_T,
+                )
+            return x_TC
 
 
-class RWKV7Layer(ModuleType):
-    def __init__(self, config: RWKV7Config, layer_id):
+class RWKV7PackedLayer(ModuleType):
+    def __init__(self, config: RWKV7PackedConfig, layer_id):
         super().__init__()
-        self.time_mixer = RWKV7TimeMixer(config, layer_id)
-        self.channel_mixer = RWKV7ChannelMixer(config, layer_id)
-        self.dropout = torch.nn.Dropout(p=config.dropout_layer)
+        self.time_mixer = RWKV7PackedTimeMixer(config, layer_id)
+        self.channel_mixer = RWKV7PackedChannelMixer(config, layer_id)
 
     @FunctionType
-    def forward(self, in_BTC, v0_BTC, time_shift_select_BT, skip_BT):
-        x_BTC, v0_BTC = self.time_mixer(
-            in_BTC=in_BTC,
-            v0_BTC=v0_BTC,
-            time_shift_select_BT=time_shift_select_BT,
-            skip_BT=skip_BT,
+    def forward(self, in_TC, indices_I, v0_TC, time_shift_select_T):
+        x_TC, v0_TC = self.time_mixer(
+            in_TC=in_TC,
+            indices_I=indices_I,
+            v0_TC=v0_TC,
+            time_shift_select_T=time_shift_select_T,
         )
         return (
-            self.dropout(
-                self.channel_mixer(x_BTC, time_shift_select_BT=time_shift_select_BT)
-            ),
-            v0_BTC,
+            self.channel_mixer(x_TC, time_shift_select_T),
+            v0_TC,
         )
 
-
-class RWKV7ChannelMixer(ModuleType):
-    # Also the same as for RWKV-5
-    def __init__(self, config: RWKV7Config, layer_id):
+class RWKV7PackedChannelMixer(ModuleType):
+    def __init__(self, config: RWKV7PackedConfig, layer_id):
         super().__init__()
         assert config.d_model // config.n_heads == 32
         self.d_model = config.d_model
@@ -107,9 +88,9 @@ class RWKV7ChannelMixer(ModuleType):
             self.layer_norm = torch.nn.LayerNorm(config.d_model)
             self.time_shift = torch.nn.ZeroPad2d((0, 0, 1, -1))
 
-            channel_ratio = torch.ones(1, 1, config.d_model)
+            channel_ratio = torch.ones(1, config.d_model)
             for i in range(config.d_model):
-                channel_ratio[0, 0, i] = i / config.d_model
+                channel_ratio[0, i] = i / config.d_model
 
             self.lerp_k = torch.nn.Parameter(
                 1 - torch.pow(channel_ratio, ratio_1_to_almost_0**4)
@@ -127,16 +108,16 @@ class RWKV7ChannelMixer(ModuleType):
             self.dropout = torch.nn.Dropout(p=config.dropout)
 
     @FunctionType
-    def forward(self, in_BTC, time_shift_select_BT):
-        x_BTC = self.layer_norm(in_BTC)
-        x_shift_BTC = torch.gather(
-            x_BTC,
-            dim=1,
-            index=time_shift_select_BT.unsqueeze(-1).expand(-1, -1, self.d_model),
+    def forward(self, in_TC, time_shift_select_T):
+        x_TC = self.layer_norm(in_TC)
+        x_shift_TC = torch.gather(
+            x_TC,
+            dim=0,
+            index=time_shift_select_T.unsqueeze(-1).expand(-1, self.d_model),
         )
-        k_BTK = self.W_k(torch.lerp(x_BTC, x_shift_BTC, self.lerp_k))
-        o_BTC = self.W_v(torch.square(torch.nn.functional.relu(k_BTK)))
-        return in_BTC + self.dropout(o_BTC)
+        k_TK = self.W_k(torch.lerp(x_TC, x_shift_TC, self.lerp_k))
+        o_TC = self.W_v(torch.square(torch.nn.functional.relu(k_TK)))
+        return in_TC + o_TC
 
 
 def ortho_init(x, scale):
@@ -175,7 +156,7 @@ class LoraSimple(ModuleType):
 
 
 class LoraMLP(ModuleType):
-    def __init__(self, name, config: RWKV7Config, d_lora, out_dim, layer_id):
+    def __init__(self, name, config: RWKV7PackedConfig, d_lora, out_dim, layer_id):
         super().__init__()
         C = out_dim
         ratio_0_to_1 = layer_id / (config.total_layers - 1)
@@ -200,8 +181,8 @@ class LoraMLP(ModuleType):
         return self.B_and_lamb(torch.nn.functional.tanh(self.A(in_BTC)))
 
 
-class RWKV7TimeMixer(ModuleType):
-    def __init__(self, config: RWKV7Config, layer_id):
+class RWKV7PackedTimeMixer(ModuleType):
+    def __init__(self, config: RWKV7PackedConfig, layer_id):
         super().__init__()
         assert config.d_model % config.n_heads == 0
         self.layer_id = layer_id
@@ -213,14 +194,14 @@ class RWKV7TimeMixer(ModuleType):
         with torch.no_grad():
             ratio_0_to_1 = layer_id / (config.n_layers - 1)
             ratio_1_to_almost_0 = 1.0 - (layer_id / config.n_layers)
-            channel_ratio = torch.ones(1, 1, C)
+            channel_ratio = torch.ones(1, C)
             for i in range(C):
-                channel_ratio[0, 0, i] = i / C
+                channel_ratio[0, i] = i / C
 
             self.layer_norm = torch.nn.LayerNorm(config.d_model)
             self.time_shift = torch.nn.ZeroPad2d((0, 0, 1, -1))
 
-            self.rkvdag_lerp = torch.nn.Parameter(torch.empty(8, 1, 1, config.d_model))
+            self.rkvdag_lerp = torch.nn.Parameter(torch.empty(8, 1, config.d_model))
 
             # Overall, the earlier the layer the more that we care about the shifted input.
             self.rkvdag_lerp[0] = 1.0 - torch.pow(
@@ -250,7 +231,7 @@ class RWKV7TimeMixer(ModuleType):
             )
 
             self.bonus = torch.nn.Parameter(
-                torch.zeros(1, 1, config.n_heads, config.d_model // config.n_heads)
+                torch.zeros(1, config.n_heads, config.d_model // config.n_heads)
             )  # r_k
 
             self.W_r = torch.nn.Linear(config.d_model, config.d_model, bias=False)
@@ -302,62 +283,63 @@ class RWKV7TimeMixer(ModuleType):
             self.out_group_norm = torch.nn.GroupNorm(
                 config.n_heads, config.d_model, eps=64e-5
             )
-            self.dropout = torch.nn.Dropout(p=config.dropout)
 
     @FunctionType
-    def forward(self, in_BTC, v0_BTC, time_shift_select_BT, skip_BT):
-        B, T, C = in_BTC.shape
+    def forward(self, in_TC, indices_I, v0_TC, time_shift_select_T):
+        B, T, C = in_TC.shape
         H, K = self.H, self.K
 
-        x_BTC = self.layer_norm(in_BTC)
-        x_shift_BTC = torch.gather(
-            x_BTC,
-            dim=1,
-            index=time_shift_select_BT.unsqueeze(-1).expand(-1, -1, self.d_model),
+        x_TC = self.layer_norm(in_TC)
+        x_shift_TC = torch.gather(
+            x_TC,
+            dim=0,
+            index=time_shift_select_T.unsqueeze(-1).expand(-1, self.d_model),
         )
 
-        rkvdag_8BTC = torch.lerp(
-            x_BTC.unsqueeze(0), x_shift_BTC.unsqueeze(0), self.rkvdag_lerp
+        rkvdag_8TC = torch.lerp(
+            x_TC.unsqueeze(0), x_shift_TC.unsqueeze(0), self.rkvdag_lerp
         )
-        r_BTC, k_BTC, v_BTC, d_BTC, a_BTC, g_BTC, k_scale_BTC, v_scale_BTC = (
-            rkvdag_8BTC.unbind(dim=0)
+        r_TC, k_TC, v_TC, d_TC, a_TC, g_TC, k_scale_TC, v_scale_TC = (
+            rkvdag_8TC.unbind(dim=0)
         )
-        r_BTC = self.W_r(r_BTC)
-        k_BTC = self.W_k(k_BTC)
-        k_scale_BTH = torch.nn.functional.sigmoid(self.k_scale_linear(k_scale_BTC))
-        v_scale_BTH = torch.nn.functional.sigmoid(self.v_scale_linear(v_scale_BTC))
+        r_TC = self.W_r(r_TC)
+        k_TC = self.W_k(k_TC)
+        k_scale_TH = torch.nn.functional.sigmoid(self.k_scale_linear(k_scale_TC))
+        v_scale_TH = torch.nn.functional.sigmoid(self.v_scale_linear(v_scale_TC))
 
         if self.layer_id == 0:
-            v_BTC = self.W_v(v_BTC)
-            v0_BTC = v_BTC
+            v_TC = self.W_v(v_TC)
+            v0_TC = v_TC
         else:
-            v_lerp_BTC = torch.nn.functional.sigmoid(self.v_lora_simple(v_BTC))
-            v_BTC = torch.lerp(self.W_v(v_BTC), v0_BTC, v_lerp_BTC)
+            v_lerp_TC = torch.nn.functional.sigmoid(self.v_lora_simple(v_TC))
+            v_TC = torch.lerp(self.W_v(v_TC), v0_TC, v_lerp_TC)
 
-        a_BTC = torch.nn.functional.sigmoid(self.a_lora_simple(a_BTC))
-        g_BTC = self.lora_B_g(torch.nn.functional.sigmoid(self.lora_A_g(g_BTC)))
+        a_TC = torch.nn.functional.sigmoid(self.a_lora_simple(a_TC))
+        g_TC = self.lora_B_g(torch.nn.functional.sigmoid(self.lora_A_g(g_TC)))
 
-        _d_BTC = -0.5 - torch.nn.functional.softplus(-self.d_lora_mlp(d_BTC))
-        w_BTC = torch.exp(-torch.exp(_d_BTC.float()))
+        _d_TC = -0.5 - torch.nn.functional.softplus(-self.d_lora_mlp(d_TC))
+        w_TC = torch.exp(-torch.exp(_d_TC.float()))
 
-        k_BTHK = k_scale_BTH.unsqueeze(-1) * torch.nn.functional.normalize(
-            k_BTC.view(B, T, H, K), dim=-1, p=2.0
+        k_THK = k_scale_TH.unsqueeze(-1) * torch.nn.functional.normalize(
+            k_TC.view(T, H, K), dim=-1, p=2.0
         )
-        r_BTHK = r_BTC.view(B, T, H, K)
-        v_BTHK = v_scale_BTH.unsqueeze(-1) * torch.nn.functional.normalize(
-            v_BTC.view(B, T, H, K), dim=-1, p=2.0
+        r_THK = r_TC.view(T, H, K)
+        v_THK = v_scale_TH.unsqueeze(-1) * torch.nn.functional.normalize(
+            v_TC.view(T, H, K), dim=-1, p=2.0
         )
-        w_BTHK = w_BTC.view(B, T, H, K)
-        a_BTHK = a_BTC.view(B, T, H, K)
-        k_deformed_BTHK = k_BTHK
-        k_BTHK = k_BTHK * a_BTHK
+        w_THK = w_TC.view(B, T, H, K)
+        a_THK = a_TC.view(B, T, H, K)
+        k_deformed_THK = k_THK
+        k_THK = k_THK * a_THK
 
-        out_BTHK = RWKV7_WKV.apply(
-            r_BTHK, k_BTHK, v_BTHK, w_BTHK, a_BTHK, k_deformed_BTHK, skip_BT
-        )
-        out_BTC = self.out_group_norm(out_BTHK.view(B * T, C)).view(B, T, C)
-        bonus_BTC = (
-            (r_BTHK * self.bonus * k_BTHK).sum(dim=-1, keepdim=True) * v_BTHK
+        # TODO
+        # out_THK = RWKV7_WKV.apply(
+        #     r_THK, k_THK, v_THK, w_THK, a_THK, k_deformed_THK, skip_BT
+        # )
+
+        out_TC = self.out_group_norm(out_THK.view(T, C)).view(T, C)
+        bonus_TC = (
+            (r_THK * self.bonus * k_THK).sum(dim=-1, keepdim=True) * v_THK
         ).view(B, T, C)
-        out_BTC = self.W_o(g_BTC * (out_BTC + bonus_BTC))
-        return in_BTC + self.dropout(out_BTC), v0_BTC
+        out_TC = self.W_o(g_TC * (out_TC + bonus_TC))
+        return in_TC + out_TC, v0_TC
