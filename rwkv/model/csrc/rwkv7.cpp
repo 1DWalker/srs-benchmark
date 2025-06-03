@@ -60,8 +60,8 @@ std::tuple<at::Tensor, at::Tensor> rwkv7_wkv_forward_cpu(
     at::Tensor out_BTHK = torch::empty(r_BTHK.sizes(), r_BTHK.options());
     F* out_ptr = (F*)out_BTHK.data_ptr();
     int L = (T + CHUNK_LEN) / CHUNK_LEN;
-    at::Tensor state_checkpoints_BLHKK = torch::empty({B, L, H, K, K}, r_BTHK.options().dtype(torch::kFloat32)).requires_grad_(false);
-    float* state_checkpoints_ptr = state_checkpoints_BLHKK.data_ptr<float>();
+    // Not supported
+    at::Tensor state_checkpoints_BLHKK = torch::empty({0, 0, 0, 0, 0}, r_BTHK.options().dtype(torch::kFloat32)).requires_grad_(false);
 
     F state[K][K];
     F state_times_w[K][K];
@@ -117,6 +117,92 @@ std::tuple<at::Tensor, at::Tensor> rwkv7_wkv_forward_cpu(
     return std::make_tuple(out_BTHK, state_checkpoints_BLHKK);
 }
 
+template <int CHUNK_LEN=32, typename F>
+std::tuple<at::Tensor, at::Tensor> rwkv7_packed_wkv_forward_cpu(
+    const at::Tensor& indices_I,
+    const at::Tensor& r_THK, 
+    const at::Tensor& k_THK,
+    const at::Tensor& v_THK,
+    const at::Tensor& w_THK,
+    const at::Tensor& a_THK,
+    const at::Tensor& k_deformed_THK
+    ) {
+    const int I = indices_I.size(0);
+    const int T = r_THK.size(0);
+    const int H = r_THK.size(1);
+    const int K = 32;
+    TORCH_INTERNAL_ASSERT(r_THK.size(2) == K);
+    TORCH_INTERNAL_ASSERT(r_THK.device().type() == at::DeviceType::CPU);
+    const int64_t* indices_ptr = (int64_t*)indices_I.data_ptr();
+    const F* r_ptr = (F*)r_THK.data_ptr();
+    const F* k_ptr = (F*)k_THK.data_ptr();
+    const F* v_ptr = (F*)v_THK.data_ptr();
+    const float* w_ptr = w_THK.data_ptr<float>();
+    const F* a_ptr = (F*)a_THK.data_ptr();
+    const F* k_deformed_ptr = (F*)k_deformed_THK.data_ptr();
+    
+    at::Tensor out_THK = torch::empty(r_THK.sizes(), r_THK.options());
+    F* out_ptr = (F*)out_THK.data_ptr();
+    int L = (T + CHUNK_LEN) / CHUNK_LEN;
+    // Not supported
+    at::Tensor state_checkpoints_LHKK = torch::empty({0, 0, 0, 0}, r_THK.options().dtype(torch::kFloat32)).requires_grad_(false);
+
+    F state[K][K];
+    F state_times_w[K][K];
+    F state_times_k_deformed[K];
+    F buf[K];
+    for (int h = 0; h < H; h++) {
+        int indices_l = 0;
+        for (int t = 0; t < T; t++) {
+            if (indices_l < I && t == indices_ptr[indices_l]) {
+                std::memset(state, 0, sizeof(state));
+                indices_l++;
+            }
+            // Decay and removal
+            for (int i = 0; i < K; i++) {
+                for (int j = 0; j < K; j++) {
+                    state_times_w[i][j] = state[i][j] * w_ptr[get_index2(t, h, j, H, K)];
+                }
+            }
+            memset(state_times_k_deformed, 0, sizeof(state_times_k_deformed));
+            for (int i = 0; i < K; i++) {
+                for (int j = 0; j < K; j++) {
+                    state_times_k_deformed[i] += state[i][j] * k_deformed_ptr[get_index2(t, h, j, H, K)];
+                }
+            }
+            for (int i = 0; i < K; i++) {
+                for (int j = 0; j < K; j++) {
+                    F a_j = a_ptr[get_index2(t, h, j, H, K)];
+                    F k_deformed_j = k_deformed_ptr[get_index2(t, h, j, H, K)];
+                    state[i][j] = state_times_w[i][j] - state_times_k_deformed[i] * a_j * k_deformed_j;
+                }
+            }
+
+            // Add
+            for (int i = 0; i < K; i++) {
+                F v_i = v_ptr[get_index2(t, h, i, H, K)];
+                for (int j = 0; j < K; j++) {
+                    F k_j = k_ptr[get_index2(t, h, j, H, K)];
+                    state[i][j] += v_i * k_j;
+                }
+            }
+
+            memset(buf, 0, sizeof(buf));
+            // Compute S@r
+            for (int i = 0; i < K; i++) {
+                for (int j = 0; j < K; j++) {
+                    buf[i] += state[i][j] * r_ptr[get_index2(t, h, j, H, K)];
+                }
+            }
+            for (int i = 0; i < K; i++) {
+                out_ptr[get_index2(t, h, i, H, K)] = buf[i];
+            }
+
+        }
+    }
+    return std::make_tuple(out_THK, state_checkpoints_LHKK);
+}
+
 namespace rwkv {
     TORCH_LIBRARY(rwkv, m) {
         m.def("rwkv7_wkv_forward_float(Tensor r_BTHK, Tensor k_BTHK, Tensor v_BTHK, Tensor w_BTHK, Tensor a_BTHK, Tensor k_deformed_BTHK, Tensor skip_BTH) -> (Tensor, Tensor)");
@@ -135,5 +221,6 @@ namespace rwkv {
     const int CHECKPOINT_LEN = 32;
     TORCH_LIBRARY_IMPL(rwkv, CPU, m) {
         m.impl("rwkv7_wkv_forward_float", &rwkv7_wkv_forward_cpu<CHECKPOINT_LEN, float>);
+        m.impl("rwkv7_packed_wkv_forward_float", &rwkv7_packed_wkv_forward_cpu<CHECKPOINT_LEN, float>);
     }
 }
