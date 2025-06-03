@@ -47,14 +47,15 @@ __global__ void rwkv7_packed_wkv_forward_kernel(
     int x = threadIdx.y;
     int y = threadIdx.x;
 
-    int64_t checkpoint_index_offset = checkpoints_indices_I[i];
+    int64_t checkpoint_index = checkpoints_indices_I[i];
     int start_index = indices_I[i];
     int end_index_ex = i == I - 1 ? T : indices_I[i + 1];
     int tot_t = end_index_ex - start_index;
     float state_xy = 0.0;
     for (int it = 0; it < tot_t; it++) {
         if (it > 0 && it % CHUNK_LEN == 0) {
-            state_checkpoints_LHKK[get_index3(checkpoint_index_offset, h, x, y, H, K, K)];
+            state_checkpoints_LHKK[get_index3(checkpoint_index, h, x, y, H, K, K)] = state_xy;
+            checkpoint_index++;
         }
         int64_t t = start_index + it;
         int64_t global_x = get_index2(t, h, x, H, K);
@@ -66,17 +67,15 @@ __global__ void rwkv7_packed_wkv_forward_kernel(
         float a_y = to_float<F>(a_THK[global_y]);
         float k_deformed_y = to_float<F>(k_deformed_THK[global_y]);
         float in_state_xy = state_xy;
-        // compute decayed state value at (x, y)
         float state_xy_decayed = state_xy * w_y;
         float state_k_dot = state_xy * k_deformed_y;
-        // compute S@k. We do this in parallel at the row (warp) level
-        // Parallel reduction: https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/
         for (int offset = 16; offset > 0; offset /= 2) {
             state_k_dot += __shfl_down_sync(FULL_MASK, state_k_dot, offset);
         }
         state_k_dot = __shfl_sync(FULL_MASK, state_k_dot, 0);
         state_xy = state_xy_decayed - state_k_dot * a_y * k_deformed_y;
         state_xy += v_x * k_y;
+
         // Compute S@r and store the result in out
         float state_r_dot = state_xy * r_y;
         for (int offset = 16; offset > 0; offset /= 2) {
@@ -98,7 +97,7 @@ std::tuple<at::Tensor, at::Tensor> rwkv7_packed_wkv_forward_cuda(
     const at::Tensor& a_THK,
     const at::Tensor& k_deformed_THK
     ) {
-    printf("start\n");
+    printf("start forward\n");
     const int I = indices_I.size(0);
     TORCH_INTERNAL_ASSERT(indices_I.dtype() == torch::kLong);
     const int T = r_THK.size(0);
