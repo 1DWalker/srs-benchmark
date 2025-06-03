@@ -121,6 +121,7 @@ __global__ void rwkv7_wkv_backward_kernel(
     const int x = threadIdx.y;
     const int y = threadIdx.x;
 
+    // TODO does this do anything given the initialization?
     if (x == 0) {
         a_grad_BTHK[get_index3(b, 0, h, y, T, H, K)] = to_F<F>(0.0);
         k_deformed_grad_BTHK[get_index3(b, 0, h, y, T, H, K)] = to_F<F>(0.0);

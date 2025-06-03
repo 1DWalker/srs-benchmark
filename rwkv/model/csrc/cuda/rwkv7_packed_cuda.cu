@@ -130,7 +130,7 @@ __global__ void rwkv7_packed_wkv_backward_kernel(
     const int tot_t = end_index_ex - start_index;
     const int num_chunks = (tot_t - 1 + CHUNK_LEN) / CHUNK_LEN;
 
-    // TODO does this do anything? and check the other code as well
+    // TODO does this do anything given the initialization?
     if (x == 0) {
         a_grad_THK[get_index2(start_index, h, y, H, K)] = to_F<F>(0.0);
         k_deformed_grad_THK[get_index2(start_index, h, y, H, K)] = to_F<F>(0.0);
@@ -165,8 +165,8 @@ __global__ void rwkv7_packed_wkv_backward_kernel(
             state_xy_chunk[c] = state_xy;
         }
         
-        for (int t = std::min(end_index_ex - 1, (chunk_i + 1) * CHUNK_LEN - 1); t >= chunk_i * CHUNK_LEN; t--) {
-            int c = t - chunk_i * CHUNK_LEN;
+        for (int t = std::min(end_index_ex - 1, start_index + (chunk_i + 1) * CHUNK_LEN - 1); t >= start_index + chunk_i * CHUNK_LEN; t--) {
+            int c = t - start_index - chunk_i * CHUNK_LEN;
             float state_xy = state_xy_chunk[c];
             KK_state[get_index1(x, y, K+1)] = state_xy;
             KK_state_prev[get_index1(x, y, K+1)] = state_prev_xy_chunk[c];
@@ -253,7 +253,6 @@ std::tuple<at::Tensor, at::Tensor> rwkv7_packed_wkv_forward_cuda(
     const at::Tensor& a_THK,
     const at::Tensor& k_deformed_THK
     ) {
-    printf("start forward\n");
     const int I = indices_I.size(0);
     TORCH_INTERNAL_ASSERT(indices_I.dtype() == torch::kLong);
     const int T = r_THK.size(0);
@@ -293,7 +292,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tenso
     const at::Tensor& state_checkpoints_LHKK,
     const at::Tensor& grad_THK
     ) {
-    printf("Here backwar\n");
     const int I = indices_I.size(0);
     const int T = r_THK.size(0);
     const int H = r_THK.size(1);
