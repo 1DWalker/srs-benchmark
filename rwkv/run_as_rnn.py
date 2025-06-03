@@ -28,8 +28,8 @@ from rwkv.data_processing import (
 from rwkv.get_result import get_benchmark_info, get_stats
 import torch
 from rwkv.model.srs_model_rnn import SrsRWKVRnn
-from rwkv.parse_toml import parse_toml
 from rwkv.architecture import DEFAULT_ANKI_RWKV_CONFIG
+from utils import parse_toml
 
 
 class RNNProcess:

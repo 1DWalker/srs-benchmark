@@ -1,8 +1,13 @@
+import argparse
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import root_mean_squared_error  # type: ignore
 import traceback
 from functools import wraps
+
+import tomli
+import torch
 
 
 def catch_exceptions(func):
@@ -121,3 +126,22 @@ def cross_comparison(revlogs, algoA, algoB, graph=False):
         ax.set_xticks(np.arange(0, 1.1, 0.1))
         fig.show()
     return universal_metric_list
+
+def parse_toml():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, help="Location of the toml file")
+    args, _ = parser.parse_known_args()
+    with open(args.config, "rb") as f:
+        args = tomli.load(f)
+        if "DTYPE" in args:
+            if args["DTYPE"] == "bfloat16":
+                args["DTYPE"] = torch.bfloat16
+            elif args["DTYPE"] in ("float", "float32"):
+                args["DTYPE"] = torch.float32
+            else:
+                raise ValueError("Not currently supported:", args["DTYPE"])
+        if "DEVICE" in args:
+            args["DEVICE"] = torch.device(args["DEVICE"])
+        if "DATA_PATH" in args:
+            args["DATA_PATH"] = Path(args["DATA_PATH"])
+        return argparse.Namespace(**args)

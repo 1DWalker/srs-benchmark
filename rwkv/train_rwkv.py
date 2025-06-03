@@ -13,7 +13,6 @@ import random
 import torch
 import wandb
 
-from rwkv.parse_toml import parse_toml
 from rwkv.prepare_batch import prepare_data_train_test
 from rwkv.model.srs_model import SrsRWKV
 from rwkv.architecture import *
@@ -21,6 +20,7 @@ from rwkv.utils import (
     KeyValueAverage,
     get_number_of_trainable_parameters,
 )
+from utils import parse_toml
 
 random.seed(12345)
 
