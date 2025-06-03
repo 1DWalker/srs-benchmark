@@ -332,9 +332,6 @@ class RWKV7PackedTimeMixer(ModuleType):
         out_THK = RWKV7_Packed_WKV.apply(
             indices_I, r_THK, k_THK, v_THK, w_THK, a_THK, k_deformed_THK
         )
-        # out_THK = reference_rwkv7_packed(
-        #     indices_I, r_THK, k_THK, v_THK, w_THK, a_THK, k_deformed_THK
-        # )
 
         out_TC = self.out_group_norm(out_THK.view(T, C)).view(T, C)
         bonus_TC = (
