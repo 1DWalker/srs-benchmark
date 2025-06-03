@@ -66,7 +66,6 @@ __global__ void rwkv7_packed_wkv_forward_kernel(
         float w_y = w_THK[global_y];
         float a_y = to_float<F>(a_THK[global_y]);
         float k_deformed_y = to_float<F>(k_deformed_THK[global_y]);
-        float in_state_xy = state_xy;
         float state_xy_decayed = state_xy * w_y;
         float state_k_dot = state_xy * k_deformed_y;
         for (int offset = 16; offset > 0; offset /= 2) {
@@ -84,6 +83,55 @@ __global__ void rwkv7_packed_wkv_forward_kernel(
         if (y == 0) {
             out_THK[global_x] = to_F<F>(state_r_dot);
         }
+    }
+}
+
+template <int CHUNK_LEN=32, typename F>
+__global__ void rwkv7_packed_wkv_backward_kernel(
+    const int I,
+    const int T,
+    const int H,
+    const int64_t* indices_I,
+    const F* __restrict__ r_THK,
+    const F* __restrict__ k_THK,
+    const F* __restrict__ v_THK,
+    const float* __restrict__ w_THK,
+    const F* __restrict__ a_THK,
+    const F* __restrict__ k_deformed_THK,
+    const F* __restrict__ grad_THK,
+    const int L,
+    const float* __restrict__ state_checkpoints_LHKK,
+    const int64_t* __restrict__ checkpoints_indices_I,
+    F* __restrict__ r_grad_THK,
+    F* __restrict__ k_grad_THK,
+    F* __restrict__ v_grad_THK,
+    float* __restrict__ w_grad_THK,
+    F* __restrict__ a_grad_THK,
+    F* __restrict__ k_deformed_grad_THK
+    ) {
+    const int K = 32;
+    __shared__ float KK_state[32 * (32 + 1)];
+    __shared__ float KK_state_prev[32 * (32 + 1)];
+    __shared__ float KK_grad_decay_remove[32 * 32];
+    __shared__ float KK_dS[32 * (32 + 1)];
+    __shared__ float KK_grad_decay[32 * (32 + 1)];
+    __shared__ float K_k_deformed[32];
+    __shared__ float K_a[32];
+    float state_xy_chunk[CHUNK_LEN]; 
+    float state_prev_xy_chunk[CHUNK_LEN];
+    const int i = blockIdx.x;
+    const int h = blockIdx.y;
+    const int x = threadIdx.y;
+    const int y = threadIdx.x;
+
+    int64_t checkpoint_index = checkpoints_indices_I[i];
+    int start_index = indices_I[i];
+    int end_index_ex = i == I - 1 ? T : indices_I[i + 1];
+    int tot_t = end_index_ex - start_index;
+
+    if (x == 0) {
+        a_grad_THK[get_index2(start_index, h, y, H, K)] = to_F<F>(0.0);
+        k_deformed_grad_THK[get_index2(start_index, h, y, H, K)] = to_F<F>(0.0);
     }
 }
 
@@ -138,11 +186,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tenso
     const at::Tensor& grad_THK
     ) {
     printf("Here backwar\n");
+    const int I = indices_I.size(0);
     const int T = r_THK.size(0);
     const int H = r_THK.size(1);
     const int K = r_THK.size(2);
     const int L = state_checkpoints_LHKK.size(1);
     TORCH_INTERNAL_ASSERT(r_THK.device().type() == at::DeviceType::CUDA);
+    const int64_t* indices_ptr = (int64_t*)indices_I.data_ptr();
     const F* r_ptr = (F*)r_THK.data_ptr();
     const F* k_ptr = (F*)k_THK.data_ptr();
     const F* v_ptr = (F*)v_THK.data_ptr();
@@ -163,7 +213,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tenso
     float* w_grad_ptr = w_grad_THK.data_ptr<float>();
     F* a_grad_ptr = (F*)a_grad_THK.data_ptr();
     F* k_deformed_grad_ptr = (F*)k_deformed_grad_THK.data_ptr();
+    auto [checkpoint_indices_I, total_checkpoints] = get_checkpoint_indices<CHUNK_LEN>(indices_I, T);
+    const int64_t* checkpoint_indices_ptr = (int64_t*)checkpoint_indices_I.data_ptr();
 
+    dim3 block_dim(32, 32);
+    dim3 grid_dim(I, H);
+    rwkv7_packed_wkv_backward_kernel<CHUNK_LEN><<<grid_dim, block_dim>>>(I, T, H, indices_ptr, r_ptr, k_ptr, v_ptr, w_ptr, a_ptr, k_deformed_ptr, 
+        grad_ptr, total_checkpoints, state_checkpoints_ptr, checkpoint_indices_ptr, r_grad_ptr, k_grad_ptr, v_grad_ptr, w_grad_ptr, a_grad_ptr, k_deformed_grad_ptr);
     return std::make_tuple(r_grad_THK, k_grad_THK, v_grad_THK, w_grad_THK, a_grad_THK, k_deformed_grad_THK);
 }
 
