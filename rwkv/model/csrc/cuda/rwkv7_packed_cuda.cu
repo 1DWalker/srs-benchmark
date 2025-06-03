@@ -24,6 +24,71 @@ std::tuple<at::Tensor, int64_t> get_checkpoint_indices(const at::Tensor& indices
 
 namespace rwkv {
 template <int CHUNK_LEN=32, typename F>
+__global__ void rwkv7_packed_wkv_forward_kernel(
+    const int I,
+    const int T,
+    const int H,
+    const int64_t* indices_I,
+    const F* __restrict__ r_THK,
+    const F* __restrict__ k_THK,
+    const F* __restrict__ v_THK,
+    const float* __restrict__ w_THK,
+    const F* __restrict__ a_THK,
+    const F* __restrict__ k_deformed_THK,
+    F* __restrict__ out_THK,
+    const int L,
+    float* __restrict__ state_checkpoints_LHKK,
+    const int64_t* __restrict__ checkpoints_indices_I
+    ) {
+    const int K = 32;
+    int i = blockIdx.x;
+    int h = blockIdx.y;
+
+    int x = threadIdx.y;
+    int y = threadIdx.x;
+
+    int64_t checkpoint_index_offset = checkpoints_indices_I[i];
+    int start_index = indices_I[i];
+    int end_index_ex = i == I - 1 ? T : indices_I[i + 1];
+    int tot_t = end_index_ex - start_index;
+    float state_xy = 0.0;
+    for (int it = 0; it < tot_t; it++) {
+        if (it > 0 && it % CHUNK_LEN == 0) {
+            state_checkpoints_LHKK[get_index3(checkpoint_index_offset, h, x, y, H, K, K)];
+        }
+        int64_t t = start_index + it;
+        int64_t global_x = get_index2(t, h, x, H, K);
+        int64_t global_y = get_index2(t, h, y, H, K);
+        float r_y = to_float<F>(r_THK[global_y]);
+        float k_y = to_float<F>(k_THK[global_y]);
+        float v_x = to_float<F>(v_THK[global_x]);
+        float w_y = w_THK[global_y];
+        float a_y = to_float<F>(a_THK[global_y]);
+        float k_deformed_y = to_float<F>(k_deformed_THK[global_y]);
+        float in_state_xy = state_xy;
+        // compute decayed state value at (x, y)
+        float state_xy_decayed = state_xy * w_y;
+        float state_k_dot = state_xy * k_deformed_y;
+        // compute S@k. We do this in parallel at the row (warp) level
+        // Parallel reduction: https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/
+        for (int offset = 16; offset > 0; offset /= 2) {
+            state_k_dot += __shfl_down_sync(FULL_MASK, state_k_dot, offset);
+        }
+        state_k_dot = __shfl_sync(FULL_MASK, state_k_dot, 0);
+        state_xy = state_xy_decayed - state_k_dot * a_y * k_deformed_y;
+        state_xy += v_x * k_y;
+        // Compute S@r and store the result in out
+        float state_r_dot = state_xy * r_y;
+        for (int offset = 16; offset > 0; offset /= 2) {
+            state_r_dot += __shfl_down_sync(FULL_MASK, state_r_dot, offset);
+        }
+        if (y == 0) {
+            out_THK[global_x] = to_F<F>(state_r_dot);
+        }
+    }
+}
+
+template <int CHUNK_LEN=32, typename F>
 std::tuple<at::Tensor, at::Tensor> rwkv7_packed_wkv_forward_cuda(
     const at::Tensor& indices_I,
     const at::Tensor& r_THK, 
@@ -51,15 +116,13 @@ std::tuple<at::Tensor, at::Tensor> rwkv7_packed_wkv_forward_cuda(
     at::Tensor out_THK = torch::empty(r_THK.sizes(), r_THK.options());
     F* out_ptr = (F*)out_THK.data_ptr();
     auto [checkpoint_indices_I, total_checkpoints] = get_checkpoint_indices<CHUNK_LEN>(indices_I, T);
-    std::cout << checkpoint_indices_I << '\n';
-    std::cout << "checkpoints " << total_checkpoints << '\n';
-    printf("Total checkpoints %d\n", total_checkpoints);
+    const int64_t* checkpoint_indices_ptr = (int64_t*)checkpoint_indices_I.data_ptr();
     at::Tensor state_checkpoints_LHKK = torch::empty({total_checkpoints, H, K, K}, r_THK.options().dtype(torch::kFloat32)).requires_grad_(false);
     float* state_checkpoints_ptr = state_checkpoints_LHKK.data_ptr<float>();
 
     dim3 block_dim(32, 32);
     dim3 grid_dim(I, H);
-    // rwkv7_wkv_forward_kernel<CHUNK_LEN><<<grid_dim, block_dim>>>(B, T, H, r_ptr, k_ptr, v_ptr, w_ptr, a_ptr, k_deformed_ptr, out_ptr, L, state_checkpoints_ptr);
+    rwkv7_packed_wkv_forward_kernel<CHUNK_LEN><<<grid_dim, block_dim>>>(I, T, H, indices_ptr, r_ptr, k_ptr, v_ptr, w_ptr, a_ptr, k_deformed_ptr, out_ptr, total_checkpoints, state_checkpoints_ptr, checkpoint_indices_ptr);
     return std::make_tuple(out_THK, state_checkpoints_LHKK);
 }
 
