@@ -1,0 +1,21 @@
+DB_PATH = "fsrs_evaluate_db"
+DB_SIZE = 31_000_000_000
+
+DATA_PATH = "../anki-revlogs-10k"
+
+LABEL_FILTER_DB_PATH = "label_filter_db"
+
+USER_START = 1
+USER_END = 100
+
+DTYPE = "float"
+PROCESSES = 9
+
+# The memory usage is at most MAX_TOTAL_SIZE * memory_per_review
+# Should be optimized to fit the device VRAM constraint when training
+MAX_TOTAL_SIZE = 6_000_000
+
+# The memory usage is at most MAX_FACTOR * len(revlog) * memory_per_review
+# Should be optimized for throughput
+# For CPU usage the optimal value would likely be smaller
+MAX_FACTOR = 8

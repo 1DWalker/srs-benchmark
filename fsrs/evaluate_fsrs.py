@@ -1,0 +1,100 @@
+import lmdb
+import torch
+from fsrs.fsrs import FSRS6
+from rwkv.utils import load_tensor
+
+
+def load_batch(txn, user, i, device):
+    features = load_tensor(txn, f"{user}_feature_{i}", device)
+    label_elapsed_days_int = load_tensor(txn, f"{user}_label_elapsed_days_int_{i}", device)
+    label_elapsed_days_real = load_tensor(txn, f"{user}_label_elapsed_days_real_{i}", device)
+    label_y = load_tensor(txn, f"{user}_label_y_{i}", device)
+    label_review_th = load_tensor(txn, f"{user}_label_review_th_{i}", device)
+    label_is_same_day = load_tensor(txn, f"{user}_label_is_same_day_{i}", device)
+    label_is_equalize = load_tensor(txn, f"{user}_label_is_equalize_{i}", device)
+    has_label = load_tensor(txn, f"{user}_has_label_{i}", device)
+    return features, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label
+
+def get_batches(txn, user_id, device):
+    num_batches = load_tensor(txn, f"{user_id}_batches", torch.device("cpu")).item()
+    indices = list(range(num_batches))
+    return [load_batch(txn, user_id, i, device) for i in indices]
+
+def evaluate(fsrs_txn, fsrs, parameters, user_id, min_review_th=0, max_review_th=int(1e9), device=torch.device("cpu"), equalize_test_reviews=False, include_rmse_bins=False, skip_same_day_reviews=True):
+    batches = get_batches(fsrs_txn, user_id, device)
+    loss_tot = 0
+    loss_n = 0
+    for batch in batches:
+        features_bl2, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_y_bl, label_review_th_bl, label_is_same_day_bl, label_is_equalize_bl, has_label_bl = batch
+        out_bl = fsrs(parameters=parameters, inputs_bl2=features_bl2, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
+        # print("features")
+        # print(features_bl2)
+        # print("out")
+        # print(out_bl)
+        # print("time")
+        # print(label_elapsed_days_real_bl)
+        # print(label_elapsed_days_int_bl)
+        # print("y")
+        # print(label_y_bl)
+        assert not out_bl.isnan().any()
+        label_y_bl = label_y_bl.float()
+        label_mask_bl = has_label_bl * (min_review_th <= label_review_th_bl) * (label_review_th_bl <= max_review_th)
+        if equalize_test_reviews:
+            label_mask_bl = label_mask_bl * label_is_equalize_bl
+        if skip_same_day_reviews:
+            label_mask_bl = label_mask_bl * ~label_is_same_day_bl
+        
+        # print("review th")
+        # print(label_review_th_bl)
+        # print("mask")
+        # print(label_mask_bl)
+
+        # print(out_bl.shape)
+        loss_fn = torch.nn.BCELoss(reduction="none")
+        loss_bl = loss_fn(out_bl, label_y_bl)
+        # print("loss")
+        # print(loss_bl)
+
+        loss_tot += (loss_bl * label_mask_bl).sum()
+        loss_n += label_mask_bl.sum()
+    print("here.", loss_tot.item(), loss_tot.item() / loss_n.item(), loss_n.item())
+    return loss_tot / loss_n
+
+
+def main():
+    device = torch.device("cuda")
+    fsrs = FSRS6().to(device)
+    parameters = torch.tensor([
+        0.2172,
+        1.1771,
+        3.2602,
+        16.1507,
+        7.0114,
+        0.57,
+        2.0966,
+        0.0069,
+        1.5261,
+        0.112,
+        1.0178,
+        1.849,
+        0.1133,
+        0.3127,
+        2.2934,
+        0.2191,
+        3.0004,
+        0.7536,
+        0.3332,
+        0.1437,
+        0.2,
+    ], device=device)
+
+    DB_PATH = "fsrs_evaluate_db"
+    env = lmdb.open(DB_PATH, readonly=True, lock=False)
+    with env.begin(write=False) as txn:
+        for user_id in range(1, 11):
+            evaluate(txn, fsrs=fsrs, parameters=parameters, user_id=user_id, min_review_th=1, max_review_th=1e9, device=device, equalize_test_reviews=True)
+        # evaluate(txn, fsrs=fsrs, parameters=parameters, user_id=4, device=device, equalize_test_reviews=True)
+    env.close()
+
+if __name__ == '__main__':
+    main()
