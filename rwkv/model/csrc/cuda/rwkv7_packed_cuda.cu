@@ -41,16 +41,16 @@ __global__ void rwkv7_packed_wkv_forward_kernel(
     const int64_t* __restrict__ checkpoints_indices_I
     ) {
     const int K = 32;
-    int i = blockIdx.x;
-    int h = blockIdx.y;
+    const int i = blockIdx.x;
+    const int h = blockIdx.y;
 
-    int x = threadIdx.y;
-    int y = threadIdx.x;
+    const int x = threadIdx.y;
+    const int y = threadIdx.x;
 
     int64_t checkpoint_index = checkpoints_indices_I[i];
-    int start_index = indices_I[i];
-    int end_index_ex = i == I - 1 ? T : indices_I[i + 1];
-    int tot_t = end_index_ex - start_index;
+    const int start_index = indices_I[i];
+    const int end_index_ex = i == I - 1 ? T : indices_I[i + 1];
+    const int tot_t = end_index_ex - start_index;
     float state_xy = 0.0;
     for (int it = 0; it < tot_t; it++) {
         if (it > 0 && it % CHUNK_LEN == 0) {
@@ -124,14 +124,122 @@ __global__ void rwkv7_packed_wkv_backward_kernel(
     const int x = threadIdx.y;
     const int y = threadIdx.x;
 
-    int64_t checkpoint_index = checkpoints_indices_I[i];
-    int start_index = indices_I[i];
-    int end_index_ex = i == I - 1 ? T : indices_I[i + 1];
-    int tot_t = end_index_ex - start_index;
+    const int64_t checkpoint_index_offset = checkpoints_indices_I[i];
+    const int start_index = indices_I[i];
+    const int end_index_ex = i == I - 1 ? T : indices_I[i + 1];
+    const int tot_t = end_index_ex - start_index;
+    const int num_chunks = (tot_t - 1 + CHUNK_LEN) / CHUNK_LEN;
 
+    // TODO does this do anything? and check the other code as well
     if (x == 0) {
         a_grad_THK[get_index2(start_index, h, y, H, K)] = to_F<F>(0.0);
         k_deformed_grad_THK[get_index2(start_index, h, y, H, K)] = to_F<F>(0.0);
+    }
+
+    float dS_xy_contrib = 0.0;
+    for (int chunk_i = num_chunks - 1; chunk_i >= 0; chunk_i--) {
+        // recompute the states from the checkpoints
+        float state_xy = chunk_i == 0 ? 0.0 : state_checkpoints_LHKK[get_index3(checkpoint_index_offset + chunk_i - 1, h, x, y, H, K, K)];
+        for (int c = 0; c < CHUNK_LEN; c++) {
+            int it = chunk_i * CHUNK_LEN + c;
+            if (it >= tot_t) break;
+
+            state_prev_xy_chunk[c] = state_xy;
+            int64_t t = start_index + it;
+            int64_t global_x = get_index2(t, h, x, H, K);
+            int64_t global_y = get_index2(t, h, y, H, K);
+            float r_y = to_float<F>(r_THK[global_y]);
+            float k_y = to_float<F>(k_THK[global_y]);
+            float v_x = to_float<F>(v_THK[global_x]);
+            float w_y = w_THK[global_y];
+            float a_y = to_float<F>(a_THK[global_y]);
+            float k_deformed_y = to_float<F>(k_deformed_THK[global_y]);
+            float state_xy_decayed = state_xy * w_y;
+            float state_k_dot = state_xy * k_deformed_y;
+            for (int offset = 16; offset > 0; offset /= 2) {
+                state_k_dot += __shfl_down_sync(FULL_MASK, state_k_dot, offset);
+            }
+            state_k_dot = __shfl_sync(FULL_MASK, state_k_dot, 0);
+            state_xy = state_xy_decayed - state_k_dot * a_y * k_deformed_y;
+            state_xy += v_x * k_y;
+            state_xy_chunk[c] = state_xy;
+        }
+        
+        for (int t = std::min(end_index_ex - 1, (chunk_i + 1) * CHUNK_LEN - 1); t >= chunk_i * CHUNK_LEN; t--) {
+            int c = t - chunk_i * CHUNK_LEN;
+            float state_xy = state_xy_chunk[c];
+            KK_state[get_index1(x, y, K+1)] = state_xy;
+            KK_state_prev[get_index1(x, y, K+1)] = state_prev_xy_chunk[c];
+            int64_t global_x = get_index2(t, h, x, H, K);
+            int64_t global_y = get_index2(t, h, y, H, K);
+            float r_y = to_float<F>(r_THK[global_y]);
+            float k_y = to_float<F>(k_THK[global_y]);
+            float v_y = to_float<F>(v_THK[global_y]);
+            float w_y = w_THK[global_y];
+            float a_y = to_float<F>(a_THK[global_y]);
+            float k_deformed_x = to_float<F>(k_deformed_THK[global_x]);
+            float k_deformed_y = to_float<F>(k_deformed_THK[global_y]);
+            float grad_x = to_float<F>(grad_THK[global_x]);
+            float grad_y = to_float<F>(grad_THK[global_y]);
+            float dS_xy = grad_x * r_y + dS_xy_contrib;
+            dS_xy_contrib = 0.0;
+            float dS_xy_decay = dS_xy * w_y;
+            float dS_xy_remove = dS_xy * a_y * k_deformed_y;
+            KK_dS[get_index1(x, y, K + 1)] = dS_xy;
+            if (x == 0) {
+                K_k_deformed[y] = k_deformed_y;
+                K_a[y] = a_y;
+            }
+
+            __syncthreads(); // for KK_state, KK_dS
+
+            float grad_decay_remove_xy = 0.0;
+            for (int k = 0; k < K; k++) {
+                grad_decay_remove_xy += KK_state_prev[get_index1(k, x, K+1)] * KK_dS[get_index1(k, y, K+1)];
+            }
+            if (x == y) {
+                w_grad_THK[get_index2(t, h, x, H, K)] = grad_decay_remove_xy;
+            }
+            KK_grad_decay[get_index1(x, y, K+1)] = grad_decay_remove_xy;
+
+            float state_mT_xy = KK_state[get_index1(y, x, K + 1)];
+            float state_grad_dot = state_mT_xy * grad_y;
+            float v_grad_x = dS_xy * k_y;
+            float k_grad_x = KK_dS[get_index1(y, x, K + 1)] * v_y;
+
+            for (int offset = 16; offset > 0; offset /= 2) {
+                v_grad_x += __shfl_down_sync(FULL_MASK, v_grad_x, offset);
+                k_grad_x += __shfl_down_sync(FULL_MASK, k_grad_x, offset);
+                state_grad_dot += __shfl_down_sync(FULL_MASK, state_grad_dot, offset);
+                dS_xy_remove += __shfl_down_sync(FULL_MASK, dS_xy_remove, offset);
+            }
+            if (y == 0) {
+                v_grad_THK[get_index2(t, h, x, H, K)] = to_F<F>(v_grad_x);
+                k_grad_THK[get_index2(t, h, x, H, K)] = to_F<F>(k_grad_x);
+                r_grad_THK[get_index2(t, h, x, H, K)] = to_F<F>(state_grad_dot);
+            }
+            __syncthreads(); // for KK_grad_decay
+
+            float KK_grad_decay_yx = KK_grad_decay[get_index1(y, x, K+1)];
+            float a_grad_x = -KK_grad_decay_yx * K_k_deformed[y];
+            float k_deformed_t1 = -grad_decay_remove_xy * K_a[y] * K_k_deformed[y];
+            float k_deformed_t2 = -K_a[x] * KK_grad_decay_yx * K_k_deformed[y];
+            // TODO potential tensor core optimization
+            for (int offset = 16; offset > 0; offset /= 2) {
+                a_grad_x += __shfl_down_sync(FULL_MASK, a_grad_x, offset);
+                k_deformed_t1 += __shfl_down_sync(FULL_MASK, k_deformed_t1, offset);
+                k_deformed_t2 += __shfl_down_sync(FULL_MASK, k_deformed_t2, offset);
+            }
+            
+            if (y == 0) {
+                a_grad_THK[get_index2(t, h, x, H, K)] = to_F<F>(a_grad_x * K_k_deformed[x]);
+                k_deformed_grad_THK[get_index2(t, h, x, H, K)] = to_F<F>(k_deformed_t1 + k_deformed_t2);
+            }
+
+            dS_xy_remove = __shfl_sync(FULL_MASK, dS_xy_remove, 0);
+            dS_xy_contrib += dS_xy_decay - dS_xy_remove * k_deformed_y;
+            __syncthreads();
+        }
     }
 }
 

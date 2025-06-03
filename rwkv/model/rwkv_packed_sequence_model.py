@@ -329,7 +329,6 @@ class RWKV7PackedTimeMixer(ModuleType):
         k_deformed_THK = k_THK
         k_THK = k_THK * a_THK
 
-        # TODO
         out_THK = RWKV7_Packed_WKV.apply(
             indices_I, r_THK, k_THK, v_THK, w_THK, a_THK, k_deformed_THK
         )
