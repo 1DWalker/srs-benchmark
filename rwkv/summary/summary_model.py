@@ -36,8 +36,7 @@ class SummaryCore(ModuleType):
         in_TC = self.initial_encoding(in_TC)
         card_in_TC = in_TC[perm_T]
         card_encoding_TC = self.card_encoder(card_in_TC, indices_I) 
-
-        timeshift_select_1T = torch.cat((torch.zeros(1, dtype=torch.long, device=in_TC.device), torch.arange(T - 1, dtype=torch.long, device=in_TC.device))).unsqueeze(0)
+        timeshift_select_1T = torch.cat((torch.zeros(1, dtype=torch.long, device=in_TC.device), torch.arange(start=0, end=T - 1, dtype=torch.long, device=in_TC.device))).unsqueeze(0)
         skip_1T = torch.full((T,), fill_value=0, dtype=torch.bool, device=in_TC.device).unsqueeze(0)
         global_in_TC = card_encoding_TC[perm_inv_T]
         global_out_TC = self.global_encoder(global_in_TC.unsqueeze(0), timeshift_select_1T, skip_1T).squeeze(0)
@@ -91,7 +90,7 @@ class FSRSSummaryModel(ModuleType):
     def __init__(self):
         super().__init__()
         self.core = SummaryCore()
-        self.fsrs_layer = ToFSRSParams()
+        self.fsrs_layer = ToFSRSParams(in_dim=21)
     
     @FunctionType
     def forward(self, in_TC, indices_I, perm_T, perm_inv_T):

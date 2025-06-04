@@ -46,7 +46,7 @@ class RWKV7Packed(torch.nn.Module):
     def forward(self, in_TC, indices_I):
         T, C = in_TC.shape
         x_TC, v0_TC = in_TC, torch.empty_like(in_TC)
-        time_shift_select_T = torch.arange(T, device=in_TC.device, requires_grad=False) - 1
+        time_shift_select_T = torch.arange(T, device=in_TC.device) - 1
         time_shift_select_T[indices_I] = indices_I
         for _, block in enumerate(self.blocks):
             x_TC, v0_TC = block(

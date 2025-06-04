@@ -1,0 +1,16 @@
+SUMMARY_DB_PATH = "summary_db"
+LABEL_FILTER_DB_PATH = "label_filter_db"
+FSRS_EVALUATE_DB_PATH = "fsrs_evaluate_db"
+
+SEED = 123
+
+TRAIN_USER_START = 1
+TRAIN_USER_END = 1
+
+VALIDATE_USER_START = 1
+VALIDATE_USER_END = 1
+
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+PEAK_LR = 1e-3
