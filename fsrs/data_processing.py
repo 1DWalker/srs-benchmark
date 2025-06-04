@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 import random
 
+from other import get_bin
 from rwkv.utils import load_tensor
 from utils import parse_toml
 
@@ -102,11 +103,16 @@ def process(user_id, config):
     df_revlogs.drop(columns=["user_id"], inplace=True)
     equalize_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
     with equalize_env.begin(write=False) as txn:
-        equalize_review_ths_list = load_tensor(txn, f"{user_id}_review_ths", device="cpu").tolist()
-    equalize_review_ths_set = set(equalize_review_ths_list)
+        equalize_review_ths = load_tensor(txn, f"{user_id}_review_ths", device="cpu")
+        rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device="cpu")
+    # rmse_bins_dict = dict(zip(equalize_review_ths_list, rmse_bins))
+    equalize_review_ths_set = set(equalize_review_ths.tolist())
     df_revlogs["is_equalize_review"] = df_revlogs["review_th"].isin(equalize_review_ths_set).astype(int)
+    # df_revlogs["rmse_bin"] = df_revlogs["review_th"].map(rmse_bins_dict).fillna(-1)
+    # print(df_revlogs["is_equalize_review"])
+    # print(df_revlogs["rmse_bin"])
     card_id_to_tensors = process_df(df_revlogs, config.DTYPE, torch.device("cpu"))
-
+    
     sizes_freq_dict = {}
     for card_id, tensors in card_id_to_tensors.items():
         features = tensors[0]
@@ -154,7 +160,7 @@ def process(user_id, config):
     assert total_size / len(df_revlogs) <= 1.01 * config.MAX_FACTOR
     assert total_size <= 1.01 * config.MAX_TOTAL_SIZE
 
-    return result
+    return (result, equalize_review_ths, rmse_bins)
 
 
 def job(user_id, config, writer_queue, progress_queue):
@@ -176,7 +182,7 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
         sample = writer_queue.get()
         if sample is None:
             break
-        user_id, tensors = sample
+        user_id, (tensors, equalize_review_ths, rmse_bins) = sample
 
         with env.begin(write=True) as txn:
             for i, (feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label) in enumerate(
@@ -193,6 +199,8 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
                 save_tensor(txn, f"{user_id}_label_is_equalize_{i}", label_is_equalize)
                 save_tensor(txn, f"{user_id}_has_label_{i}", has_label)
 
+            save_tensor(txn, f"{user_id}_equalize_review_ths", torch.tensor(equalize_review_ths))
+            save_tensor(txn, f"{user_id}_rmse_bins", torch.tensor(rmse_bins))
             save_tensor(txn, f"{user_id}_batches", torch.tensor(len(tensors)))
             txn.put(f"{user_id}_done".encode(), "true".encode())
             print("Done", user_id)
@@ -219,6 +227,7 @@ def main(config):
                 unprocessed_users.append(user_id)
     env.close()
     print("unprocessed:", unprocessed_users)
+    unprocessed_users = list(range(1, 2))
 
 
     with multiprocessing.Manager() as manager:
@@ -250,7 +259,7 @@ def main(config):
 
 if __name__ == "__main__":
     config = parse_toml()
-    # process(8902, config)
+    # process(1, config)
     main(config)
     # exit()
 

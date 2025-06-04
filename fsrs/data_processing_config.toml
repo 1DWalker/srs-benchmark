@@ -16,6 +16,6 @@ PROCESSES = 9
 MAX_TOTAL_SIZE = 6_000_000
 
 # The memory usage is at most MAX_FACTOR * len(revlog) * memory_per_review
-# Should be optimized for throughput
+# Should be optimized for throughput and storage size
 # For CPU usage the optimal value would likely be smaller
-MAX_FACTOR = 8
+MAX_FACTOR = 4
