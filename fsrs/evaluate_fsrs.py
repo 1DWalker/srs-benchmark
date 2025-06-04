@@ -59,17 +59,16 @@ def evaluate(txn, model, parameters, user_id, min_review_th=0, max_review_th=int
             B, L = label_y_bl.shape
             mask_np = label_mask_bl.cpu().numpy()
             out_np = out_bl.detach().cpu().numpy()
-            has_label_np = has_label_bl.cpu().numpy()
             label_review_th_np = label_review_th_bl.cpu().numpy()
             label_y_np = label_y_bl.cpu().numpy()
             for b in range(B):
                 for l in range(L):
-                    if mask_np[b][l]:
-                        y.append(label_y_np[b][l])
-                        y_pred.append(out_np[b][l])
-                        bin = rmse_bins_dict[label_review_th_np[b][l]]
-                        bin_y[bin].append(label_y_np[b][l])
-                        bin_y_pred[bin].append(out_np[b][l])
+                    if mask_np[b, l]:
+                        y.append(label_y_np[b, l])
+                        y_pred.append(out_np[b, l])
+                        bin = rmse_bins_dict[label_review_th_np[b, l]]
+                        bin_y[bin].append(label_y_np[b, l])
+                        bin_y_pred[bin].append(out_np[b, l])
 
     if loss_n == 0:
         return torch.zeros_like(loss_tot)
@@ -133,7 +132,7 @@ def main():
     env = lmdb.open(DB_PATH, readonly=True, lock=False)
     with env.begin(write=False) as txn:
         n = 0
-        for user_id in range(1, 2):
+        for user_id in range(1, 101):
             if user_id == 10:
                 time_start = time.time()
             with torch.no_grad():
