@@ -84,12 +84,9 @@ class FSRS6(ModuleType):
         :return state:
         """
         if torch.equal(state, torch.zeros_like(state)):
-            keys = torch.tensor([1, 2, 3, 4], device=state.device)
-            keys = keys.view(1, -1).expand(X[:, 1].long().size(0), -1)
-            index = (X[:, 1].long().unsqueeze(1) == keys).nonzero(as_tuple=True)
             # first learn, init memory states
             new_s = torch.ones_like(state[:, 0])
-            new_s[index[0]] = w[index[1]]
+            new_s = w[X[:, 1].long() - 1]
             new_d = self.init_d(w, X[:, 1])
             new_d = new_d.clamp(1, 10)
         else:
