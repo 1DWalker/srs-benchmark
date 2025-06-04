@@ -15,11 +15,11 @@ def __nop(ob):
     return ob
 
 
-ModuleType = torch.nn.Module
-FunctionType = __nop
+# ModuleType = torch.nn.Module
+# FunctionType = __nop
 
-# ModuleType = torch.jit.ScriptModule
-# FunctionType = torch.jit.script_method
+ModuleType = torch.jit.ScriptModule
+FunctionType = torch.jit.script_method
 
 @dataclass
 class RWKV7PackedConfig:
@@ -31,6 +31,8 @@ class RWKV7PackedConfig:
     a_lora: int  # a = in-context learning rate
     v0_mix_amt_lora: int
     gate_lora: int
+    dropout: float
+    dropout_layer: float
 
 class RWKV7Packed(torch.nn.Module):
     def __init__(self, config: RWKV7PackedConfig):
@@ -63,6 +65,7 @@ class RWKV7PackedLayer(ModuleType):
         super().__init__()
         self.time_mixer = RWKV7PackedTimeMixer(config, layer_id)
         self.channel_mixer = RWKV7PackedChannelMixer(config, layer_id)
+        self.dropout = torch.nn.Dropout(p=config.dropout_layer)
 
     @FunctionType
     def forward(self, in_TC, indices_I, v0_TC, time_shift_select_T):
@@ -73,7 +76,7 @@ class RWKV7PackedLayer(ModuleType):
             time_shift_select_T=time_shift_select_T,
         )
         return (
-            self.channel_mixer(x_TC, time_shift_select_T),
+            self.dropout(self.channel_mixer(x_TC, time_shift_select_T)),
             v0_TC,
         )
 
@@ -104,6 +107,8 @@ class RWKV7PackedChannelMixer(ModuleType):
             )
             self.W_v.weight.data.zero_()
 
+            self.dropout = torch.nn.Dropout(p=config.dropout)
+
     @FunctionType
     def forward(self, in_TC, time_shift_select_T):
         x_TC = self.layer_norm(in_TC)
@@ -114,7 +119,7 @@ class RWKV7PackedChannelMixer(ModuleType):
         )
         k_TK = self.W_k(torch.lerp(x_TC, x_shift_TC, self.lerp_k))
         o_TC = self.W_v(torch.square(torch.nn.functional.relu(k_TK)))
-        return in_TC + o_TC
+        return in_TC + self.dropout(o_TC)
 
 
 def ortho_init(x, scale):
@@ -280,6 +285,7 @@ class RWKV7PackedTimeMixer(ModuleType):
             self.out_group_norm = torch.nn.GroupNorm(
                 config.n_heads, config.d_model, eps=64e-5
             )
+            self.dropout = torch.nn.Dropout(p=config.dropout)
 
     @FunctionType
     def forward(self, in_TC, indices_I, v0_TC, time_shift_select_T):
@@ -338,4 +344,4 @@ class RWKV7PackedTimeMixer(ModuleType):
             (r_THK * self.bonus * k_THK).sum(dim=-1, keepdim=True) * v_THK
         ).view(T, C)
         out_TC = self.W_o(g_TC * (out_TC + bonus_TC))
-        return in_TC + out_TC, v0_TC
+        return in_TC + self.dropout(out_TC), v0_TC

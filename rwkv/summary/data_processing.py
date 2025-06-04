@@ -42,7 +42,6 @@ def process(user_id, config):
     scaled_duration_T1 = (torch.log(10 + torch.tensor(df["duration"], dtype=config.DTYPE)) - 9).unsqueeze(-1)
     df["day_offset_diff"] = df["day_offset"].diff().fillna(0)
     scaled_day_offset_diff_T1 = torch.log(torch.log(np.e + torch.tensor(df["day_offset_diff"], dtype=config.DTYPE))).unsqueeze(-1)
-    # features_T9 = torch.cat((rating_onehot_T4, scaled_seconds_T1, scaled_elapsed_days_T1, scaled_duration_T1, scaled_state_T1, scaled_day_offset_diff_T1), dim=-1)
 
     perm_T_tensor = torch.tensor(perm, dtype=torch.int)
     perm_inv_T_tensor = torch.tensor(perm_inv, dtype=torch.int)

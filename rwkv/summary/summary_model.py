@@ -1,5 +1,6 @@
 
 
+import math
 import random
 import time
 import numpy as np
@@ -25,21 +26,19 @@ class SummaryCore(ModuleType):
             torch.nn.Linear(9, 32),
             torch.nn.Mish(),
         )
-        rwkv7packed_config = RWKV7PackedConfig(d_model=32, n_heads=1, n_layers=2, channel_mixer_factor=1.5, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8)
+        rwkv7packed_config = RWKV7PackedConfig(d_model=32, n_heads=1, n_layers=2, channel_mixer_factor=1.5, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8, dropout=0.0, dropout_layer=0.0)
         self.card_encoder = RWKV7Packed(rwkv7packed_config)
-        rwkv7_config = RWKV7Config(d_model=32, n_heads=1, n_layers=3, channel_mixer_factor=2.0, layer_offset=0, total_layers=3, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8, dropout=0.01, dropout_layer=0.01)
+        rwkv7_config = RWKV7Config(d_model=32, n_heads=1, n_layers=4, channel_mixer_factor=2.0, layer_offset=0, total_layers=4, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8, dropout=0.0, dropout_layer=0.0)
         self.global_encoder = RWKV7(rwkv7_config)
 
     @FunctionType
-    def forward(self, in_TC, indices_I, perm_T, perm_inv_T):
+    def forward(self, in_TC, indices_I, perm_T, perm_inv_T, timeshift_select_T, skip_T):
         T, _ = in_TC.shape
         in_TC = self.initial_encoding(in_TC)
         card_in_TC = in_TC[perm_T]
         card_encoding_TC = self.card_encoder(card_in_TC, indices_I) 
-        timeshift_select_1T = torch.cat((torch.zeros(1, dtype=torch.long, device=in_TC.device), torch.arange(start=0, end=T - 1, dtype=torch.long, device=in_TC.device))).unsqueeze(0)
-        skip_1T = torch.full((T,), fill_value=0, dtype=torch.bool, device=in_TC.device).unsqueeze(0)
         global_in_TC = card_encoding_TC[perm_inv_T]
-        global_out_TC = self.global_encoder(global_in_TC.unsqueeze(0), timeshift_select_1T, skip_1T).squeeze(0)
+        global_out_TC = self.global_encoder(global_in_TC.unsqueeze(0), timeshift_select_T.unsqueeze(0), skip_T.unsqueeze(0)).squeeze(0)
         return global_out_TC
 
 class ToFSRSParams(ModuleType):
@@ -50,14 +49,25 @@ class ToFSRSParams(ModuleType):
         torch.nn.init.zeros_(self.fsrs_linear.weight)
         torch.nn.init.zeros_(self.fsrs_linear.bias)
 
+    # @FunctionType
+    # def transform_bounded(self, param, min: float, max: float, middle: float):
+    #     return min + (max - min) * torch.sigmoid(param + torch.logit(torch.tensor((middle - min) / (max - min), device=param.device)))
+
+    # @FunctionType
+    # def transform_bounded_exp(self, param, min: float, max: float, middle: float):
+    #     device = param.device
+    #     return torch.exp(self.transform_bounded(param, torch.log(torch.tensor(min, device=device)), torch.log(torch.tensor(max, device=device)), torch.log(torch.tensor(middle, device=device))))
+    
     @FunctionType
     def transform_bounded(self, param, min: float, max: float, middle: float):
-        return min + (max - min) * torch.sigmoid(param + torch.logit(torch.tensor((middle - min) / (max - min), device=param.device)))
+        scale = max - min
+        midpoint = (middle - min) / scale
+        bias = math.log(midpoint / (1 - midpoint))
+        return min + scale * torch.sigmoid(param + bias)
 
     @FunctionType
     def transform_bounded_exp(self, param, min: float, max: float, middle: float):
-        device = param.device
-        return torch.exp(self.transform_bounded(param, torch.log(torch.tensor(min, device=device)), torch.log(torch.tensor(max, device=device)), torch.log(torch.tensor(middle, device=device))))
+        return torch.exp(self.transform_bounded(param, math.log(min), math.log(max), math.log(middle)))
 
     @FunctionType
     def forward(self, x):
@@ -90,16 +100,16 @@ class FSRSSummaryModel(ModuleType):
     def __init__(self):
         super().__init__()
         self.core = SummaryCore()
-        self.fsrs_layer = ToFSRSParams(in_dim=21)
+        self.fsrs_layer = ToFSRSParams(in_dim=32)
     
     @FunctionType
-    def forward(self, in_TC, indices_I, perm_T, perm_inv_T):
-        return self.fsrs_layer(self.core(in_TC, indices_I, perm_T, perm_inv_T))
+    def forward(self, in_TC, indices_I, perm_T, perm_inv_T, timeshift_select_T, skip_T):
+        return self.fsrs_layer(self.core(in_TC, indices_I, perm_T, perm_inv_T, timeshift_select_T, skip_T))
 
     def is_excluded(self, name):
         DTYPE_EXCLUDE = [
-            "fsrs_ln",
             "fsrs_linear",
+            "fsrs_ln",
         ]
         for query in DTYPE_EXCLUDE:
             if query in name:
@@ -117,7 +127,7 @@ class FSRSSummaryModel(ModuleType):
 
     def selective_cast(self, dtype):
         for name, module in self.named_modules():
-            if len(name) == 0:
+            if len(name) == 0 or name == "fsrs_layer":
                 # Skip the root module
                 continue
             if not self.is_excluded(name):

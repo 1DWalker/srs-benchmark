@@ -14,8 +14,7 @@ from tqdm import tqdm
 import random
 
 from other import get_bin
-from rwkv.utils import load_tensor
-from utils import parse_toml, save_tensor
+from utils import load_tensor, parse_toml, save_tensor
 
 random.seed(1234)
 
@@ -205,6 +204,9 @@ def progress_tracker(total_items, progress_queue):
 
 def main(config):
     USER_IDS = list(range(config.USER_START, config.USER_END + 1))
+    if 4371 in USER_IDS:
+        USER_IDS.remove(4371)
+        print("Removed user 4371.")
 
     done_set = set()
     unprocessed_users = []

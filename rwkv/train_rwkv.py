@@ -19,6 +19,7 @@ from rwkv.architecture import *
 from rwkv.utils import (
     KeyValueAverage,
     get_number_of_trainable_parameters,
+    transfer_child_grad_to_master,
 )
 from utils import parse_toml
 
@@ -244,26 +245,6 @@ def validate(model, data_fetcher, all_db_keys, users, device):
         print("Exception in validate. RWKV-7 nan?")
         print(e)
         return None
-
-
-def transfer_child_grad_to_master(master, child):
-    master_params = dict(master.named_parameters())
-    for name, param in child.named_parameters():
-        # print(name, param.grad)
-        master_param = master_params[name]
-        if (
-            param.grad is not None
-        ):  # None happens on the first few iterations for some params
-            # Add the child model's grad
-            with torch.no_grad():
-                if master_param.grad is None:
-                    master_param.grad = torch.zeros_like(
-                        master_param, requires_grad=True
-                    )
-                master_param.grad.add_(param.grad.to(torch.float32))
-            # Set the child model's grad to zero
-            param.grad.zero_()
-
 
 def get_test_keys(dataset_path, dataset_size, users):
     dataset = lmdb.open(dataset_path, map_size=dataset_size)

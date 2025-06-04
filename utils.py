@@ -1,6 +1,8 @@
 import argparse
 from io import BytesIO
+import os
 from pathlib import Path
+import lmdb
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import root_mean_squared_error  # type: ignore
@@ -148,6 +150,16 @@ def parse_toml():
             args["DATA_PATH"] = Path(args["DATA_PATH"])
         return argparse.Namespace(**args)
 
+def compact_lmdb(source_path, compacted_path):
+    env = lmdb.open(source_path, readonly=True, lock=False)
+
+    # Make sure the target path is empty
+    if not os.path.exists(compacted_path):
+        os.makedirs(compacted_path)
+
+    # Copy data to a new environment, which will be compact
+    env.copy(compacted_path, compact=True)
+    env.close()
 
 def load_tensor(txn, key, device):
     tensor_bytes = txn.get(key.encode())

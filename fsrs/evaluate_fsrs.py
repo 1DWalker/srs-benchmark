@@ -5,7 +5,7 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, root_mean_squared_error
 import torch
 from fsrs.fsrs import FSRS6
-from rwkv.utils import load_tensor
+from utils import load_tensor
 
 
 def load_batch(txn, user, i, device):
@@ -24,21 +24,12 @@ def load_batch(txn, user, i, device):
 def get_data(txn, user_id, device):
     num_batches = load_tensor(txn, f"{user_id}_batches", torch.device("cpu")).item()
     indices = list(range(num_batches))
-    equalize_review_ths = load_tensor(txn, f"{user_id}_equalize_review_ths", device).tolist()
-    rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device).tolist()
-    return [load_batch(txn, user_id, i, device) for i in indices], equalize_review_ths, rmse_bins
+    return [load_batch(txn, user_id, i, device) for i in indices]
 
-def evaluate(txn, model, parameters, user_id, min_review_th=0, max_review_th=int(1e9), device=torch.device("cpu"), equalize_test_reviews=False, include_other_metrics=False, skip_same_day_reviews=True):
-    if include_other_metrics:
-        assert skip_same_day_reviews, "not supported otherwise. bins might not be precomputed properly?"
-    batches, equalize_review_ths, rmse_bins = get_data(txn, user_id, device)
-    rmse_bins_dict = dict(zip(equalize_review_ths, rmse_bins))
-    bin_y_pred = {bin: [] for bin in set(rmse_bins)}
-    bin_y = {bin: [] for bin in set(rmse_bins)}
+def evaluate(txn, model, parameters, user_id, min_review_th=0, max_review_th=int(1e9), device=torch.device("cpu"), equalize_test_reviews=False, skip_same_day_reviews=True):
+    batches = get_data(txn, user_id, device)
     loss_tot = 0
     loss_n = 0
-    y_pred = []
-    y = []
     for batch in batches:
         features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_y_bl, label_review_th_bl, label_is_same_day_bl, label_is_equalize_bl, has_label_bl = batch
         out_bl = model(parameters, features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
@@ -54,8 +45,45 @@ def evaluate(txn, model, parameters, user_id, min_review_th=0, max_review_th=int
         loss_bl = loss_fn(out_bl, label_y_bl)
         loss_tot += (loss_bl * label_mask_bl).sum()
         loss_n += label_mask_bl.sum()
+    if loss_n == 0:
+        return torch.zeros_like(loss_tot), torch.zeros_like(loss_tot), 0
+    return loss_tot / loss_n, loss_tot, loss_n
 
-        if include_other_metrics:
+def evaluate_full(txn, model, parameter_list, splits_list, user_id, device=torch.device("cpu"), equalize_test_reviews=False, skip_same_day_reviews=True):
+    assert skip_same_day_reviews, "not supported otherwise. bins might not be precomputed properly?"
+    assert len(splits_list) == len(parameter_list) + 1
+    batches = get_data(txn, user_id, device)
+    equalize_review_ths = load_tensor(txn, f"{user_id}_equalize_review_ths", device).tolist()
+    rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device).tolist()
+
+    rmse_bins_dict = dict(zip(equalize_review_ths, rmse_bins))
+    bin_y_pred = {bin: [] for bin in set(rmse_bins)}
+    bin_y = {bin: [] for bin in set(rmse_bins)}
+    loss_tot = 0
+    loss_n = 0
+    y_pred = []
+    y = []
+    for split_i in range(len(parameter_list)):
+        parameters = parameter_list[split_i]
+        min_review_th = splits_list[split_i]
+        max_review_th = splits_list[split_i + 1] - 1
+
+        for batch in batches:
+            features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_y_bl, label_review_th_bl, label_is_same_day_bl, label_is_equalize_bl, has_label_bl = batch
+            out_bl = model(parameters, features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
+            assert not out_bl.isnan().any()
+            label_y_bl = label_y_bl.float()
+            label_mask_bl = has_label_bl * (min_review_th <= label_review_th_bl) * (label_review_th_bl <= max_review_th)
+            if equalize_test_reviews:
+                label_mask_bl = label_mask_bl * label_is_equalize_bl
+            if skip_same_day_reviews:
+                label_mask_bl = label_mask_bl * ~label_is_same_day_bl
+            
+            loss_fn = torch.nn.BCELoss(reduction="none")
+            loss_bl = loss_fn(out_bl, label_y_bl)
+            loss_tot += (loss_bl * label_mask_bl).sum()
+            loss_n += label_mask_bl.sum()
+
             B, L = label_y_bl.shape
             mask_np = label_mask_bl.cpu().numpy()
             out_np = out_bl.detach().cpu().numpy()
@@ -71,35 +99,31 @@ def evaluate(txn, model, parameters, user_id, min_review_th=0, max_review_th=int
                         bin_y_pred[bin].append(out_np[b, l])
 
     if loss_n == 0:
-        return torch.zeros_like(loss_tot)
+        return 0, 0, 0, 0, 0
 
-    if include_other_metrics:
-        rmse_raw = root_mean_squared_error(y_true=y, y_pred=y_pred)
-        try:
-            auc = round(roc_auc_score(y_true=y, y_score=y_pred), 6)
-        except:
-            auc = None
-        if np.isnan(auc):
-            auc = None
+    rmse_raw = root_mean_squared_error(y_true=y, y_pred=y_pred)
+    try:
+        auc = round(roc_auc_score(y_true=y, y_score=y_pred), 6)
+    except:
+        auc = None
 
-        rows = []
-        for bin in bin_y_pred.keys():
-            for y, pred in zip(bin_y[bin], bin_y_pred[bin]):
-                rows.append([bin, y, pred, 1])
-        assert len(rows) == len(equalize_review_ths)
+    rows = []
+    for bin in bin_y_pred.keys():
+        for y, pred in zip(bin_y[bin], bin_y_pred[bin]):
+            rows.append([bin, y, pred, 1])
+    assert len(rows) == len(equalize_review_ths)
 
-        tmp = pd.DataFrame(rows, columns=["bin", "y", "p", "weights"])
-        tmp = (
-            tmp.groupby("bin")
-            .agg({"y": "mean", "p": "mean", "weights": "sum"})
-            .reset_index()
-        )
-        rmse_bins = root_mean_squared_error(
-            tmp["y"], tmp["p"], sample_weight=tmp["weights"]
-        )
-        print(f"RMSE: {rmse_raw:.6f}, LogLoss: {loss_tot / loss_n:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {auc:.6f}")
-    return loss_tot / loss_n
+    tmp = pd.DataFrame(rows, columns=["bin", "y", "p", "weights"])
+    tmp = (
+        tmp.groupby("bin")
+        .agg({"y": "mean", "p": "mean", "weights": "sum"})
+        .reset_index()
+    )
+    rmse_bins = root_mean_squared_error(
+        tmp["y"], tmp["p"], sample_weight=tmp["weights"]
+    )
 
+    return loss_tot / loss_n, loss_n.item(), rmse_raw, rmse_bins, auc
 
 def main():
     device = torch.device("cuda")

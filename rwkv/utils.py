@@ -6,6 +6,23 @@ from collections import deque
 def get_number_of_trainable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+def transfer_child_grad_to_master(master, child):
+    master_params = dict(master.named_parameters())
+    for name, param in child.named_parameters():
+        # print(name, param.grad)
+        master_param = master_params[name]
+        if (
+            param.grad is not None
+        ):  # None happens on the first few iterations for some params
+            # Add the child model's grad
+            with torch.no_grad():
+                if master_param.grad is None:
+                    master_param.grad = torch.zeros_like(
+                        master_param, requires_grad=True
+                    )
+                master_param.grad.add_(param.grad.to(torch.float32))
+            # Set the child model's grad to zero
+            param.grad.zero_()
 
 class SlidingWindowAverage:
     def __init__(self, len: int):

@@ -1,5 +1,5 @@
 DB_PATH = "summary_db"
-DB_SIZE = 100_000_000_000
+DB_SIZE = 20_000_000_000
 
 DATA_PATH = "../anki-revlogs-10k"
 DTYPE = "bfloat16"

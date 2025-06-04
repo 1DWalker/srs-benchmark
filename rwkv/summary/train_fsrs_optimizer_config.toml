@@ -2,15 +2,42 @@ SUMMARY_DB_PATH = "summary_db"
 LABEL_FILTER_DB_PATH = "label_filter_db"
 FSRS_EVALUATE_DB_PATH = "fsrs_evaluate_db"
 
-SEED = 123
+SEED = 12
 
-TRAIN_USER_START = 1
-TRAIN_USER_END = 1
+TRAIN_USER_START = 5000
+TRAIN_USER_END = 10000
+
+# Include some users from the train set to gauge for overfitting
+VALIDATE_OVERFIT_USER_START = 5001
+VALIDATE_OVERFIT_USER_END = 5100
 
 VALIDATE_USER_START = 1
-VALIDATE_USER_END = 1
+VALIDATE_USER_END = 100
 
 DEVICE = "cuda"
 DTYPE = "bfloat16"
 
 PEAK_LR = 1e-3
+
+# Available modes are "WS" and "D" for the corresponding phases of the WSD learning rate scheduler.
+TRAIN_MODE = "WS"
+WARMUP_STEPS = 5000
+TOTAL_STEPS = 100000000000
+
+LOAD_MODEL = false
+LOAD_MODEL_FOLDER = "pretrain/nn_optimizer"
+LOAD_MODEL_NAME = ""
+SAVE_MODEL_FOLDER = "pretrain/nn_optimizer_unscaled"
+SAVE_MODEL_PREFIX = "fsrs_nn_optimizer"
+
+USE_WANDB = true
+# Only relevant if USE_WANDB is set to true
+WANDB_PROJECT_NAME = "FSRS-nn-optimizer"
+WANDB_RESUME = false
+# Only relevant if WANDB_RESUME is set to true
+WANDB_RESUME_ID = ""
+
+# Skip batches of a certain length of longer
+SKIP_LENGTH = 900_000
+# Clear the CUDA cache if the reserved memory is over a certain amount
+THRESHOLD_RESERVED_GB = 22.0
