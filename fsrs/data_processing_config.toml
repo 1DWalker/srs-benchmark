@@ -1,12 +1,12 @@
 DB_PATH = "fsrs_evaluate_db"
-DB_SIZE = 31_000_000_000
+DB_SIZE = 120_000_000_000
 
 DATA_PATH = "../anki-revlogs-10k"
 
 LABEL_FILTER_DB_PATH = "label_filter_db"
 
 USER_START = 1
-USER_END = 100
+USER_END = 10000
 
 DTYPE = "float"
 PROCESSES = 9

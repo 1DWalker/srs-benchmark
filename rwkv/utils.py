@@ -3,28 +3,8 @@ import torch
 from collections import deque
 
 
-def copy_downcast(master_model, model, dtype):
-    master_params = dict(master_model.named_parameters())
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            param.copy_(master_params[name].to(dtype))
-
-
 def get_number_of_trainable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def load_tensor(txn, key, device):
-    tensor_bytes = txn.get(key.encode())
-    buffer = BytesIO(tensor_bytes)
-    return torch.load(buffer, weights_only=True, map_location=device)
-
-
-def save_tensor(txn, key, tensor):
-    tensor = tensor.clone().contiguous()
-    buffer = BytesIO()
-    torch.save(tensor, buffer)
-    txn.put(key.encode(), buffer.getvalue())
 
 
 class SlidingWindowAverage:

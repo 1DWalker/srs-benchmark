@@ -10,8 +10,7 @@ import torch
 import pandas as pd
 import random
 from rwkv.config import RWKV_SUBMODULES
-from rwkv.utils import save_tensor
-from utils import parse_toml
+from utils import parse_toml, save_tensor
 
 CARD_FEATURE_COLUMNS = [
     "scaled_elapsed_days",

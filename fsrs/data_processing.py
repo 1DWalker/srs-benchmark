@@ -15,7 +15,7 @@ import random
 
 from other import get_bin
 from rwkv.utils import load_tensor
-from utils import parse_toml
+from utils import parse_toml, save_tensor
 
 random.seed(1234)
 
@@ -163,12 +163,6 @@ def job(user_id, config, writer_queue, progress_queue):
     writer_queue.put((user_id, process(user_id, config)))
     progress_queue.put(1)
 
-
-def save_tensor(txn, key, tensor):
-    tensor = tensor.clone().contiguous()
-    buffer = BytesIO()
-    torch.save(tensor, buffer)
-    txn.put(key.encode(), buffer.getvalue())
 
 
 def save_job(lmdb_path, lmdb_size, writer_queue):

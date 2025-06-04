@@ -15,8 +15,7 @@ from rwkv.architecture import DEFAULT_ANKI_RWKV_CONFIG
 from rwkv.data_fetcher import DataFetcher
 from rwkv.model.srs_model import SrsRWKV, extract_p
 from rwkv.prepare_batch import prepare_data
-from rwkv.utils import load_tensor, save_tensor
-from utils import parse_toml  # type: ignore
+from utils import load_tensor, parse_toml, save_tensor  # type: ignore
 
 FETCH_AHEAD = 20
 

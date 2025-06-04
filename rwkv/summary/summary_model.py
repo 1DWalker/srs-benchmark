@@ -46,10 +46,10 @@ class SummaryCore(ModuleType):
 class ToFSRSParams(ModuleType):
     def __init__(self, in_dim):
         super().__init__()
-        self.ln = torch.nn.LayerNorm(in_dim)
-        self.linear = torch.nn.Linear(in_dim, 21)
-        torch.nn.init.zeros_(self.linear.weight)
-        torch.nn.init.zeros_(self.linear.bias)
+        self.fsrs_ln = torch.nn.LayerNorm(in_dim)
+        self.fsrs_linear = torch.nn.Linear(in_dim, 21)
+        torch.nn.init.zeros_(self.fsrs_linear.weight)
+        torch.nn.init.zeros_(self.fsrs_linear.bias)
 
     @FunctionType
     def transform_bounded(self, param, min: float, max: float, middle: float):
@@ -62,7 +62,7 @@ class ToFSRSParams(ModuleType):
 
     @FunctionType
     def forward(self, x):
-        w = self.linear(self.ln(x))
+        w = self.fsrs_linear(self.fsrs_ln(x.float()))
         w[:, 0] = self.transform_bounded_exp(w[:, 0], 0.001, 100.0, 0.22)
         w[:, 1] = self.transform_bounded_exp(w[:, 1], 0.001, 100.0, 1.17)
         w[:, 2] = self.transform_bounded_exp(w[:, 2], 0.001, 100.0, 3.26)
@@ -86,6 +86,7 @@ class ToFSRSParams(ModuleType):
         w[:, 20] = self.transform_bounded_exp(w[:, 20], 0.1, 0.8, 0.2)
         return w
 
+
 class FSRSSummaryModel(ModuleType):
     def __init__(self):
         super().__init__()
@@ -95,3 +96,36 @@ class FSRSSummaryModel(ModuleType):
     @FunctionType
     def forward(self, in_TC, indices_I, perm_T, perm_inv_T):
         return self.fsrs_layer(self.core(in_TC, indices_I, perm_T, perm_inv_T))
+
+    def is_excluded(self, name):
+        DTYPE_EXCLUDE = [
+            "fsrs_ln",
+            "fsrs_linear",
+        ]
+        for query in DTYPE_EXCLUDE:
+            if query in name:
+                return True
+        return False
+
+    def copy_downcast_(self, master_model, dtype):
+        master_params = dict(master_model.named_parameters())
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                target_dtype = torch.float32 if self.is_excluded(name) else dtype
+                assert param.dtype == target_dtype
+                param.data.copy_(master_params[name].to(target_dtype))
+                assert param.dtype == target_dtype
+
+    def selective_cast(self, dtype):
+        for name, module in self.named_modules():
+            if len(name) == 0:
+                # Skip the root module
+                continue
+            if not self.is_excluded(name):
+                if dtype == torch.bfloat16:
+                    module = module.to(dtype)
+                elif dtype == torch.half:
+                    raise ValueError("not tested.")
+                elif dtype == torch.float32:
+                    pass
+        return self

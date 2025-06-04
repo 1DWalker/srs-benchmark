@@ -11,7 +11,7 @@ from rwkv.config import (
 from rwkv.data_processing import ModuleData, RWKVSample
 from rwkv.model.srs_model import PreparedBatch
 from rwkv.architecture import DEFAULT_ANKI_RWKV_CONFIG
-from rwkv.utils import load_tensor
+from utils import load_tensor
 
 
 def prepare(data_list: list[RWKVSample], target_len=None, seed=None) -> PreparedBatch:

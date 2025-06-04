@@ -1,4 +1,5 @@
 import argparse
+from io import BytesIO
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
@@ -127,6 +128,7 @@ def cross_comparison(revlogs, algoA, algoB, graph=False):
         fig.show()
     return universal_metric_list
 
+
 def parse_toml():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Location of the toml file")
@@ -145,3 +147,16 @@ def parse_toml():
         if "DATA_PATH" in args:
             args["DATA_PATH"] = Path(args["DATA_PATH"])
         return argparse.Namespace(**args)
+
+
+def load_tensor(txn, key, device):
+    tensor_bytes = txn.get(key.encode())
+    buffer = BytesIO(tensor_bytes)
+    return torch.load(buffer, weights_only=True, map_location=device)
+
+
+def save_tensor(txn, key, tensor):
+    tensor = tensor.clone().contiguous()
+    buffer = BytesIO()
+    torch.save(tensor, buffer)
+    txn.put(key.encode(), buffer.getvalue())

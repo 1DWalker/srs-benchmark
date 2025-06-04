@@ -6,8 +6,7 @@ import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit  # type: ignore
 import lmdb
 
-from rwkv.utils import save_tensor
-from utils import parse_toml
+from utils import parse_toml, save_tensor
 
 config = parse_toml()
 lmdb_env = lmdb.open(
