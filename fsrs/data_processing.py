@@ -105,12 +105,8 @@ def process(user_id, config):
     with equalize_env.begin(write=False) as txn:
         equalize_review_ths = load_tensor(txn, f"{user_id}_review_ths", device="cpu")
         rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device="cpu")
-    # rmse_bins_dict = dict(zip(equalize_review_ths_list, rmse_bins))
     equalize_review_ths_set = set(equalize_review_ths.tolist())
     df_revlogs["is_equalize_review"] = df_revlogs["review_th"].isin(equalize_review_ths_set).astype(int)
-    # df_revlogs["rmse_bin"] = df_revlogs["review_th"].map(rmse_bins_dict).fillna(-1)
-    # print(df_revlogs["is_equalize_review"])
-    # print(df_revlogs["rmse_bin"])
     card_id_to_tensors = process_df(df_revlogs, config.DTYPE, torch.device("cpu"))
     
     sizes_freq_dict = {}
@@ -227,7 +223,7 @@ def main(config):
                 unprocessed_users.append(user_id)
     env.close()
     print("unprocessed:", unprocessed_users)
-    unprocessed_users = list(range(1, 2))
+    # unprocessed_users = list(range(1, 101))
 
 
     with multiprocessing.Manager() as manager:
