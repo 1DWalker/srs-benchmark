@@ -1,3 +1,4 @@
+import time
 import lmdb
 import torch
 from fsrs.fsrs import FSRS6
@@ -22,26 +23,13 @@ def get_batches(txn, user_id, device):
     indices = list(range(num_batches))
     return [load_batch(txn, user_id, i, device) for i in indices]
 
-def evaluate(fsrs_txn, fsrs, parameters, user_id, min_review_th=0, max_review_th=int(1e9), device=torch.device("cpu"), equalize_test_reviews=False, include_rmse_bins=False, skip_same_day_reviews=True):
-    batches = get_batches(fsrs_txn, user_id, device)
+def evaluate(txn, model, parameters, user_id, min_review_th=0, max_review_th=int(1e9), device=torch.device("cpu"), equalize_test_reviews=False, include_rmse_bins=False, skip_same_day_reviews=True):
+    batches = get_batches(txn, user_id, device)
     loss_tot = 0
     loss_n = 0
     for batch in batches:
         features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_y_bl, label_review_th_bl, label_is_same_day_bl, label_is_equalize_bl, has_label_bl = batch
-        # print("int")
-        # print(features_elapsed_days_int_bl)
-        # print("real")
-        # print(feature_elapsed_days_real_bl)
-        out_bl = fsrs(parameters, features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
-        # print("features")
-        # print(features_bl2)
-        # print("out")
-        # print(out_bl)
-        # print("time")
-        # print(label_elapsed_days_real_bl)
-        # print(label_elapsed_days_int_bl)
-        # print("y")
-        # print(label_y_bl)
+        out_bl = model(parameters, features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
         assert not out_bl.isnan().any()
         label_y_bl = label_y_bl.float()
         label_mask_bl = has_label_bl * (min_review_th <= label_review_th_bl) * (label_review_th_bl <= max_review_th)
@@ -50,17 +38,8 @@ def evaluate(fsrs_txn, fsrs, parameters, user_id, min_review_th=0, max_review_th
         if skip_same_day_reviews:
             label_mask_bl = label_mask_bl * ~label_is_same_day_bl
         
-        # print("review th")
-        # print(label_review_th_bl)
-        # print("mask")
-        # print(label_mask_bl)
-
-        # print(out_bl.shape)
         loss_fn = torch.nn.BCELoss(reduction="none")
         loss_bl = loss_fn(out_bl, label_y_bl)
-        # print("loss")
-        # print(loss_bl)
-
         loss_tot += (loss_bl * label_mask_bl).sum()
         loss_n += label_mask_bl.sum()
     if loss_n == 0:
@@ -99,8 +78,16 @@ def main():
     DB_PATH = "fsrs_evaluate_db"
     env = lmdb.open(DB_PATH, readonly=True, lock=False)
     with env.begin(write=False) as txn:
-        for user_id in range(1, 11):
-            print(evaluate(txn, fsrs=fsrs, parameters=parameters, user_id=user_id, min_review_th=1, max_review_th=1e9, device=device, equalize_test_reviews=True))
+        n = 0
+        for user_id in range(1, 100):
+            if user_id == 10:
+                time_start = time.time()
+            with torch.no_grad():
+                print(evaluate(txn, model=fsrs, parameters=parameters, user_id=user_id, min_review_th=1, max_review_th=1e9, device=device, equalize_test_reviews=True))
+                n += 1
+
+        print(f"speed: {n / (time.time() - time_start):.3f} users/second")
+            
         # evaluate(txn, fsrs=fsrs, parameters=parameters, user_id=4, device=device, equalize_test_reviews=True)
     env.close()
 

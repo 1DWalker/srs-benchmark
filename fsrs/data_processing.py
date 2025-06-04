@@ -219,7 +219,6 @@ def main(config):
                 unprocessed_users.append(user_id)
     env.close()
     print("unprocessed:", unprocessed_users)
-    unprocessed_users = list(range(1, 11))
 
 
     with multiprocessing.Manager() as manager:

@@ -7,11 +7,11 @@ import torch
 def __nop(ob):
     return ob
 
-ModuleType = torch.nn.Module
-FunctionType = __nop
+# ModuleType = torch.nn.Module
+# FunctionType = __nop
 
-# ModuleType = torch.jit.ScriptModule
-# FunctionType = torch.jit.script_method
+ModuleType = torch.jit.ScriptModule
+FunctionType = torch.jit.script_method
 
 class FSRS6(ModuleType):
     def __init__(self):
@@ -19,7 +19,7 @@ class FSRS6(ModuleType):
         self.S_MIN = 0.001
 
     @FunctionType
-    def forgetting_curve(self, t, s, decay=-0.2):
+    def forgetting_curve(self, t, s, decay):
         factor = 0.9 ** (1 / decay) - 1
         return (1 + factor * t / s) ** decay
 
@@ -61,7 +61,7 @@ class FSRS6(ModuleType):
         return new_s
 
     @FunctionType
-    def init_d(self, w: Tensor, rating: Union[int, Tensor]) -> Tensor:
+    def init_d(self, w: Tensor, rating: Tensor) -> Tensor:
         new_d = w[4] - torch.exp(w[5] * (rating - 1)) + 1
         return new_d
 
@@ -73,7 +73,7 @@ class FSRS6(ModuleType):
     def next_d(self, w: Tensor, state: Tensor, rating: Tensor) -> Tensor:
         delta_d = -w[6] * (rating - 3)
         new_d = state[:, 1] + self.linear_damping(delta_d, state[:, 1])
-        new_d = self.mean_reversion(w, self.init_d(w, 4), new_d)
+        new_d = self.mean_reversion(w, self.init_d(w, torch.tensor(4, device=state.device)), new_d)
         return new_d
 
     @FunctionType
@@ -120,7 +120,7 @@ class FSRS6(ModuleType):
         feature_rating: Tensor,
         label_elapsed_days_int_bl: Tensor, 
         state: Optional[Tensor] = None
-    ) -> tuple[Tensor, Tensor]:
+    ) -> Tensor:
         """
         :param inputs: shape[seq_len, batch_size, 2]
         """
