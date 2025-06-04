@@ -32,7 +32,7 @@ class RWKV7PackedConfig:
     v0_mix_amt_lora: int
     gate_lora: int
 
-class RWKVPacked(torch.nn.Module):
+class RWKV7Packed(torch.nn.Module):
     def __init__(self, config: RWKV7PackedConfig):
         super().__init__()
         self.blocks = torch.nn.ModuleList(

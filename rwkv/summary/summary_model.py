@@ -5,72 +5,49 @@ import time
 import torch
 
 from rwkv.model.rwkv_model import RWKV7, RWKV7Config
+from rwkv.model.rwkv_packed_sequence_model import RWKV7Packed, RWKV7PackedConfig
 from rwkv.utils import get_number_of_trainable_parameters
 
+def __nop(ob):
+    return ob
 
-class LSTMModel(torch.nn.Module):
+ModuleType = torch.nn.Module
+FunctionType = __nop
+
+# ModuleType = torch.jit.ScriptModule
+# FunctionType = torch.jit.script_method
+
+class SummaryModel(ModuleType):
     def __init__(self):
         super().__init__()
-        self.nn = torch.nn.LSTM(input_size=3, hidden_size=32, num_layers=2, batch_first=True)
+        self.initial_encoding = torch.nn.Sequential(
+            torch.nn.Linear(9, 32),
+            torch.nn.Mish(),
+        )
+        rwkv7packed_config = RWKV7PackedConfig(d_model=32, n_heads=1, n_layers=2, channel_mixer_factor=1.5, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8)
+        self.card_encoder = RWKV7Packed(rwkv7packed_config)
+        rwkv7_config = RWKV7Config(d_model=32, n_heads=1, n_layers=3, channel_mixer_factor=2.0, layer_offset=0, total_layers=3, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8, dropout=0.01, dropout_layer=0.01)
+        self.global_encoder = RWKV7(rwkv7_config)
+
+    def forward(self, in_TC, indices_I, perm_T, perm_inv_T):
+        T, C = in_TC.shape
+        in_TC = self.initial_encoding(in_TC)
+        card_in_TC = in_TC[perm_T]
+        card_encoding_TC = self.card_encoder(card_in_TC, indices_I) 
+
+        timeshift_select_1T = torch.cat((torch.zeros(1, dtype=torch.long, device=in_TC.device), torch.arange(T - 1, dtype=torch.long, device=in_TC.device))).unsqueeze(0)
+        skip_1T = torch.full((T,), fill_value=0, dtype=torch.bool, device=in_TC.device).unsqueeze(0)
+        global_in_TC = card_encoding_TC[perm_inv_T]
+        global_out_TC = self.global_encoder(global_in_TC.unsqueeze(0), timeshift_select_1T, skip_1T).squeeze(0)
+        return global_out_TC
+
+
+class ToFSRSParamsLayer(ModuleType):
+    def __init__(self, in_dim):
+        super().__init__()
+        self.ln = torch.nn.LayerNorm(in_dim)
+        self.linear = torch.nn.Linear(in_dim, 21)
 
     def forward(self, x):
-        return self.nn(x)
-
-class RWKVModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        config = RWKV7Config(d_model=32*1, n_heads=1, n_layers=2, channel_mixer_factor=1, layer_offset=0, total_layers=2, decay_lora=4, a_lora=4, v0_mix_amt_lora=4, gate_lora=8, dropout=0.0, dropout_layer=0.0)
-        self.encode = torch.nn.Linear(3, 32)
-        self.nn = RWKV7(config)
-
-    def forward(self, x, timeshift, skip):
-        return self.nn(self.encode(x), timeshift, skip)
-
-
-def main():
-    # DEVICE = torch.device("cuda")
-    DEVICE = torch.device("cpu")
-    torch.set_num_threads(1)
-    random.seed(123)
-    torch.manual_seed(123)
-    model = RWKVModel().to(DEVICE)
-    # model = LSTMModel().to(DEVICE)
-    inp = []
-    n = 0
-    while n < 1e6:
-        m = random.randint(1, 20)
-        inp.append(torch.randn((m, 3), requires_grad=False, device="cpu").to(DEVICE))
-        n += m
-
-    time_start = time.time()
-    for iter in range(1):
-        with torch.inference_mode():
-            # packed = torch.nn.utils.rnn.pack_sequence(inp, enforce_sorted=False)
-            # # print(packed)
-            # for x in inp:
-            #     out = model(x)
-            # out = model(packed)
-            # print(out)
-
-            cat = torch.cat(inp, dim=0).unsqueeze(0)
-            assert n == cat.size(1)
-            arr = [0]
-            for i in range(n-1):
-                arr.append(i)
-            timeshift_select = torch.tensor(arr, dtype=torch.long, device="cpu").unsqueeze(0)
-            skip = torch.full_like(timeshift_select, 0, dtype=torch.bool)
-            timeshift_select = timeshift_select.to(DEVICE)
-            skip = skip.to(DEVICE)
-            print(cat.shape)
-            out = model(cat, timeshift_select, skip)
-            print(out)
-            # print(cat)
-
-        
-        print(iter, "elapsed", time.time() - time_start)
-
-    num_params = get_number_of_trainable_parameters(model)
-    print("num params:", num_params)
-
-if __name__ == '__main__':
-    main()
+        w = self.linear(self.ln(x))
+        pass

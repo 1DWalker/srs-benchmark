@@ -1,0 +1,2 @@
+DATA_PATH = "../anki-revlogs-10k"
+DTYPE = "float"

@@ -4,7 +4,7 @@ import time
 import torch
 
 from rwkv.model.rwkv_ops import RWKV7_Packed_WKV, reference_rwkv7_packed
-from rwkv.model.rwkv_packed_sequence_model import RWKV7PackedConfig, RWKVPacked
+from rwkv.model.rwkv_packed_sequence_model import RWKV7PackedConfig, RWKV7Packed
 from rwkv.utils import get_number_of_trainable_parameters
 # from rwkv.model.rwkv_model import RWKV7, RWKV7Config
 # from rwkv.utils import get_number_of_trainable_parameters
