@@ -23,7 +23,7 @@ def process_df(df, dtype, device):
     df.drop(df[~df["rating"].isin([1, 2, 3, 4])].index, inplace=True)
     df["elapsed_seconds"] = df["elapsed_seconds"].map(lambda x: max(0, x))
     df["is_same_day"] = (df["elapsed_days"] == 0).astype(int)
-    df["elapsed_days_int"] = df["elapsed_days"]
+    df["elapsed_days_int"] = df["elapsed_days"].map(lambda x: max(0, x))
     df.drop(columns=["elapsed_days"], inplace=True)
     df["elapsed_days_real"] = df["elapsed_seconds"] / 86400
     df["y"] = df["rating"].map(lambda x: {1: 0, 2: 1, 3: 1, 4: 1}[x])
@@ -31,11 +31,9 @@ def process_df(df, dtype, device):
     df["has_label"] = (df.groupby("card_id").cumcount(ascending=False) != 0).astype(int)
 
     def process_group(group):
-        features = torch.tensor(
-            group[["elapsed_days_int", "rating"]].to_numpy(),
-            dtype=dtype,
-            device=device,
-        )
+        feature_elapsed_days_int = torch.tensor(group["elapsed_days_int"].to_numpy(), dtype=torch.int, device=device)
+        feature_elapsed_days_real = torch.tensor(group["elapsed_days_real"].to_numpy(), dtype=dtype, device=device)
+        feature_rating = torch.tensor(group["rating"].to_numpy(), dtype=dtype, device=device)
         label_review_th = torch.tensor(
             group["review_th"].shift(-1).fillna(-1).to_numpy(),
             dtype=torch.int32,
@@ -57,7 +55,7 @@ def process_df(df, dtype, device):
         label_is_same_day = torch.tensor(group["is_same_day"].shift(-1).fillna(0).to_numpy(), dtype=torch.bool, device=device)
         label_is_equalize = torch.tensor(group["is_equalize_review"].shift(-1).fillna(0).to_numpy(), dtype=torch.bool, device=device)
         has_label = torch.tensor(group["has_label"].to_numpy(), device=device)
-        return features, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label
+        return feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label
 
     card_id_to_group = {
         card_id: group.reset_index(drop=True)
@@ -136,8 +134,10 @@ def process(user_id, config):
         if len(group_lists) == 0:
             continue
 
-        features, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label = list(zip(*group_lists))
-        features = pad_sequence(features, batch_first=True, padding_value=0)
+        feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label = list(zip(*group_lists))
+        feature_elapsed_days_int = pad_sequence(feature_elapsed_days_int, batch_first=True, padding_value=0)
+        feature_elapsed_days_real = pad_sequence(feature_elapsed_days_real, batch_first=True, padding_value=0)
+        feature_rating = pad_sequence(feature_rating, batch_first=True, padding_value=0)
         label_elapsed_days_int = pad_sequence(label_elapsed_days_int, batch_first=True, padding_value=0)
         label_elapsed_days_real = pad_sequence(label_elapsed_days_real, batch_first=True, padding_value=0)
         label_y = pad_sequence(label_y, batch_first=True, padding_value=0)
@@ -147,10 +147,8 @@ def process(user_id, config):
         label_is_same_day = pad_sequence(label_is_same_day, batch_first=True, padding_value=0)
         label_is_equalize = pad_sequence(label_is_equalize, batch_first=True, padding_value=0)
         has_label = pad_sequence(has_label, batch_first=True, padding_value=0)
-        assert features.size(0) == label_elapsed_days_int.size(0)
-        assert features.size(1) == label_elapsed_days_int.size(1)
-        total_size += features.size(0) * features.size(1)
-        result.append((features, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label))
+        total_size += feature_rating.size(0) * feature_rating.size(1)
+        result.append((feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label))
     
     print("Total size:", total_size, len(df_revlogs), total_size / len(df_revlogs))
     assert total_size / len(df_revlogs) <= 1.01 * config.MAX_FACTOR
@@ -181,10 +179,12 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
         user_id, tensors = sample
 
         with env.begin(write=True) as txn:
-            for i, (feature, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label) in enumerate(
+            for i, (feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label) in enumerate(
                 tensors
             ):
-                save_tensor(txn, f"{user_id}_feature_{i}", feature)
+                save_tensor(txn, f"{user_id}_feature_elapsed_days_int_{i}", feature_elapsed_days_int)
+                save_tensor(txn, f"{user_id}_feature_elapsed_days_real_{i}", feature_elapsed_days_real)
+                save_tensor(txn, f"{user_id}_feature_rating_{i}", feature_rating)
                 save_tensor(txn, f"{user_id}_label_elapsed_days_int_{i}", label_elapsed_days_int)
                 save_tensor(txn, f"{user_id}_label_elapsed_days_real_{i}", label_elapsed_days_real)
                 save_tensor(txn, f"{user_id}_label_y_{i}", label_y)
@@ -219,6 +219,7 @@ def main(config):
                 unprocessed_users.append(user_id)
     env.close()
     print("unprocessed:", unprocessed_users)
+    unprocessed_users = list(range(1, 11))
 
 
     with multiprocessing.Manager() as manager:

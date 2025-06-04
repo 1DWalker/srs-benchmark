@@ -5,7 +5,9 @@ from rwkv.utils import load_tensor
 
 
 def load_batch(txn, user, i, device):
-    features = load_tensor(txn, f"{user}_feature_{i}", device)
+    feature_elapsed_days_int = load_tensor(txn, f"{user}_feature_elapsed_days_int_{i}", device)
+    feature_elapsed_days_real = load_tensor(txn, f"{user}_feature_elapsed_days_real_{i}", device)
+    feature_rating = load_tensor(txn, f"{user}_feature_rating_{i}", device)
     label_elapsed_days_int = load_tensor(txn, f"{user}_label_elapsed_days_int_{i}", device)
     label_elapsed_days_real = load_tensor(txn, f"{user}_label_elapsed_days_real_{i}", device)
     label_y = load_tensor(txn, f"{user}_label_y_{i}", device)
@@ -13,7 +15,7 @@ def load_batch(txn, user, i, device):
     label_is_same_day = load_tensor(txn, f"{user}_label_is_same_day_{i}", device)
     label_is_equalize = load_tensor(txn, f"{user}_label_is_equalize_{i}", device)
     has_label = load_tensor(txn, f"{user}_has_label_{i}", device)
-    return features, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label
+    return feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label
 
 def get_batches(txn, user_id, device):
     num_batches = load_tensor(txn, f"{user_id}_batches", torch.device("cpu")).item()
@@ -25,8 +27,12 @@ def evaluate(fsrs_txn, fsrs, parameters, user_id, min_review_th=0, max_review_th
     loss_tot = 0
     loss_n = 0
     for batch in batches:
-        features_bl2, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_y_bl, label_review_th_bl, label_is_same_day_bl, label_is_equalize_bl, has_label_bl = batch
-        out_bl = fsrs(parameters=parameters, inputs_bl2=features_bl2, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
+        features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_y_bl, label_review_th_bl, label_is_same_day_bl, label_is_equalize_bl, has_label_bl = batch
+        # print("int")
+        # print(features_elapsed_days_int_bl)
+        # print("real")
+        # print(feature_elapsed_days_real_bl)
+        out_bl = fsrs(parameters, features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
         # print("features")
         # print(features_bl2)
         # print("out")
@@ -57,8 +63,10 @@ def evaluate(fsrs_txn, fsrs, parameters, user_id, min_review_th=0, max_review_th
 
         loss_tot += (loss_bl * label_mask_bl).sum()
         loss_n += label_mask_bl.sum()
-    print("here.", loss_tot.item(), loss_tot.item() / loss_n.item(), loss_n.item())
-    return loss_tot / loss_n
+    if loss_n == 0:
+        return torch.zeros_like(loss_tot)
+    else:
+        return loss_tot / loss_n
 
 
 def main():
@@ -92,7 +100,7 @@ def main():
     env = lmdb.open(DB_PATH, readonly=True, lock=False)
     with env.begin(write=False) as txn:
         for user_id in range(1, 11):
-            evaluate(txn, fsrs=fsrs, parameters=parameters, user_id=user_id, min_review_th=1, max_review_th=1e9, device=device, equalize_test_reviews=True)
+            print(evaluate(txn, fsrs=fsrs, parameters=parameters, user_id=user_id, min_review_th=1, max_review_th=1e9, device=device, equalize_test_reviews=True))
         # evaluate(txn, fsrs=fsrs, parameters=parameters, user_id=4, device=device, equalize_test_reviews=True)
     env.close()
 

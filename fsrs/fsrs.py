@@ -116,11 +116,18 @@ class FSRS6(ModuleType):
 
     @FunctionType
     def forward(
-        self, parameters: Tensor, inputs_bl2: Tensor, label_elapsed_days_int_bl: Tensor, state: Optional[Tensor] = None
+        self, 
+        parameters: Tensor, 
+        feature_elapsed_days_int_bl: Tensor,
+        feature_elapsed_days_real_bl: Tensor,
+        feature_rating: Tensor,
+        label_elapsed_days_int_bl: Tensor, 
+        state: Optional[Tensor] = None
     ) -> tuple[Tensor, Tensor]:
         """
         :param inputs: shape[seq_len, batch_size, 2]
         """
+        inputs_bl2 = torch.stack((feature_elapsed_days_int_bl, feature_rating), dim=-1)
         if state is None:
             state = torch.zeros((inputs_bl2.size(0), 2), device=inputs_bl2.device)
         outputs_list = []
