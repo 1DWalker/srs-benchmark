@@ -1,2 +1,10 @@
+DB_PATH = "summary_db"
+DB_SIZE = 100_000_000_000
+
 DATA_PATH = "../anki-revlogs-10k"
 DTYPE = "bfloat16"
+
+USER_START = 1
+USER_END = 10000
+
+PROCESSES = 9
