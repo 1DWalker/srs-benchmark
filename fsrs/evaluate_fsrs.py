@@ -33,7 +33,6 @@ def evaluate(txn, model, parameters, user_id, min_review_th=0, max_review_th=int
     for batch in batches:
         features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_y_bl, label_review_th_bl, label_is_same_day_bl, label_is_equalize_bl, has_label_bl = batch
         out_bl = model(parameters, features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
-        assert not out_bl.isnan().any()
         label_y_bl = label_y_bl.float()
         label_mask_bl = has_label_bl * (min_review_th <= label_review_th_bl) * (label_review_th_bl <= max_review_th)
         if equalize_test_reviews:

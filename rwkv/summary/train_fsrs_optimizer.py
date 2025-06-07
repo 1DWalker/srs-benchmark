@@ -1,6 +1,8 @@
 from pathlib import Path
 import lmdb
 import numpy as np
+import pandas as pd
+from sklearn.metrics import roc_auc_score, root_mean_squared_error
 import torch
 import wandb
 from fsrs.fsrs import FSRS6
@@ -14,7 +16,7 @@ from fsrs.evaluate_fsrs import evaluate, evaluate_full
 WEIGHT_DECAY = 1e-2
 ADAMW_EPS = 1e-18
 ADAMW_BETAS = (0.90, 0.999)
-CLIP = 5000
+CLIP = 1.0
 
 def log_model(log, model):
     for name, param in model.named_parameters():
@@ -82,7 +84,7 @@ def get_optimizer(config, model):
             },
             {
                 "params": decay_head_params,
-                "weight_decay": WEIGHT_DECAY,
+                "weight_decay": 0.001,
                 "lr": config.PEAK_LR,
             },
             {"params": encode_params, "weight_decay": 1e-2, "lr": config.PEAK_LR},
@@ -92,19 +94,22 @@ def get_optimizer(config, model):
         betas=ADAMW_BETAS,
     )
 
-def get_data(txn, user_id):
-    rating_onehot_T4 = load_tensor(txn, f"{user_id}_rating_onehot_T4", config.DEVICE).to(config.DTYPE)
-    scaled_seconds_T1 = load_tensor(txn, f"{user_id}_scaled_seconds_T1", config.DEVICE)
-    scaled_elapsed_days_T1 = load_tensor(txn, f"{user_id}_scaled_elapsed_days", config.DEVICE)
-    scaled_state_T1 = load_tensor(txn, f"{user_id}_scaled_state_T1", config.DEVICE)
-    scaled_duration_T1 = load_tensor(txn, f"{user_id}_scaled_duration_T1", config.DEVICE)
-    scaled_day_offset_diff_T1 = load_tensor(txn, f"{user_id}_scaled_day_offset_diff_T1", config.DEVICE)
-    perm_T_tensor = load_tensor(txn, f"{user_id}_perm_tensor", config.DEVICE).long()
-    perm_inv_T_tensor = load_tensor(txn, f"{user_id}_perm_inv_tensor", config.DEVICE).long()
-    indices_I = load_tensor(txn, f"{user_id}_indices_I", config.DEVICE).long()
+def get_data(txn, user_id, device, dtype=None):
+    scaled_seconds_T1 = load_tensor(txn, f"{user_id}_scaled_seconds_T1", device)
+    rating_onehot_T4 = load_tensor(txn, f"{user_id}_rating_onehot_T4", device).to(scaled_seconds_T1.dtype)
+    scaled_elapsed_days_T1 = load_tensor(txn, f"{user_id}_scaled_elapsed_days_T1", device)
+    scaled_state_T1 = load_tensor(txn, f"{user_id}_scaled_state_T1", device)
+    scaled_duration_T1 = load_tensor(txn, f"{user_id}_scaled_duration_T1", device)
+    scaled_day_offset_diff_T1 = load_tensor(txn, f"{user_id}_scaled_day_offset_diff_T1", device)
+    perm_T_tensor = load_tensor(txn, f"{user_id}_perm_T_tensor", device).long()
+    perm_inv_T_tensor = load_tensor(txn, f"{user_id}_perm_inv_T_tensor", device).long()
+    indices_I = load_tensor(txn, f"{user_id}_indices_I", device).long()
     features_TC = torch.cat((rating_onehot_T4, scaled_seconds_T1, scaled_elapsed_days_T1, scaled_duration_T1, scaled_state_T1, scaled_day_offset_diff_T1), dim=-1)
-    return features_TC, indices_I, perm_T_tensor, perm_inv_T_tensor
-
+    label_elapsed_seconds_T = load_tensor(txn, f"{user_id}_label_elapsed_seconds_T", device)
+    if dtype is not None:
+        features_TC = features_TC.to(dtype)
+        label_elapsed_seconds_T = label_elapsed_seconds_T.to(dtype)
+    return features_TC, indices_I, perm_T_tensor, perm_inv_T_tensor, label_elapsed_seconds_T
 def get_split(n):
     assert n >= 12
     l = 0
@@ -129,42 +134,126 @@ def decorate_training_sample(T, device):
     assert skip_T.size(0) == T
     return train_l + 1, test_l + 1, test_r + 1, timeshift_select_T, skip_T
 
+def evaluate_aux(label_filter_txn, summary_txn, user_id, aux, device, skip_T=None, equalize_test_reviews=False, include_other_metrics=False):
+    if include_other_metrics:
+        assert equalize_test_reviews
+
+    label_rating_T = load_tensor(summary_txn, f"{user_id}_label_rating_T", device).to(torch.int)
+    label_y_T = (label_rating_T >= 2).float()
+    assert len(aux.shape) == 1
+    T = label_rating_T.size(0)
+    assert aux.size(0) == label_rating_T.size(0)
+    has_label_T = load_tensor(summary_txn, f"{user_id}_has_label_T", device)
+    label_is_same_day_T = load_tensor(summary_txn, f"{user_id}_label_is_same_day_T", device)
+    label_is_equalize_review_T = load_tensor(summary_txn, f"{user_id}_label_is_equalize_review_T", device)
+
+    curve_raw_loss = torch.nn.functional.binary_cross_entropy(
+        aux.float(), label_y_T, reduction="none"
+    )
+    mask_T = has_label_T * ~label_is_same_day_T
+    if skip_T is not None:
+        mask_T = mask_T * ~skip_T
+    if equalize_test_reviews:
+        mask_T = mask_T * label_is_equalize_review_T
+
+    loss_tot = (curve_raw_loss * mask_T).sum()
+    loss_n = mask_T.sum().item()
+    if not include_other_metrics:
+        if loss_n == 0:
+            return torch.zeros_like(loss_tot), torch.zeros_like(loss_tot), 0
+        return loss_tot / loss_n, loss_tot, loss_n
+    else:
+        label_review_th_T = load_tensor(summary_txn, f"{user_id}_label_review_th_T", device)
+        equalize_review_ths = load_tensor(label_filter_txn, f"{user_id}_review_ths", device).tolist()
+        rmse_bins = load_tensor(label_filter_txn, f"{user_id}_rmse_bins", device).tolist()
+
+        rmse_bins_dict = dict(zip(equalize_review_ths, rmse_bins))
+        bin_y_pred = {bin: [] for bin in set(rmse_bins)}
+        bin_y = {bin: [] for bin in set(rmse_bins)}
+        mask_np = mask_T.cpu().numpy()
+        label_y_np = label_y_T.cpu().numpy()
+        out_np = aux.float().detach().cpu().numpy()
+        label_review_th_np = label_review_th_T.cpu().numpy()
+        y = []
+        y_pred = []
+        for t in range(T):
+            if mask_np[t]:
+                y.append(label_y_np[t])
+                y_pred.append(out_np[t])
+                bin = rmse_bins_dict[label_review_th_np[t]]
+                bin_y[bin].append(label_y_np[t])
+                bin_y_pred[bin].append(out_np[t])
+
+        if loss_n == 0:
+            return 0, 0, 0, 0, 0
+
+        rmse_raw = root_mean_squared_error(y_true=y, y_pred=y_pred)
+        try:
+            auc = round(roc_auc_score(y_true=y, y_score=y_pred), 6)
+        except:
+            auc = None
+
+        rows = []
+        for bin in bin_y_pred.keys():
+            for y, pred in zip(bin_y[bin], bin_y_pred[bin]):
+                rows.append([bin, y, pred, 1])
+        assert len(rows) == len(equalize_review_ths)
+
+        tmp = pd.DataFrame(rows, columns=["bin", "y", "p", "weights"])
+        tmp = (
+            tmp.groupby("bin")
+            .agg({"y": "mean", "p": "mean", "weights": "sum"})
+            .reset_index()
+        )
+        rmse_bins = root_mean_squared_error(
+            tmp["y"], tmp["p"], sample_weight=tmp["weights"]
+        )
+
+        return loss_tot / loss_n, loss_n, rmse_raw, rmse_bins, auc
+
+
 def validate(summarizer_model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_users, device):
     torch.cuda.empty_cache()
-    # try:
-    tot_loss = 0
-    tot_loss_n = 0
-    for user in validate_users:
-        summarizer_model.eval()
-        summarizer_in = get_data(summary_txn, user)
-        T = summarizer_in[0].size(0)
-        timeshift_select_T = torch.cat((torch.zeros(1, dtype=torch.long, device=device), torch.arange(start=0, end=T - 1, dtype=torch.long, device=device)))
-        skip_T = torch.full((T,), fill_value=0, dtype=torch.bool, device=device)
-        splits = load_tensor(label_filter_txn, f"{user}_split", device=device).tolist()
-        assert len(splits) == 6
-        with torch.no_grad():
-            summarizer_out_TP = summarizer_model(*summarizer_in, timeshift_select_T, skip_T)
-            parameter_list = []
-            for split_i in range(len(splits) - 1):
-                test_min_review_th = splits[split_i]
-                fsrs_param_index = test_min_review_th - 2
-                assert fsrs_param_index >= 0
-                fsrs_params_P = summarizer_out_TP[fsrs_param_index]
-                parameter_list.append(fsrs_params_P)
-            loss, loss_n, rmse_raw, rmse_bins, auc = evaluate_full(fsrs_txn, fsrs_model, parameter_list, splits, user, device=config.DEVICE, equalize_test_reviews=True)
-            print()
-            print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {auc:.6f}, size: {loss_n}")
-            for split_i, parameters in enumerate(parameter_list):
-                print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
+    try:
+        tot_loss = 0
+        tot_loss_n = 0
+        aux_tot_loss = 0
+        aux_tot_loss_n = 0
+        for user in validate_users:
+            summarizer_model.eval()
+            summarizer_in = get_data(summary_txn, user, device)
+            T = summarizer_in[0].size(0)
+            timeshift_select_T = torch.cat((torch.zeros(1, dtype=torch.long, device=device), torch.arange(start=0, end=T - 1, dtype=torch.long, device=device)))
+            skip_T = torch.full((T,), fill_value=0, dtype=torch.bool, device=device)
+            splits = load_tensor(label_filter_txn, f"{user}_split", device=device).tolist()
+            assert len(splits) == 6
+            with torch.no_grad():
+                summarizer_out_TP, aux = summarizer_model(*summarizer_in, timeshift_select_T, skip_T)
+                parameter_list = []
+                for split_i in range(len(splits) - 1):
+                    test_min_review_th = splits[split_i]
+                    fsrs_param_index = test_min_review_th - 2
+                    assert fsrs_param_index >= 0
+                    fsrs_params_P = summarizer_out_TP[fsrs_param_index]
+                    parameter_list.append(fsrs_params_P)
+                loss, loss_n, rmse_raw, rmse_bins, auc = evaluate_full(fsrs_txn, fsrs_model, parameter_list, splits, user, device=device, equalize_test_reviews=True)
+                aux_loss, aux_loss_n, aux_rmse_raw, aux_rmse_bins, aux_auc = evaluate_aux(label_filter_txn, summary_txn, user, aux, device, equalize_test_reviews=True, include_other_metrics=True)
+                print()
+                print(f"FSRS - User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {auc:.6f}, size: {loss_n}")
+                print(f"AUX  - User: {user}, RMSE: {aux_rmse_raw:.6f}, LogLoss: {aux_loss:.6f}, RMSE (bins): {aux_rmse_bins:.6f}, AUC: {aux_auc:.6f}, size: {aux_loss_n}")
+                for split_i, parameters in enumerate(parameter_list):
+                    print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
 
-            tot_loss += loss * loss_n
-            tot_loss_n += loss_n
-    # except Exception as e:
-    #     print("Exception in validate. RWKV-7 nan?")
-    #     print(e)
-    #     return None
+                tot_loss += loss * loss_n
+                tot_loss_n += loss_n
+                aux_tot_loss += aux_loss * aux_loss_n
+                aux_tot_loss_n += aux_loss_n
+    except Exception as e:
+        print("Exception in validate. RWKV-7 nan?")
+        print(e)
+        return None
     print(f"Mean validation loss: {tot_loss / tot_loss_n:.4f}")
-    return tot_loss / tot_loss_n
+    return tot_loss / tot_loss_n, aux_tot_loss / aux_tot_loss_n
 
 
 def main(config):
@@ -241,6 +330,7 @@ def main(config):
             "user_start": config.TRAIN_USER_START,
             "user_end": config.TRAIN_USER_END,
             "parameters": get_number_of_trainable_parameters(model),
+            "seed": config.SEED,
         }
         if config.WANDB_RESUME:
             wandb.init(
@@ -271,16 +361,16 @@ def main(config):
                         try:
                             model.copy_downcast_(master_model, dtype=config.DTYPE)
                             model.train()
-                            training_sample = get_data(summary_txn, user)
+                            training_sample = get_data(summary_txn, user, config.DEVICE)
                             T = training_sample[0].size(0)
                             if T > config.SKIP_LENGTH:
                                 print(f"Skipping: {user}")
                                 continue
                             train_min_review_th, test_min_review_th, test_max_review_th, timeshift_select_T, skip_T = decorate_training_sample(training_sample[0].size(0), device=config.DEVICE)
                             print()
-                            print(f"Indices:", train_min_review_th, test_min_review_th, test_max_review_th, T)
+                            print(f"Indices:", train_min_review_th, test_min_review_th, test_max_review_th, T, "User:", user)
                             print(f"Train size: {test_min_review_th - train_min_review_th}, Test size: {test_max_review_th - test_min_review_th + 1}")
-                            summarizer_out_TP = model(*training_sample, timeshift_select_T, skip_T)
+                            summarizer_out_TP, aux = model(*training_sample, timeshift_select_T, skip_T)
                             fsrs_param_index = test_min_review_th - 2
                             assert fsrs_param_index >= 0
                             fsrs_params_P = summarizer_out_TP[fsrs_param_index]
@@ -289,13 +379,23 @@ def main(config):
                                 log[f"fsrs_param_{param_i}"] = param
 
                             loss_avg, loss_tot, loss_n = evaluate(fsrs_txn, fsrs_model, fsrs_params_P, user, min_review_th=test_min_review_th, max_review_th=test_max_review_th, device=config.DEVICE, skip_same_day_reviews=True)
-                            if loss_tot.requires_grad:
-                                log["train_loss"] = loss_avg
-                                loss_tot.backward()
+                            loss_aux_avg, loss_aux_tot, loss_aux_n = evaluate_aux(label_filter_txn, summary_txn, user, aux, config.DEVICE, skip_T=skip_T)
+                            loss = loss_avg + 0.1 * loss_aux_avg
+                            log["unstable_gradient"] = 0
+                            # loss = loss_aux_avg
+                            if loss_n < 20 or loss_aux_n < 20:
+                                print("Skipping: label sizes are too small.", loss_n, loss_aux_n)
+                            elif loss.requires_grad:
+                                log["train_loss"] = loss
+                                log["train_loss_fsrs"] = loss_avg
+                                log["train_loss_aux"] = loss_aux_avg
+                                loss.backward()
                                 transfer_child_grad_to_master(master=master_model, child=model)
                                 grad_norm = torch.nn.utils.clip_grad_norm_(master_model.parameters(), CLIP)
                                 log["grad_norm"] = grad_norm
-                                print(f"{step} {epoch}, user: {user}, loss: {loss_avg.item():.3f} ({loss_n}), grad norm: {grad_norm / loss_n:.3f} ({grad_norm:.3f}), lr: {current_lr:.3e}")
+                                if grad_norm > 100:
+                                    log["unstable_gradient"] = 1
+                                print(f"{step} {epoch}, user: {user}, loss: {loss.item():.3f}, loss_fsrs: {loss_avg.item():.3f} ({loss_n}), loss_aux: {loss_aux_avg.item():.3f} ({loss_aux_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                 optimizer.step()
                                 optimizer.zero_grad()
 
@@ -310,7 +410,7 @@ def main(config):
                             print("Exception caught. Nan from RWKV-7? Skipping batch.")
                             print(e)
                             log["train_nan"] = 1
-                            raise e
+                            # raise e
                         
                         scheduler.step()
                         if step % 50 == 0:
@@ -329,10 +429,14 @@ def main(config):
                             model.copy_downcast_(master_model, dtype=config.DTYPE)
                             validation_overfit_out = validate(model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
                             if validation_overfit_out is not None:
-                                log["validation_overfit_loss"] = validation_overfit_out
+                                validation_overfit_fsrs, validation_overfit_aux = validation_overfit_out
+                                log["validation_overfit_loss"] = validation_overfit_fsrs
+                                log["validation_overfit_aux_loss"] = validation_overfit_aux
                             validation_out = validate(model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_users, config.DEVICE)
                             if validation_out is not None:
-                                log["validation_loss"] = validation_out
+                                validation_fsrs, validation_aux = validation_out
+                                log["validation_loss"] = validation_fsrs
+                                log["validation_aux_loss"] = validation_aux
                             if validation_overfit_out is None or validation_out is None:
                                 log["validation_nan"] = 1
                             else:

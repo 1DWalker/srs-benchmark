@@ -1,0 +1,11 @@
+SUMMARY_DB_PATH = "summary_db"
+LABEL_FILTER_DB_PATH = "label_filter_db"
+FSRS_EVALUATE_DB_PATH = "fsrs_evaluate_db"
+
+USER_START = 1
+USER_END = 4999
+
+MODEL_PATH = "pretrain/fsrs_nn_optimizer.pth"
+OUT_NAME = "FSRS-6-nn-optimizer"
+
+PROCESSES = 12

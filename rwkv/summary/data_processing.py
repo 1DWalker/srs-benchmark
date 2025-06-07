@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 from rwkv.summary.summary_model import ToFSRSParams
-from utils import parse_toml, save_tensor
+from utils import load_tensor, parse_toml, save_tensor
 
 
 def process(user_id, config):
@@ -17,6 +17,14 @@ def process(user_id, config):
     len_before = len(df)
     df.drop(df[~df["rating"].isin([1, 2, 3, 4])].index, inplace=True)
     df.reset_index(inplace=True, drop=True)
+
+    equalize_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
+    with equalize_env.begin(write=False) as txn:
+        equalize_review_ths = load_tensor(txn, f"{user_id}_review_ths", device="cpu")
+        # rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device="cpu")
+    equalize_review_ths_set = set(equalize_review_ths.tolist())
+
+    df["is_equalize_review"] = df["review_th"].isin(equalize_review_ths_set).astype(int)
     df["elapsed_seconds"] = df["elapsed_seconds"].map(lambda x: max(0, x))
     df["elapsed_days_int"] = df["elapsed_days"].map(lambda x: max(0, x))
     assert len_before == len(df), f"{user_id} has invalid ratings, review_th might be incorrect"
@@ -47,7 +55,23 @@ def process(user_id, config):
     perm_inv_T_tensor = torch.tensor(perm_inv, dtype=torch.int)
     indices_I = torch.tensor(indices, dtype=torch.int)
 
-    return rating_onehot_T4, scaled_seconds_T1, scaled_elapsed_days_T1, scaled_state_T1, scaled_duration_T1, scaled_day_offset_diff_T1, perm_T_tensor, perm_inv_T_tensor, indices_I
+    # Tensors for auxiliary loss
+    df["label_review_th"] = df.groupby("card_id")["review_th"].shift(-1).fillna(0)
+    df["label_elapsed_seconds"] = df.groupby("card_id")["elapsed_seconds"].shift(-1).fillna(0)
+    df["label_rating"] = df.groupby("card_id")["rating"].shift(-1).fillna(0)
+    df["has_label"] = (df.groupby("card_id").cumcount(ascending=False) != 0).astype(int)
+    df["is_same_day"] = df["elapsed_days_int"] == 0
+    df["label_is_same_day"] = df.groupby("card_id")["is_same_day"].shift(-1).fillna(0)
+    df["label_is_equalize_review"] = df.groupby("card_id")["is_equalize_review"].shift(-1).fillna(0)
+    label_review_th_T = torch.tensor(df["label_review_th"], dtype=torch.int)
+    label_elapsed_seconds_T = torch.tensor(df["label_elapsed_seconds"], dtype=config.DTYPE)
+    label_rating_T = torch.tensor(df["label_rating"], dtype=config.DTYPE)
+    has_label_T = torch.tensor(df["has_label"], dtype=torch.bool)
+    label_is_same_day_T = torch.tensor(df["label_is_same_day"], dtype=torch.bool)
+    label_is_equalize_review_T = torch.tensor(df["label_is_equalize_review"], dtype=torch.bool)
+
+    return rating_onehot_T4, scaled_seconds_T1, scaled_elapsed_days_T1, scaled_state_T1, scaled_duration_T1, scaled_day_offset_diff_T1, perm_T_tensor, perm_inv_T_tensor, indices_I, \
+        label_review_th_T, label_elapsed_seconds_T, label_rating_T, has_label_T, label_is_same_day_T, label_is_equalize_review_T
 
 def job(user_id, config, writer_queue, progress_queue):
     writer_queue.put((user_id, process(user_id, config)))
@@ -73,16 +97,28 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
                 perm_T_tensor,
                 perm_inv_T_tensor,
                 indices_I,
+                label_review_th_T,
+                label_elapsed_seconds_T,
+                label_rating_T,
+                has_label_T,
+                label_is_same_day_T,
+                label_is_equalize_review_T,
             ) = tensors
             save_tensor(txn, f"{user_id}_rating_onehot_T4", rating_onehot_T4)
             save_tensor(txn, f"{user_id}_scaled_seconds_T1", scaled_seconds_T1)
-            save_tensor(txn, f"{user_id}_scaled_elapsed_days", scaled_elapsed_days_T1)
+            save_tensor(txn, f"{user_id}_scaled_elapsed_days_T1", scaled_elapsed_days_T1)
             save_tensor(txn, f"{user_id}_scaled_state_T1", scaled_state_T1)
             save_tensor(txn, f"{user_id}_scaled_duration_T1", scaled_duration_T1)
             save_tensor(txn, f"{user_id}_scaled_day_offset_diff_T1", scaled_day_offset_diff_T1)
-            save_tensor(txn, f"{user_id}_perm_tensor", perm_T_tensor)
-            save_tensor(txn, f"{user_id}_perm_inv_tensor", perm_inv_T_tensor)
+            save_tensor(txn, f"{user_id}_perm_T_tensor", perm_T_tensor)
+            save_tensor(txn, f"{user_id}_perm_inv_T_tensor", perm_inv_T_tensor)
             save_tensor(txn, f"{user_id}_indices_I", indices_I)
+            save_tensor(txn, f"{user_id}_label_review_th_T", label_review_th_T)
+            save_tensor(txn, f"{user_id}_label_elapsed_seconds_T", label_elapsed_seconds_T)
+            save_tensor(txn, f"{user_id}_label_rating_T", label_rating_T)
+            save_tensor(txn, f"{user_id}_has_label_T", has_label_T)
+            save_tensor(txn, f"{user_id}_label_is_same_day_T", label_is_same_day_T)
+            save_tensor(txn, f"{user_id}_label_is_equalize_review_T", label_is_equalize_review_T)
             txn.put(f"{user_id}_done".encode(), "true".encode())
             print("Done", user_id, rating_onehot_T4.shape)
 

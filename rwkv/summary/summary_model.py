@@ -26,9 +26,10 @@ class SummaryCore(ModuleType):
             torch.nn.Linear(9, 32),
             torch.nn.Mish(),
         )
-        rwkv7packed_config = RWKV7PackedConfig(d_model=32, n_heads=1, n_layers=2, channel_mixer_factor=1.5, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8, dropout=0.0, dropout_layer=0.0)
+        rwkv7packed_config = RWKV7PackedConfig(d_model=32, n_heads=1, n_layers=3, channel_mixer_factor=1.5, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8, dropout=0.0, dropout_layer=0.0)
+        self.proj = torch.nn.Linear(32, 64, bias=False)
         self.card_encoder = RWKV7Packed(rwkv7packed_config)
-        rwkv7_config = RWKV7Config(d_model=32, n_heads=1, n_layers=4, channel_mixer_factor=2.0, layer_offset=0, total_layers=4, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8, dropout=0.0, dropout_layer=0.0)
+        rwkv7_config = RWKV7Config(d_model=64, n_heads=2, n_layers=6, channel_mixer_factor=2.0, layer_offset=0, total_layers=6, decay_lora=8, a_lora=8, v0_mix_amt_lora=8, gate_lora=16, dropout=0.0, dropout_layer=0.0)
         self.global_encoder = RWKV7(rwkv7_config)
 
     @FunctionType
@@ -37,27 +38,22 @@ class SummaryCore(ModuleType):
         in_TC = self.initial_encoding(in_TC)
         card_in_TC = in_TC[perm_T]
         card_encoding_TC = self.card_encoder(card_in_TC, indices_I) 
-        global_in_TC = card_encoding_TC[perm_inv_T]
+        global_in_TC = self.proj(card_encoding_TC[perm_inv_T])
         global_out_TC = self.global_encoder(global_in_TC.unsqueeze(0), timeshift_select_T.unsqueeze(0), skip_T.unsqueeze(0)).squeeze(0)
         return global_out_TC
 
 class ToFSRSParams(ModuleType):
     def __init__(self, in_dim):
         super().__init__()
-        self.fsrs_ln = torch.nn.LayerNorm(in_dim)
-        self.fsrs_linear = torch.nn.Linear(in_dim, 21)
+        self.fsrs_head = torch.nn.Sequential(
+            torch.nn.LayerNorm(in_dim),
+            torch.nn.Linear(in_dim, 2 * in_dim),
+            torch.nn.Mish(),
+        )
+        self.fsrs_linear = torch.nn.Linear(2 * in_dim, 21)
         torch.nn.init.zeros_(self.fsrs_linear.weight)
         torch.nn.init.zeros_(self.fsrs_linear.bias)
 
-    # @FunctionType
-    # def transform_bounded(self, param, min: float, max: float, middle: float):
-    #     return min + (max - min) * torch.sigmoid(param + torch.logit(torch.tensor((middle - min) / (max - min), device=param.device)))
-
-    # @FunctionType
-    # def transform_bounded_exp(self, param, min: float, max: float, middle: float):
-    #     device = param.device
-    #     return torch.exp(self.transform_bounded(param, torch.log(torch.tensor(min, device=device)), torch.log(torch.tensor(max, device=device)), torch.log(torch.tensor(middle, device=device))))
-    
     @FunctionType
     def transform_bounded(self, param, min: float, max: float, middle: float):
         scale = max - min
@@ -71,7 +67,7 @@ class ToFSRSParams(ModuleType):
 
     @FunctionType
     def forward(self, x):
-        w = self.fsrs_linear(self.fsrs_ln(x.float()))
+        w = self.fsrs_linear(self.fsrs_head(x).float())
         w[:, 0] = self.transform_bounded_exp(w[:, 0], 0.001, 100.0, 0.22)
         w[:, 1] = self.transform_bounded_exp(w[:, 1], 0.001, 100.0, 1.17)
         w[:, 2] = self.transform_bounded_exp(w[:, 2], 0.001, 100.0, 3.26)
@@ -95,21 +91,62 @@ class ToFSRSParams(ModuleType):
         w[:, 20] = self.transform_bounded_exp(w[:, 20], 0.1, 0.8, 0.2)
         return w
 
+class ToPrediction(ModuleType):
+    def __init__(self, in_dim):
+        super().__init__()
+        self.num_curves = 4
+        self.hidden = in_dim
+        self.head = torch.nn.Sequential(
+            torch.nn.LayerNorm(in_dim),
+            torch.nn.Linear(in_dim, self.hidden),
+            torch.nn.Mish(),
+        )
+        self.s_linear = torch.nn.Linear(self.hidden, self.num_curves)
+        self.w_linear = torch.nn.Linear(self.hidden, self.num_curves)
+        self.d_linear = torch.nn.Linear(self.hidden, self.num_curves)
+
+        torch.nn.init.zeros_(self.s_linear.weight)
+        self.s_linear.bias.data.copy_(torch.tensor([2.0, 8.0, 14.0, 22.0]))
+        torch.nn.init.zeros_(self.w_linear.weight)
+        torch.nn.init.zeros_(self.w_linear.bias)
+        torch.nn.init.zeros_(self.d_linear.weight)
+        self.d_linear.bias.data.fill_(math.log(0.2 / 0.8))
+
+    @FunctionType
+    def forward(self, x, label_elapsed_seconds_T):
+        x = self.head(x)
+        out_s = torch.exp(self.s_linear(x).clamp(min=-25, max=25))
+        out_w = torch.nn.functional.softmax(self.w_linear(x), dim=-1)
+        out_d = 1e-3 + torch.sigmoid(self.d_linear(x))
+        result = self.forgetting_curve(label_elapsed_seconds_T, out_s, out_w, out_d)
+        return result
+
+    @FunctionType
+    def forgetting_curve(self, t, s, w, d):
+        return 1e-5 + (1 - 2e-5) * (
+            torch.sum(w * (1 + (1.0 + t.unsqueeze(-1)) / (1e-3 + s)) ** -d, dim=-1)
+        )
+        
 
 class FSRSSummaryModel(ModuleType):
     def __init__(self):
         super().__init__()
         self.core = SummaryCore()
-        self.fsrs_layer = ToFSRSParams(in_dim=32)
+        self.pred_layer = ToPrediction(in_dim=64)
+        self.fsrs_layer = ToFSRSParams(in_dim=64)
     
     @FunctionType
-    def forward(self, in_TC, indices_I, perm_T, perm_inv_T, timeshift_select_T, skip_T):
-        return self.fsrs_layer(self.core(in_TC, indices_I, perm_T, perm_inv_T, timeshift_select_T, skip_T))
+    def forward(self, in_TC, indices_I, perm_T, perm_inv_T, label_elapsed_seconds_T, timeshift_select_T, skip_T):
+        x = self.core(in_TC, indices_I, perm_T, perm_inv_T, timeshift_select_T, skip_T)
+        if torch.isnan(x).any():
+            raise Exception("nan")
+        fsrs_params = self.fsrs_layer(x)
+        aux = self.pred_layer(x, label_elapsed_seconds_T)
+        return fsrs_params, aux
 
     def is_excluded(self, name):
         DTYPE_EXCLUDE = [
             "fsrs_linear",
-            "fsrs_ln",
         ]
         for query in DTYPE_EXCLUDE:
             if query in name:
