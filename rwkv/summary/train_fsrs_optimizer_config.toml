@@ -23,11 +23,12 @@ PEAK_LR = 7e-4
 TRAIN_MODE = "WS"
 WARMUP_STEPS = 10000
 TOTAL_STEPS = 100000000000
+VALIDATE_STEPS = 1000
 
 LOAD_MODEL = false
 LOAD_MODEL_FOLDER = "pretrain/nn_optimizer"
 LOAD_MODEL_NAME = ""
-SAVE_MODEL_FOLDER = "pretrain/nn_optimizer_aux_only"
+SAVE_MODEL_FOLDER = "pretrain/nn_optimizer_splits"
 SAVE_MODEL_PREFIX = "fsrs_nn_optimizer"
 
 USE_WANDB = true

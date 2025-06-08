@@ -26,31 +26,36 @@ def get_data(txn, user_id, device):
     indices = list(range(num_batches))
     return [load_batch(txn, user_id, i, device) for i in indices]
 
-def evaluate(txn, model, parameters, user_id, min_review_th=0, max_review_th=int(1e9), device=torch.device("cpu"), equalize_test_reviews=False, skip_same_day_reviews=True):
+def evaluate_batched_parameters(txn, model, parameters_hp, user_id, min_review_th_h, max_review_th_h, device, equalize_test_reviews=False, skip_same_day_reviews=True):
+    H = min_review_th_h.size(0)
     batches = get_data(txn, user_id, device)
-    loss_tot = 0
-    loss_n = 0
+    loss_tot_h = 0
+    loss_n_h = 0
     for batch in batches:
         features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_y_bl, label_review_th_bl, label_is_same_day_bl, label_is_equalize_bl, has_label_bl = batch
-        out_bl = model(parameters, features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
-        label_y_bl = label_y_bl.float()
-        label_mask_bl = has_label_bl * (min_review_th <= label_review_th_bl) * (label_review_th_bl <= max_review_th)
+        out_hbl = model(parameters_hp, features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
+        label_y_hbl = label_y_bl.unsqueeze(0).expand(H, -1, -1).float()
+        label_review_th_hbl = label_review_th_bl.unsqueeze(0).expand(H, -1, -1)
+        has_label_hbl = has_label_bl.unsqueeze(0).expand(H, -1, -1)
+        label_is_equalize_hbl = label_is_equalize_bl.unsqueeze(0).expand(H, -1, -1)
+        label_is_same_day_hbl = label_is_same_day_bl.unsqueeze(0).expand(H, -1, -1)
+        label_mask_hbl = has_label_hbl * (min_review_th_h.view(H, 1, 1) <= label_review_th_hbl) * (label_review_th_hbl <= max_review_th_h.view(H, 1, 1))
         if equalize_test_reviews:
-            label_mask_bl = label_mask_bl * label_is_equalize_bl
+            label_mask_hbl = label_mask_hbl * label_is_equalize_hbl
         if skip_same_day_reviews:
-            label_mask_bl = label_mask_bl * ~label_is_same_day_bl
-        
+            label_mask_hbl = label_mask_hbl * ~label_is_same_day_hbl
+
         loss_fn = torch.nn.BCELoss(reduction="none")
-        loss_bl = loss_fn(out_bl, label_y_bl)
-        loss_tot += (loss_bl * label_mask_bl).sum()
-        loss_n += label_mask_bl.sum()
-    if loss_n == 0:
-        return torch.zeros_like(loss_tot), torch.zeros_like(loss_tot), 0
-    return loss_tot / loss_n, loss_tot, loss_n
+        loss_hbl = loss_fn(out_hbl, label_y_hbl)
+        loss_tot_h += (loss_hbl * label_mask_hbl).sum(dim=(1, 2))
+        loss_n_h += label_mask_hbl.sum(dim=(1, 2))
+    
+    return loss_tot_h / (1e-7 + loss_n_h), loss_tot_h, loss_n_h
 
 def evaluate_full(txn, model, parameter_list, splits_list, user_id, device=torch.device("cpu"), equalize_test_reviews=False, skip_same_day_reviews=True):
     assert skip_same_day_reviews, "not supported otherwise. bins might not be precomputed properly?"
     assert len(splits_list) == len(parameter_list) + 1
+    H = len(parameter_list)
     batches = get_data(txn, user_id, device)
     equalize_review_ths = load_tensor(txn, f"{user_id}_equalize_review_ths", device).tolist()
     rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device).tolist()
@@ -62,40 +67,51 @@ def evaluate_full(txn, model, parameter_list, splits_list, user_id, device=torch
     loss_n = 0
     y_pred = []
     y = []
+
+    parameters_hp = torch.stack(parameter_list, dim=0)
+    min_review_th_list = []
+    max_review_th_list = []
     for split_i in range(len(parameter_list)):
-        parameters = parameter_list[split_i]
-        min_review_th = splits_list[split_i]
-        max_review_th = splits_list[split_i + 1] - 1
+        min_review_th_list.append(splits_list[split_i])
+        max_review_th_list.append(splits_list[split_i + 1] - 1)
+    min_review_th_h = torch.tensor(min_review_th_list, device=device)
+    max_review_th_h = torch.tensor(max_review_th_list, device=device)
 
-        for batch in batches:
-            features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_y_bl, label_review_th_bl, label_is_same_day_bl, label_is_equalize_bl, has_label_bl = batch
-            out_bl = model(parameters, features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
-            assert not out_bl.isnan().any()
-            label_y_bl = label_y_bl.float()
-            label_mask_bl = has_label_bl * (min_review_th <= label_review_th_bl) * (label_review_th_bl <= max_review_th)
-            if equalize_test_reviews:
-                label_mask_bl = label_mask_bl * label_is_equalize_bl
-            if skip_same_day_reviews:
-                label_mask_bl = label_mask_bl * ~label_is_same_day_bl
-            
-            loss_fn = torch.nn.BCELoss(reduction="none")
-            loss_bl = loss_fn(out_bl, label_y_bl)
-            loss_tot += (loss_bl * label_mask_bl).sum()
-            loss_n += label_mask_bl.sum()
+    for batch in batches:
+        features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_y_hbl, label_review_th_bl, label_is_same_day_bl, label_is_equalize_bl, has_label_bl = batch
+        out_hbl = model(parameters_hp, features_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
+        assert not out_hbl.isnan().any()
+        label_y_hbl = label_y_hbl.unsqueeze(0).expand(H, -1, -1).float()
+        label_review_th_hbl = label_review_th_bl.unsqueeze(0).expand(H, -1, -1)
+        has_label_hbl = has_label_bl.unsqueeze(0).expand(H, -1, -1)
+        label_is_equalize_hbl = label_is_equalize_bl.unsqueeze(0).expand(H, -1, -1)
+        label_is_same_day_hbl = label_is_same_day_bl.unsqueeze(0).expand(H, -1, -1)
+        label_mask_hbl = has_label_hbl * (min_review_th_h.view(H, 1, 1) <= label_review_th_hbl) * (label_review_th_hbl <= max_review_th_h.view(H, 1, 1))
+        if equalize_test_reviews:
+            label_mask_hbl = label_mask_hbl * label_is_equalize_hbl
+        if skip_same_day_reviews:
+            label_mask_hbl = label_mask_hbl * ~label_is_same_day_hbl
+        
+        loss_fn = torch.nn.BCELoss(reduction="none")
+        loss_hbl = loss_fn(out_hbl, label_y_hbl)
+        loss_tot += (loss_hbl * label_mask_hbl).sum()
+        loss_n += label_mask_hbl.sum()
 
-            B, L = label_y_bl.shape
-            mask_np = label_mask_bl.cpu().numpy()
-            out_np = out_bl.detach().cpu().numpy()
-            label_review_th_np = label_review_th_bl.cpu().numpy()
-            label_y_np = label_y_bl.cpu().numpy()
+        _, B, L = label_y_hbl.shape
+        mask_np = label_mask_hbl.cpu().numpy()
+        out_np = out_hbl.detach().cpu().numpy()
+        label_review_th_np = label_review_th_hbl.cpu().numpy()
+        label_y_np = label_y_hbl.cpu().numpy()
+        for h in range(H):
             for b in range(B):
                 for l in range(L):
-                    if mask_np[b, l]:
-                        y.append(label_y_np[b, l])
-                        y_pred.append(out_np[b, l])
-                        bin = rmse_bins_dict[label_review_th_np[b, l]]
-                        bin_y[bin].append(label_y_np[b, l])
-                        bin_y_pred[bin].append(out_np[b, l])
+                    if mask_np[h, b, l]:
+                        y.append(label_y_np[h, b, l])
+                        y_pred.append(out_np[h, b, l])
+                        bin = rmse_bins_dict[label_review_th_np[h, b, l]]
+                        bin_y[bin].append(label_y_np[h, b, l])
+                        bin_y_pred[bin].append(out_np[h, b, l])
+        assert len(y) == loss_n.item()
 
     if loss_n == 0:
         return 0, 0, 0, 0, 0

@@ -11,12 +11,12 @@ from rwkv.utils import get_number_of_trainable_parameters, transfer_child_grad_t
 import random
 
 from utils import compact_lmdb, load_tensor, parse_toml
-from fsrs.evaluate_fsrs import evaluate, evaluate_full
+from fsrs.evaluate_fsrs import evaluate_batched_parameters, evaluate_full
 
 WEIGHT_DECAY = 1e-2
 ADAMW_EPS = 1e-18
 ADAMW_BETAS = (0.90, 0.999)
-CLIP = 1.0
+CLIP = 0.5
 
 def log_model(log, model):
     for name, param in model.named_parameters():
@@ -110,29 +110,25 @@ def get_data(txn, user_id, device, dtype=None):
         features_TC = features_TC.to(dtype)
         label_elapsed_seconds_T = label_elapsed_seconds_T.to(dtype)
     return features_TC, indices_I, perm_T_tensor, perm_inv_T_tensor, label_elapsed_seconds_T
+
 def get_split(n):
     assert n >= 12
     l = 0
     r = 0
     while abs(l - r + 1) < 12:
-        l = random.randint(0, n - 1)
-        r = random.randint(0, n - 1)
-    if l > r:
-        l, r = r, l
+        rands = [random.randint(0, n - 1) for _ in range(5)]
+        l = min(rands)
+        r = max(rands)
     
-    rand = random.randint(1, 5)
-    test_l = l + (r - l + 1) * rand // (rand + 1) 
-    return l, test_l, r
+    return l, r
 
 def decorate_training_sample(T, device):
-    train_l, test_l, test_r = get_split(T)
-    # [train_l, ..., test_l - 1] used for training
-    # [test_l, ..., test_r] used for testing
-    skip_T = torch.cat([torch.ones(train_l, dtype=torch.bool, device=device), torch.zeros(T - train_l, dtype=torch.bool, device=device)])
-    timeshift_select_T = torch.cat((torch.arange(start=0, end=train_l + 1, dtype=torch.long, device=device), torch.arange(start=train_l, end=T - 1, dtype=torch.long, device=device)))
+    l, r = get_split(T)
+    skip_T = torch.cat([torch.ones(l, dtype=torch.bool, device=device), torch.zeros(T - l, dtype=torch.bool, device=device)])
+    timeshift_select_T = torch.cat((torch.arange(start=0, end=l + 1, dtype=torch.long, device=device), torch.arange(start=l, end=T - 1, dtype=torch.long, device=device)))
     assert timeshift_select_T.size(0) == T
     assert skip_T.size(0) == T
-    return train_l + 1, test_l + 1, test_r + 1, timeshift_select_T, skip_T
+    return l, r, timeshift_select_T, skip_T
 
 def evaluate_aux(label_filter_txn, summary_txn, user_id, aux, device, skip_T=None, equalize_test_reviews=False, include_other_metrics=False):
     if include_other_metrics:
@@ -255,6 +251,12 @@ def validate(summarizer_model, fsrs_model, summary_txn, fsrs_txn, label_filter_t
     print(f"Mean validation loss: {tot_loss / tot_loss_n:.4f}")
     return tot_loss / tot_loss_n, aux_tot_loss / aux_tot_loss_n
 
+def generate_subsplits(l, r, T):
+    g = (r - l + 1) // 5
+    subsplit_values = max(32, 100000 * 32 // T)
+    linspace = np.linspace(l + g, r - g, num=subsplit_values)
+    floored_linspace = np.floor(linspace).astype(int)
+    return np.unique(floored_linspace).tolist()
 
 def main(config):
     random.seed(config.SEED)
@@ -352,7 +354,7 @@ def main(config):
                         log = {}
                         log["epoch"] = epoch
                         step += 1
-                        validate_iter = (step + 1) % 1000 == 0
+                        validate_iter = (step + 1) % config.VALIDATE_STEPS == 0
                         # validate_iter = True
                         log["step"] = step
                         current_lr = optimizer.param_groups[0]["lr"]
@@ -366,28 +368,44 @@ def main(config):
                             if T > config.SKIP_LENGTH:
                                 print(f"Skipping: {user}")
                                 continue
-                            train_min_review_th, test_min_review_th, test_max_review_th, timeshift_select_T, skip_T = decorate_training_sample(training_sample[0].size(0), device=config.DEVICE)
+                            train_l, train_r, timeshift_select_T, skip_T = decorate_training_sample(training_sample[0].size(0), device=config.DEVICE)
+                            subsplits = generate_subsplits(train_l, train_r, T)
                             print()
-                            print(f"Indices:", train_min_review_th, test_min_review_th, test_max_review_th, T, "User:", user)
-                            print(f"Train size: {test_min_review_th - train_min_review_th}, Test size: {test_max_review_th - test_min_review_th + 1}")
+                            print(f"Indices:", train_l, train_r, train_r - train_l + 1, T, "User:", user)
+                            print(f"Number of subsplits:", len(subsplits))
                             summarizer_out_TP, aux = model(*training_sample, timeshift_select_T, skip_T)
-                            fsrs_param_index = test_min_review_th - 2
-                            assert fsrs_param_index >= 0
-                            fsrs_params_P = summarizer_out_TP[fsrs_param_index]
-                            print(f"Params: {list(map(lambda x: round(float(x), 4), fsrs_params_P.tolist()))}")
+
+                            params_list = []
+                            min_review_ths_list = []
+                            for subsplit in subsplits:
+                                fsrs_params_P = summarizer_out_TP[subsplit - 1]
+                                params_list.append(fsrs_params_P)
+                                min_review_ths_list.append(subsplit + 1)
+
+                            params_hp = torch.stack(params_list, dim=0)
+                            min_review_ths_h = torch.tensor(min_review_ths_list, device=config.DEVICE)
+                            max_review_ths_h = torch.full_like(min_review_ths_h, fill_value=train_r + 1)
+                            loss_avg_h, loss_tot_h, loss_n_h = evaluate_batched_parameters(fsrs_txn, fsrs_model, params_hp, user, min_review_th_h=min_review_ths_h, max_review_th_h=max_review_ths_h, device=config.DEVICE, equalize_test_reviews=True, skip_same_day_reviews=True)
+                            loss_n = loss_n_h.sum()
+                            loss_fsrs = loss_tot_h.sum() / (1e-7 + loss_n)
+
+                            for h in np.floor(np.linspace(0, len(subsplits) - 1, num=3)).astype(int):
+                                subsplit = subsplits[h]
+                                print(f"Subsplit: {subsplit}, loss: {loss_avg_h[h].item():.3f} ({loss_n_h[h]}), params: {list(map(lambda x: round(float(x), 4), params_hp[h].tolist()))}")
+
                             for param_i, param in enumerate(fsrs_params_P.tolist()):
                                 log[f"fsrs_param_{param_i}"] = param
 
-                            loss_avg, loss_tot, loss_n = evaluate(fsrs_txn, fsrs_model, fsrs_params_P, user, min_review_th=test_min_review_th, max_review_th=test_max_review_th, device=config.DEVICE, skip_same_day_reviews=True)
-                            loss_aux_avg, loss_aux_tot, loss_aux_n = evaluate_aux(label_filter_txn, summary_txn, user, aux, config.DEVICE, skip_T=skip_T)
-                            loss = loss_avg + 0.1 * loss_aux_avg
+                            loss_aux_avg, _, loss_aux_n = evaluate_aux(label_filter_txn, summary_txn, user, aux, config.DEVICE, skip_T=skip_T)
+                            loss = loss_fsrs + 0.1 * loss_aux_avg
+                            # loss = loss_fsrs
                             log["unstable_gradient"] = 0
                             # loss = loss_aux_avg
-                            if loss_n < 20 or loss_aux_n < 20:
+                            if loss_n < 100 or loss_aux_n < 100:
                                 print("Skipping: label sizes are too small.", loss_n, loss_aux_n)
                             elif loss.requires_grad:
                                 log["train_loss"] = loss
-                                log["train_loss_fsrs"] = loss_avg
+                                log["train_loss_fsrs"] = loss_fsrs
                                 log["train_loss_aux"] = loss_aux_avg
                                 loss.backward()
                                 transfer_child_grad_to_master(master=master_model, child=model)
@@ -395,7 +413,7 @@ def main(config):
                                 log["grad_norm"] = grad_norm
                                 if grad_norm > 100:
                                     log["unstable_gradient"] = 1
-                                print(f"{step} {epoch}, user: {user}, loss: {loss.item():.3f}, loss_fsrs: {loss_avg.item():.3f} ({loss_n}), loss_aux: {loss_aux_avg.item():.3f} ({loss_aux_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
+                                print(f"{step} {epoch}, user: {user}, loss: {loss.item():.3f}, loss_fsrs: {loss_fsrs.item():.3f} ({loss_n}), loss_aux: {loss_aux_avg.item():.3f} ({loss_aux_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                 optimizer.step()
                                 optimizer.zero_grad()
 
