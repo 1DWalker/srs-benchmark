@@ -252,9 +252,14 @@ def validate(summarizer_model, fsrs_model, summary_txn, fsrs_txn, label_filter_t
     return tot_loss / tot_loss_n, aux_tot_loss / aux_tot_loss_n
 
 def generate_subsplits(l, r, T):
-    g = (r - l + 1) // 5
-    subsplit_values = max(32, 100000 * 32 // T)
-    linspace = np.linspace(l + g, r - g, num=subsplit_values)
+    # subsplit_values = max(32, 100000 * 32 // T)
+    M = 200000
+    p = 0.30  # Estimate of the proportion of memory that is used for RWKV evaluation at T = M and 32 subsplits
+    v = int(M * 32 * 1 / p)
+
+    subsplit_values = min(r - l + 1, max(32, int((v - (1 - p) * v / M * T) / T)))
+    g = (r - l + 1) // 6
+    linspace = np.linspace((l + r) // 2, r - g, num=subsplit_values)
     floored_linspace = np.floor(linspace).astype(int)
     return np.unique(floored_linspace).tolist()
 
@@ -397,8 +402,8 @@ def main(config):
                                 log[f"fsrs_param_{param_i}"] = param
 
                             loss_aux_avg, _, loss_aux_n = evaluate_aux(label_filter_txn, summary_txn, user, aux, config.DEVICE, skip_T=skip_T)
-                            loss = loss_fsrs + 0.1 * loss_aux_avg
-                            # loss = loss_fsrs
+                            # loss = loss_fsrs + 0.1 * loss_aux_avg
+                            loss = loss_fsrs
                             log["unstable_gradient"] = 0
                             # loss = loss_aux_avg
                             if loss_n < 100 or loss_aux_n < 100:
