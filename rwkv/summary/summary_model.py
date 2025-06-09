@@ -27,7 +27,6 @@ class SummaryCore(ModuleType):
             torch.nn.Mish(),
         )
         rwkv7packed_config = RWKV7PackedConfig(d_model=32, n_heads=1, n_layers=3, channel_mixer_factor=1.5, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8, dropout=0.0, dropout_layer=0.0)
-        self.proj = torch.nn.Linear(32, 64, bias=False)  # TODO repeat instead of using this linear projection
         self.card_encoder = RWKV7Packed(rwkv7packed_config)
         rwkv7_config = RWKV7Config(d_model=64, n_heads=2, n_layers=6, channel_mixer_factor=2.0, layer_offset=0, total_layers=6, decay_lora=8, a_lora=8, v0_mix_amt_lora=8, gate_lora=16, dropout=0.0, dropout_layer=0.0)
         self.global_encoder = RWKV7(rwkv7_config)
@@ -38,7 +37,7 @@ class SummaryCore(ModuleType):
         in_TC = self.initial_encoding(in_TC)
         card_in_TC = in_TC[perm_T]
         card_encoding_TC = self.card_encoder(card_in_TC, indices_I) 
-        global_in_TC = self.proj(card_encoding_TC[perm_inv_T])
+        global_in_TC = card_encoding_TC[perm_inv_T].repeat(1, 2)
         global_out_TC = self.global_encoder(global_in_TC.unsqueeze(0), timeshift_select_T.unsqueeze(0), skip_T.unsqueeze(0)).squeeze(0)
         return global_out_TC
 
