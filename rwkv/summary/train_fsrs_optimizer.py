@@ -283,6 +283,7 @@ def main(config):
                 weights_only=True,
             )
         )
+        print("Loaded model:", model_path)
     else:
         print("No model loaded.")
 
@@ -349,10 +350,15 @@ def main(config):
         else:
             wandb.init(project=config.WANDB_PROJECT_NAME, config=wandb_config)
 
+    for i in range(config.START_STEP):
+        scheduler.step()
+        # print(i, optimizer.param_groups[0]["lr"])
+    # exit()
+
     with summary_env.begin(write=False) as summary_txn:
         with fsrs_evaluate_env.begin(write=False) as fsrs_txn:
             with label_filter_env.begin(write=False) as label_filter_txn:
-                step = -1
+                step = config.START_STEP - 1
                 for epoch in range(int(1e9)):
                     random.shuffle(train_users)
                     for user_i, user in enumerate(train_users):
@@ -443,7 +449,7 @@ def main(config):
                             save_model_path = (
                                 f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_{step}.pth"
                             )
-                            save_optim_path = f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_optim_{step}.pth"
+                            save_optim_path = f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_{step}_optim.pth"
                             Path(config.SAVE_MODEL_FOLDER).mkdir(parents=True, exist_ok=True)               
                             torch.save(master_model.state_dict(), save_model_path)
                             torch.save(optimizer.state_dict(), save_optim_path)

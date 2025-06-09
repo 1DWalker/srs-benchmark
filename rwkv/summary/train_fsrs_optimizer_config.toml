@@ -2,7 +2,7 @@ SUMMARY_DB_PATH = "summary_db"
 LABEL_FILTER_DB_PATH = "label_filter_db"
 FSRS_EVALUATE_DB_PATH = "fsrs_evaluate_db"
 
-SEED = 1234567
+SEED = 12345234
 
 TRAIN_USER_START = 5000
 TRAIN_USER_END = 10000
@@ -21,13 +21,14 @@ PEAK_LR = 7e-4
 
 # Available modes are "WS" and "D" for the corresponding phases of the WSD learning rate scheduler.
 TRAIN_MODE = "WS"
+START_STEP = 0
 WARMUP_STEPS = 20000
 TOTAL_STEPS = 100000000000
 VALIDATE_STEPS = 1000
 
-LOAD_MODEL = false
-LOAD_MODEL_FOLDER = "pretrain/nn_optimizer"
-LOAD_MODEL_NAME = ""
+LOAD_MODEL = true
+LOAD_MODEL_FOLDER = "pretrain/nn_optimizer_higher_lr"
+LOAD_MODEL_NAME = "fsrs_nn_optimizer_7999"
 SAVE_MODEL_FOLDER = "pretrain/nn_optimizer_higher_lr"
 SAVE_MODEL_PREFIX = "fsrs_nn_optimizer"
 
