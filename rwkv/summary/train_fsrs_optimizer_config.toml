@@ -2,7 +2,7 @@ SUMMARY_DB_PATH = "summary_db"
 LABEL_FILTER_DB_PATH = "label_filter_db"
 FSRS_EVALUATE_DB_PATH = "fsrs_evaluate_db"
 
-SEED = 12345234
+SEED = 123987
 
 TRAIN_USER_START = 5000
 TRAIN_USER_END = 10000
@@ -17,19 +17,21 @@ VALIDATE_USER_END = 100
 DEVICE = "cuda"
 DTYPE = "bfloat16"
 
-PEAK_LR = 7e-4
+# If we use a warmup, set the lr to start at for the warmup. Useful for continuing a run that was in the middle of a warmup
+WARMUP_START_LR = 7e-4
+PEAK_LR = 1.4e-3
 
 # Available modes are "WS" and "D" for the corresponding phases of the WSD learning rate scheduler.
 TRAIN_MODE = "WS"
-START_STEP = 0
-WARMUP_STEPS = 20000
+START_STEP = 64000
+WARMUP_STEPS = 10000
 TOTAL_STEPS = 100000000000
 VALIDATE_STEPS = 1000
 
 LOAD_MODEL = true
-LOAD_MODEL_FOLDER = "pretrain/nn_optimizer_higher_lr"
-LOAD_MODEL_NAME = "fsrs_nn_optimizer_7999"
-SAVE_MODEL_FOLDER = "pretrain/nn_optimizer_higher_lr"
+LOAD_MODEL_FOLDER = "pretrain/nn_optimizer_no_proj"
+LOAD_MODEL_NAME = "fsrs_nn_optimizer_63999"
+SAVE_MODEL_FOLDER = "pretrain/nn_optimizer_no_proj_inc_lr"
 SAVE_MODEL_PREFIX = "fsrs_nn_optimizer"
 
 USE_WANDB = true

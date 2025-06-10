@@ -272,20 +272,55 @@ def main(config):
     optimizer = get_optimizer(config, master_model)
     print("Number of trainable parameters:", get_number_of_trainable_parameters(model))
 
+    if config.TRAIN_MODE == "WS":
+        start_factor = max(1e-4, config.WARMUP_START_LR / config.PEAK_LR)
+        start_lr = start_factor * config.PEAK_LR
+        warmup_steps = config.WARMUP_STEPS
+        print("Warmup steps:", warmup_steps)
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=start_factor, end_factor=1.0, total_iters=warmup_steps
+        )
+        main_scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0)
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, main_scheduler],
+            milestones=[warmup_steps],
+        )
+    elif config.TRAIN_MODE == "D":
+
+        def cosine_down(step, total_steps):
+            return 1 + np.cos(0.5 * np.pi * (1 + step / total_steps))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=lambda t: cosine_down(t, config.TOTAL_STEPS)
+        )
+    else:
+        raise ValueError(f"Invalid train mode: {config.TRAIN_MODE}")
+
     if config.LOAD_MODEL:
         model_path = f"{config.LOAD_MODEL_FOLDER}/{config.LOAD_MODEL_NAME}.pth"
         optim_path = f"{config.LOAD_MODEL_FOLDER}/{config.LOAD_MODEL_NAME}_optim.pth"
         print("Loading model:", model_path)
         master_model.load_state_dict(torch.load(model_path, weights_only=True))
-        optimizer.load_state_dict(
-            torch.load(
-                optim_path,
-                weights_only=True,
-            )
-        )
+        optimizer_state = torch.load(optim_path, weights_only=True)
+        if config.TRAIN_MODE == "WS":
+            for group in optimizer_state["param_groups"]:
+                group["lr"] = start_lr
+        optimizer.load_state_dict(optimizer_state)
+
+        # optimizer.load_state_dict(
+        #     torch.load(
+        #         optim_path,
+        #         weights_only=True,
+        #     )
+        # )
+        # for param in optimizer.param_groups:
+        #     param['lr'] = config.PEAK_LR
+        # print("iNiaizliaed lr", start_factor * param["lr"])
         print("Loaded model:", model_path)
     else:
         print("No model loaded.")
+
 
     train_users = list(range(config.TRAIN_USER_START, config.TRAIN_USER_END + 1))
     validate_overfit_users = list(range(config.VALIDATE_OVERFIT_USER_START, config.VALIDATE_OVERFIT_USER_END + 1))
@@ -305,28 +340,10 @@ def main(config):
     fsrs_evaluate_env = lmdb.open(config.FSRS_EVALUATE_DB_PATH, readonly=True, lock=False)
     label_filter_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
 
-    if config.TRAIN_MODE == "WS":
-        warmup_steps = config.WARMUP_STEPS
-        print("Warmup steps:", warmup_steps)
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=1e-4, end_factor=1.0, total_iters=warmup_steps
-        )
-        main_scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0)
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
-            schedulers=[warmup_scheduler, main_scheduler],
-            milestones=[warmup_steps],
-        )
-    elif config.TRAIN_MODE == "D":
-
-        def cosine_down(step, total_steps):
-            return 1 + np.cos(0.5 * np.pi * (1 + step / total_steps))
-
-        scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimizer, lr_lambda=lambda t: cosine_down(t, config.TOTAL_STEPS)
-        )
-    else:
-        raise ValueError(f"Invalid train mode: {config.TRAIN_MODE}")
+    # for i in range(config.WARMUP_STEPS):
+    #     print(i, optimizer.param_groups[0]["lr"])
+    #     scheduler.step()
+    # exit()
 
     if config.USE_WANDB:
         wandb_config = {
@@ -349,11 +366,6 @@ def main(config):
             )
         else:
             wandb.init(project=config.WANDB_PROJECT_NAME, config=wandb_config)
-
-    for i in range(config.START_STEP):
-        scheduler.step()
-        # print(i, optimizer.param_groups[0]["lr"])
-    # exit()
 
     with summary_env.begin(write=False) as summary_txn:
         with fsrs_evaluate_env.begin(write=False) as fsrs_txn:
