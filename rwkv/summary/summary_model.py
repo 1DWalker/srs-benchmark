@@ -26,9 +26,9 @@ class SummaryCore(ModuleType):
             torch.nn.Linear(9, 32),
             torch.nn.Mish(),
         )
-        rwkv7packed_config = RWKV7PackedConfig(d_model=32, n_heads=1, n_layers=3, channel_mixer_factor=1.5, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8, dropout=0.0, dropout_layer=0.0)
+        rwkv7packed_config = RWKV7PackedConfig(d_model=32, n_heads=1, n_layers=3, channel_mixer_factor=1.5, decay_lora=8, a_lora=8, v0_mix_amt_lora=4, gate_lora=8, dropout=0.0, dropout_layer=0.01)
         self.card_encoder = RWKV7Packed(rwkv7packed_config)
-        rwkv7_config = RWKV7Config(d_model=64, n_heads=2, n_layers=6, channel_mixer_factor=2.0, layer_offset=0, total_layers=6, decay_lora=8, a_lora=8, v0_mix_amt_lora=8, gate_lora=16, dropout=0.0, dropout_layer=0.0)
+        rwkv7_config = RWKV7Config(d_model=64, n_heads=2, n_layers=8, channel_mixer_factor=2.0, layer_offset=0, total_layers=6, decay_lora=8, a_lora=8, v0_mix_amt_lora=8, gate_lora=16, dropout=0.0, dropout_layer=0.01)
         self.global_encoder = RWKV7(rwkv7_config)
 
     @FunctionType
@@ -131,7 +131,6 @@ class FSRSSummaryModel(ModuleType):
     def __init__(self):
         super().__init__()
         self.core = SummaryCore()
-        self.pred_layer = ToPrediction(in_dim=64)
         self.fsrs_layer = ToFSRSParams(in_dim=64)
     
     @FunctionType
@@ -140,8 +139,7 @@ class FSRSSummaryModel(ModuleType):
         if torch.isnan(x).any():
             raise Exception("nan")
         fsrs_params = self.fsrs_layer(x)
-        aux = self.pred_layer(x, label_elapsed_seconds_T)
-        return fsrs_params, aux
+        return fsrs_params
 
     def is_excluded(self, name):
         DTYPE_EXCLUDE = [

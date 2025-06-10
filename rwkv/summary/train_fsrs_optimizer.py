@@ -111,101 +111,106 @@ def get_data(txn, user_id, device, dtype=None):
         label_elapsed_seconds_T = label_elapsed_seconds_T.to(dtype)
     return features_TC, indices_I, perm_T_tensor, perm_inv_T_tensor, label_elapsed_seconds_T
 
-def get_split(n):
-    assert n >= 12
-    l = 0
-    r = 0
-    while abs(l - r + 1) < 12:
-        rands = [random.randint(0, n - 1) for _ in range(5)]
-        l = min(rands)
-        r = max(rands)
-    
-    return l, r
-
 def decorate_training_sample(T, device):
     l, r = get_split(T)
-    skip_T = torch.cat([torch.ones(l, dtype=torch.bool, device=device), torch.zeros(T - l, dtype=torch.bool, device=device)])
-    timeshift_select_T = torch.cat((torch.arange(start=0, end=l + 1, dtype=torch.long, device=device), torch.arange(start=l, end=T - 1, dtype=torch.long, device=device)))
+    global_dropout = random.uniform(0.0, 0.5)
+    skip_T_np = np.random.rand(T) < global_dropout  # Skip randomly
+    skip_T_np[:l] = 1  # Skip all < l
+    timeshift_select_list = []
+    last = 0
+    found = False
+    for i, skip in enumerate(skip_T_np):
+        if not found:
+            timeshift_select_list.append(i)
+        else:
+            timeshift_select_list.append(last)
+        if not skip:
+            last = i
+            found = True
+
+    skip_T = torch.tensor(skip_T_np, dtype=torch.bool, device=device)
+    timeshift_select_T = torch.tensor(timeshift_select_list, dtype=torch.long, device=device)
+
     assert timeshift_select_T.size(0) == T
     assert skip_T.size(0) == T
     return l, r, timeshift_select_T, skip_T
 
-def evaluate_aux(label_filter_txn, summary_txn, user_id, aux, device, skip_T=None, equalize_test_reviews=False, include_other_metrics=False):
-    if include_other_metrics:
-        assert equalize_test_reviews
+# def evaluate_aux(label_filter_txn, summary_txn, user_id, aux, device, skip_T=None, equalize_test_reviews=False, include_other_metrics=False):
+#     if include_other_metrics:
+#         assert equalize_test_reviews
 
-    label_rating_T = load_tensor(summary_txn, f"{user_id}_label_rating_T", device).to(torch.int)
-    label_y_T = (label_rating_T >= 2).float()
-    assert len(aux.shape) == 1
-    T = label_rating_T.size(0)
-    assert aux.size(0) == label_rating_T.size(0)
-    has_label_T = load_tensor(summary_txn, f"{user_id}_has_label_T", device)
-    label_is_same_day_T = load_tensor(summary_txn, f"{user_id}_label_is_same_day_T", device)
-    label_is_equalize_review_T = load_tensor(summary_txn, f"{user_id}_label_is_equalize_review_T", device)
+#     label_rating_T = load_tensor(summary_txn, f"{user_id}_label_rating_T", device).to(torch.int)
+#     label_y_T = (label_rating_T >= 2).float()
+#     assert len(aux.shape) == 1
+#     T = label_rating_T.size(0)
+#     assert aux.size(0) == label_rating_T.size(0)
+#     has_label_T = load_tensor(summary_txn, f"{user_id}_has_label_T", device)
+#     label_is_same_day_T = load_tensor(summary_txn, f"{user_id}_label_is_same_day_T", device)
+#     label_is_equalize_review_T = load_tensor(summary_txn, f"{user_id}_label_is_equalize_review_T", device)
 
-    curve_raw_loss = torch.nn.functional.binary_cross_entropy(
-        aux.float(), label_y_T, reduction="none"
-    )
-    mask_T = has_label_T * ~label_is_same_day_T
-    if skip_T is not None:
-        mask_T = mask_T * ~skip_T
-    if equalize_test_reviews:
-        mask_T = mask_T * label_is_equalize_review_T
+#     curve_raw_loss = torch.nn.functional.binary_cross_entropy(
+#         aux.float(), label_y_T, reduction="none"
+#     )
+#     mask_T = has_label_T * ~label_is_same_day_T
+#     if skip_T is not None:
+#         mask_T = mask_T * ~skip_T
+#     if equalize_test_reviews:
+#         mask_T = mask_T * label_is_equalize_review_T
 
-    loss_tot = (curve_raw_loss * mask_T).sum()
-    loss_n = mask_T.sum().item()
-    if not include_other_metrics:
-        if loss_n == 0:
-            return torch.zeros_like(loss_tot), torch.zeros_like(loss_tot), 0
-        return loss_tot / loss_n, loss_tot, loss_n
-    else:
-        label_review_th_T = load_tensor(summary_txn, f"{user_id}_label_review_th_T", device)
-        equalize_review_ths = load_tensor(label_filter_txn, f"{user_id}_review_ths", device).tolist()
-        rmse_bins = load_tensor(label_filter_txn, f"{user_id}_rmse_bins", device).tolist()
+#     loss_tot = (curve_raw_loss * mask_T).sum()
+#     loss_n = mask_T.sum().item()
+#     if not include_other_metrics:
+#         if loss_n == 0:
+#             return torch.zeros_like(loss_tot), torch.zeros_like(loss_tot), 0
+#         return loss_tot / loss_n, loss_tot, loss_n
+#     else:
+#         label_review_th_T = load_tensor(summary_txn, f"{user_id}_label_review_th_T", device)
+#         equalize_review_ths = load_tensor(label_filter_txn, f"{user_id}_review_ths", device).tolist()
+#         rmse_bins = load_tensor(label_filter_txn, f"{user_id}_rmse_bins", device).tolist()
 
-        rmse_bins_dict = dict(zip(equalize_review_ths, rmse_bins))
-        bin_y_pred = {bin: [] for bin in set(rmse_bins)}
-        bin_y = {bin: [] for bin in set(rmse_bins)}
-        mask_np = mask_T.cpu().numpy()
-        label_y_np = label_y_T.cpu().numpy()
-        out_np = aux.float().detach().cpu().numpy()
-        label_review_th_np = label_review_th_T.cpu().numpy()
-        y = []
-        y_pred = []
-        for t in range(T):
-            if mask_np[t]:
-                y.append(label_y_np[t])
-                y_pred.append(out_np[t])
-                bin = rmse_bins_dict[label_review_th_np[t]]
-                bin_y[bin].append(label_y_np[t])
-                bin_y_pred[bin].append(out_np[t])
+#         rmse_bins_dict = dict(zip(equalize_review_ths, rmse_bins))
+#         bin_y_pred = {bin: [] for bin in set(rmse_bins)}
+#         bin_y = {bin: [] for bin in set(rmse_bins)}
+#         mask_np = mask_T.cpu().numpy()
+#         label_y_np = label_y_T.cpu().numpy()
+#         out_np = aux.float().detach().cpu().numpy()
+#         label_review_th_np = label_review_th_T.cpu().numpy()
+#         y = []
+#         y_pred = []
+#         for t in range(T):
+#             if mask_np[t]:
+#                 y.append(label_y_np[t])
+#                 y_pred.append(out_np[t])
+#                 bin = rmse_bins_dict[label_review_th_np[t]]
+#                 bin_y[bin].append(label_y_np[t])
+#                 bin_y_pred[bin].append(out_np[t])
 
-        if loss_n == 0:
-            return 0, 0, 0, 0, 0
+#         if loss_n == 0:
+#             return 0, 0, 0, 0, 0
 
-        rmse_raw = root_mean_squared_error(y_true=y, y_pred=y_pred)
-        try:
-            auc = round(roc_auc_score(y_true=y, y_score=y_pred), 6)
-        except:
-            auc = None
+#         rmse_raw = root_mean_squared_error(y_true=y, y_pred=y_pred)
+#         try:
+#             auc = round(roc_auc_score(y_true=y, y_score=y_pred), 6)
+#         except:
+#             auc = None
 
-        rows = []
-        for bin in bin_y_pred.keys():
-            for y, pred in zip(bin_y[bin], bin_y_pred[bin]):
-                rows.append([bin, y, pred, 1])
-        assert len(rows) == len(equalize_review_ths)
+#         rows = []
+#         for bin in bin_y_pred.keys():
+#             for y, pred in zip(bin_y[bin], bin_y_pred[bin]):
+#                 rows.append([bin, y, pred, 1])
+#         assert len(rows) == len(equalize_review_ths)
 
-        tmp = pd.DataFrame(rows, columns=["bin", "y", "p", "weights"])
-        tmp = (
-            tmp.groupby("bin")
-            .agg({"y": "mean", "p": "mean", "weights": "sum"})
-            .reset_index()
-        )
-        rmse_bins = root_mean_squared_error(
-            tmp["y"], tmp["p"], sample_weight=tmp["weights"]
-        )
+#         tmp = pd.DataFrame(rows, columns=["bin", "y", "p", "weights"])
+#         tmp = (
+#             tmp.groupby("bin")
+#             .agg({"y": "mean", "p": "mean", "weights": "sum"})
+#             .reset_index()
+#         )
+#         rmse_bins = root_mean_squared_error(
+#             tmp["y"], tmp["p"], sample_weight=tmp["weights"]
+#         )
 
-        return loss_tot / loss_n, loss_n, rmse_raw, rmse_bins, auc
+#         return loss_tot / loss_n, loss_n, rmse_raw, rmse_bins, auc
 
 
 def validate(summarizer_model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_users, device):
@@ -224,7 +229,7 @@ def validate(summarizer_model, fsrs_model, summary_txn, fsrs_txn, label_filter_t
             splits = load_tensor(label_filter_txn, f"{user}_split", device=device).tolist()
             assert len(splits) == 6
             with torch.no_grad():
-                summarizer_out_TP, aux = summarizer_model(*summarizer_in, timeshift_select_T, skip_T)
+                summarizer_out_TP = summarizer_model(*summarizer_in, timeshift_select_T, skip_T)
                 parameter_list = []
                 for split_i in range(len(splits) - 1):
                     test_min_review_th = splits[split_i]
@@ -233,23 +238,31 @@ def validate(summarizer_model, fsrs_model, summary_txn, fsrs_txn, label_filter_t
                     fsrs_params_P = summarizer_out_TP[fsrs_param_index]
                     parameter_list.append(fsrs_params_P)
                 loss, loss_n, rmse_raw, rmse_bins, auc = evaluate_full(fsrs_txn, fsrs_model, parameter_list, splits, user, device=device, equalize_test_reviews=True)
-                aux_loss, aux_loss_n, aux_rmse_raw, aux_rmse_bins, aux_auc = evaluate_aux(label_filter_txn, summary_txn, user, aux, device, equalize_test_reviews=True, include_other_metrics=True)
+                # aux_loss, aux_loss_n, aux_rmse_raw, aux_rmse_bins, aux_auc = evaluate_aux(label_filter_txn, summary_txn, user, aux, device, equalize_test_reviews=True, include_other_metrics=True)
                 print()
                 print(f"FSRS - User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {auc:.6f}, size: {loss_n}")
-                print(f"AUX  - User: {user}, RMSE: {aux_rmse_raw:.6f}, LogLoss: {aux_loss:.6f}, RMSE (bins): {aux_rmse_bins:.6f}, AUC: {aux_auc:.6f}, size: {aux_loss_n}")
+                # print(f"AUX  - User: {user}, RMSE: {aux_rmse_raw:.6f}, LogLoss: {aux_loss:.6f}, RMSE (bins): {aux_rmse_bins:.6f}, AUC: {aux_auc:.6f}, size: {aux_loss_n}")
                 for split_i, parameters in enumerate(parameter_list):
                     print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
 
                 tot_loss += loss * loss_n
                 tot_loss_n += loss_n
-                aux_tot_loss += aux_loss * aux_loss_n
-                aux_tot_loss_n += aux_loss_n
+                # aux_tot_loss += aux_loss * aux_loss_n
+                # aux_tot_loss_n += aux_loss_n
     except Exception as e:
         print("Exception in validate. RWKV-7 nan?")
         print(e)
         return None
     print(f"Mean validation loss: {tot_loss / tot_loss_n:.4f}")
-    return tot_loss / tot_loss_n, aux_tot_loss / aux_tot_loss_n
+    return tot_loss / tot_loss_n
+
+def get_split(n):
+    assert n >= 12
+    k = min([random.randint(max(100, int(0.2 * n)), n) for _ in range(2)])
+    # k = random.randint(2, 5)
+    # r = l + k - 1 <= n-1 implies l <= n - k
+    l = random.randint(0, n - k)
+    return l, l + k - 1
 
 def generate_subsplits(l, r, T):
     # subsplit_values = max(32, 100000 * 32 // T)
@@ -383,75 +396,74 @@ def main(config):
                         current_lr = optimizer.param_groups[0]["lr"]
                         log["lr"] = current_lr
 
-                        try:
-                            model.copy_downcast_(master_model, dtype=config.DTYPE)
-                            model.train()
-                            training_sample = get_data(summary_txn, user, config.DEVICE)
-                            T = training_sample[0].size(0)
-                            if T > config.SKIP_LENGTH:
-                                print(f"Skipping: {user}")
-                                continue
-                            train_l, train_r, timeshift_select_T, skip_T = decorate_training_sample(training_sample[0].size(0), device=config.DEVICE)
-                            subsplits = generate_subsplits(train_l, train_r, T)
-                            print()
-                            print(f"Indices:", train_l, train_r, train_r - train_l + 1, T, "User:", user)
-                            print(f"Number of subsplits:", len(subsplits))
-                            summarizer_out_TP, aux = model(*training_sample, timeshift_select_T, skip_T)
+                        model.copy_downcast_(master_model, dtype=config.DTYPE)
+                        model.train()
+                        training_sample = get_data(summary_txn, user, config.DEVICE)
+                        T = training_sample[0].size(0)
+                        if T > config.SKIP_LENGTH:
+                            print(f"Skipping: {user}")
+                        else:
+                            try:
+                                train_l, train_r, timeshift_select_T, skip_T = decorate_training_sample(training_sample[0].size(0), device=config.DEVICE)
+                                subsplits = generate_subsplits(train_l, train_r, T)
+                                print()
+                                print(f"Indices:", train_l, train_r, train_r - train_l + 1, T, "User:", user)
+                                print(f"Number of subsplits:", len(subsplits))
+                                summarizer_out_TP = model(*training_sample, timeshift_select_T, skip_T)
 
-                            params_list = []
-                            min_review_ths_list = []
-                            for subsplit in subsplits:
-                                fsrs_params_P = summarizer_out_TP[subsplit - 1]
-                                params_list.append(fsrs_params_P)
-                                min_review_ths_list.append(subsplit + 1)
+                                params_list = []
+                                min_review_ths_list = []
+                                for subsplit in subsplits:
+                                    fsrs_params_P = summarizer_out_TP[subsplit - 1]
+                                    params_list.append(fsrs_params_P)
+                                    min_review_ths_list.append(subsplit + 1)
 
-                            params_hp = torch.stack(params_list, dim=0)
-                            min_review_ths_h = torch.tensor(min_review_ths_list, device=config.DEVICE)
-                            max_review_ths_h = torch.full_like(min_review_ths_h, fill_value=train_r + 1)
-                            loss_avg_h, loss_tot_h, loss_n_h = evaluate_batched_parameters(fsrs_txn, fsrs_model, params_hp, user, min_review_th_h=min_review_ths_h, max_review_th_h=max_review_ths_h, device=config.DEVICE, equalize_test_reviews=True, skip_same_day_reviews=True)
-                            loss_n = loss_n_h.sum()
-                            loss_fsrs = loss_tot_h.sum() / (1e-7 + loss_n)
+                                params_hp = torch.stack(params_list, dim=0)
+                                min_review_ths_h = torch.tensor(min_review_ths_list, device=config.DEVICE)
+                                max_review_ths_h = torch.full_like(min_review_ths_h, fill_value=train_r + 1)
+                                loss_avg_h, loss_tot_h, loss_n_h = evaluate_batched_parameters(fsrs_txn, fsrs_model, params_hp, user, min_review_th_h=min_review_ths_h, max_review_th_h=max_review_ths_h, device=config.DEVICE, equalize_test_reviews=True, skip_same_day_reviews=True)
+                                loss_n = loss_n_h.sum()
+                                loss_fsrs = loss_tot_h.sum() / (1e-7 + loss_n)
 
-                            for h in np.floor(np.linspace(0, len(subsplits) - 1, num=3)).astype(int):
-                                subsplit = subsplits[h]
-                                print(f"Subsplit: {subsplit}, loss: {loss_avg_h[h].item():.3f} ({loss_n_h[h]}), params: {list(map(lambda x: round(float(x), 4), params_hp[h].tolist()))}")
+                                for h in np.floor(np.linspace(0, len(subsplits) - 1, num=3)).astype(int):
+                                    subsplit = subsplits[h]
+                                    print(f"Subsplit: {subsplit}, loss: {loss_avg_h[h].item():.3f} ({loss_n_h[h]}), params: {list(map(lambda x: round(float(x), 4), params_hp[h].tolist()))}")
 
-                            for param_i, param in enumerate(fsrs_params_P.tolist()):
-                                log[f"fsrs_param_{param_i}"] = param
+                                for param_i, param in enumerate(fsrs_params_P.tolist()):
+                                    log[f"fsrs_param_{param_i}"] = param
 
-                            loss_aux_avg, _, loss_aux_n = evaluate_aux(label_filter_txn, summary_txn, user, aux, config.DEVICE, skip_T=skip_T)
-                            # loss = loss_fsrs + 0.1 * loss_aux_avg
-                            loss = loss_fsrs
-                            log["unstable_gradient"] = 0
-                            # loss = loss_aux_avg
-                            if loss_n < 100 or loss_aux_n < 100:
-                                print("Skipping: label sizes are too small.", loss_n, loss_aux_n)
-                            elif loss.requires_grad:
-                                log["train_loss"] = loss
-                                log["train_loss_fsrs"] = loss_fsrs
-                                log["train_loss_aux"] = loss_aux_avg
-                                loss.backward()
-                                transfer_child_grad_to_master(master=master_model, child=model)
-                                grad_norm = torch.nn.utils.clip_grad_norm_(master_model.parameters(), CLIP)
-                                log["grad_norm"] = grad_norm
-                                if grad_norm > 100:
-                                    log["unstable_gradient"] = 1
-                                print(f"{step} {epoch}, user: {user}, loss: {loss.item():.3f}, loss_fsrs: {loss_fsrs.item():.3f} ({loss_n}), loss_aux: {loss_aux_avg.item():.3f} ({loss_aux_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
-                                optimizer.step()
-                                optimizer.zero_grad()
+                                # loss_aux_avg, _, loss_aux_n = evaluate_aux(label_filter_txn, summary_txn, user, aux, config.DEVICE, skip_T=skip_T)
+                                # loss = loss_fsrs + 0.1 * loss_aux_avg
+                                loss = loss_fsrs
+                                log["unstable_gradient"] = 0
+                                # loss = loss_aux_avg
+                                if loss_n < 100:
+                                    print("Skipping: label sizes are too small.", loss_n)
+                                elif loss.requires_grad:
+                                    log["train_loss"] = loss
+                                    log["train_loss_fsrs"] = loss_fsrs
+                                    loss.backward()
+                                    transfer_child_grad_to_master(master=master_model, child=model)
+                                    grad_norm = torch.nn.utils.clip_grad_norm_(master_model.parameters(), CLIP)
+                                    log["grad_norm"] = grad_norm
+                                    if grad_norm > 100:
+                                        log["unstable_gradient"] = 1
+                                    print(f"{step} {epoch}, user: {user}, loss: {loss.item():.3f}, loss_fsrs: {loss_fsrs.item():.3f} ({loss_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
+                                    optimizer.step()
+                                    optimizer.zero_grad()
 
-                                reserved = torch.cuda.memory_reserved()
-                                if reserved >= config.THRESHOLD_RESERVED_GB * 1024 ** 3:
-                                    print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. Emptying cache.")
-                                    torch.cuda.empty_cache()
-                            else:
-                                print("No grad required.")
-                            log["train_nan"] = 0
-                        except Exception as e:
-                            print("Exception caught. Nan from RWKV-7? Skipping batch.")
-                            print(e)
-                            log["train_nan"] = 1
-                            # raise e
+                                    reserved = torch.cuda.memory_reserved()
+                                    if reserved >= config.THRESHOLD_RESERVED_GB * 1024 ** 3:
+                                        print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. Emptying cache.")
+                                        torch.cuda.empty_cache()
+                                else:
+                                    print("No grad required.")
+                                log["train_nan"] = 0
+                            except Exception as e:
+                                print("Exception caught. Nan from RWKV-7? Skipping batch.")
+                                print(e)
+                                log["train_nan"] = 1
+                                # raise e
                         
                         scheduler.step()
                         if step % 50 == 0:
@@ -470,14 +482,12 @@ def main(config):
                             model.copy_downcast_(master_model, dtype=config.DTYPE)
                             validation_overfit_out = validate(model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
                             if validation_overfit_out is not None:
-                                validation_overfit_fsrs, validation_overfit_aux = validation_overfit_out
+                                validation_overfit_fsrs = validation_overfit_out
                                 log["validation_overfit_loss"] = validation_overfit_fsrs
-                                log["validation_overfit_aux_loss"] = validation_overfit_aux
                             validation_out = validate(model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_users, config.DEVICE)
                             if validation_out is not None:
-                                validation_fsrs, validation_aux = validation_out
+                                validation_fsrs = validation_out
                                 log["validation_loss"] = validation_fsrs
-                                log["validation_aux_loss"] = validation_aux
                             if validation_overfit_out is None or validation_out is None:
                                 log["validation_nan"] = 1
                             else:
@@ -492,5 +502,7 @@ def main(config):
 
 
 if __name__ == '__main__':
+    # decorate_training_sample(20, torch.device("cpu"))
+    # exit()
     config = parse_toml()
     main(config)

@@ -5,7 +5,7 @@ FSRS_EVALUATE_DB_PATH = "fsrs_evaluate_db"
 USER_START = 1
 USER_END = 4999
 
-MODEL_PATH = "pretrain/fsrs_nn_optimizer.pth"
+MODEL_PATH = "pretrain/fsrs_nn_optimizer_9999.pth"
 OUT_NAME = "FSRS-6-nn-optimizer"
 
-PROCESSES = 12
+PROCESSES = 15

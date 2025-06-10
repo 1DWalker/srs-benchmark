@@ -13,7 +13,7 @@ from script import sort_jsonl
 from utils import load_tensor, parse_toml
 import multiprocessing as mp
 
-def to_json(user_id, loss, loss_n, rmse_raw, rmse_bins, auc):
+def to_json(user_id, loss, loss_n, rmse_raw, rmse_bins, auc, params):
     try:
         auc = round(auc, 6)
     except:
@@ -27,11 +27,14 @@ def to_json(user_id, loss, loss_n, rmse_raw, rmse_bins, auc):
         },
         "user": int(user_id),
         "size": loss_n,
+        "parameters": {
+            "0": list(map(lambda x: round(x, 4), params.tolist()))
+        }
     }
     return stats
 
 @torch.inference_mode()
-def job(config, job_queue, writer_queue, progress_queue):
+def worker_job(config, job_queue, writer_queue, progress_queue):
     device = torch.device("cpu")
     fsrs_model = FSRS6().to(device)
     summarizer_model = FSRSSummaryModel().to(device)
@@ -74,13 +77,16 @@ def job(config, job_queue, writer_queue, progress_queue):
                             print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
 
                         progress_queue.put(1)
-                        writer_queue.put((to_json(user, loss.item(), loss_n, rmse_raw, rmse_bins, auc), to_json(user, aux_loss.item(), aux_loss_n, aux_rmse_raw, aux_rmse_bins, aux_auc)))
+                        writer_queue.put((to_json(user, loss.item(), loss_n, rmse_raw, rmse_bins, auc, fsrs_params_P), to_json(user, aux_loss.item(), aux_loss_n, aux_rmse_raw, aux_rmse_bins, aux_auc, fsrs_params_P)))
                     except queue.Empty:
                         return
 
 def writer_job(result_file, result_aux_file, writer_queue):
     while True:
-        stats, stats_aux = writer_queue.get()
+        message = writer_queue.get()
+        if message is None:
+            return
+        stats, stats_aux = message
         with open(result_file, "a") as f:
             f.write(json.dumps(stats, ensure_ascii=False) + "\n")
         with open(result_aux_file, "a") as f:
@@ -135,7 +141,7 @@ def main(config):
         progress_process.start()
 
         jobs = [mp.Process(
-            target=job, args=(config, job_queue, writer_queue, progress_queue)
+            target=worker_job, args=(config, job_queue, writer_queue, progress_queue)
         ) for _ in range(config.PROCESSES)]
         for job in jobs:
             job.start()
