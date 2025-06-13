@@ -135,91 +135,11 @@ def decorate_training_sample(T, device):
     assert skip_T.size(0) == T
     return l, r, timeshift_select_T, skip_T
 
-# def evaluate_aux(label_filter_txn, summary_txn, user_id, aux, device, skip_T=None, equalize_test_reviews=False, include_other_metrics=False):
-#     if include_other_metrics:
-#         assert equalize_test_reviews
-
-#     label_rating_T = load_tensor(summary_txn, f"{user_id}_label_rating_T", device).to(torch.int)
-#     label_y_T = (label_rating_T >= 2).float()
-#     assert len(aux.shape) == 1
-#     T = label_rating_T.size(0)
-#     assert aux.size(0) == label_rating_T.size(0)
-#     has_label_T = load_tensor(summary_txn, f"{user_id}_has_label_T", device)
-#     label_is_same_day_T = load_tensor(summary_txn, f"{user_id}_label_is_same_day_T", device)
-#     label_is_equalize_review_T = load_tensor(summary_txn, f"{user_id}_label_is_equalize_review_T", device)
-
-#     curve_raw_loss = torch.nn.functional.binary_cross_entropy(
-#         aux.float(), label_y_T, reduction="none"
-#     )
-#     mask_T = has_label_T * ~label_is_same_day_T
-#     if skip_T is not None:
-#         mask_T = mask_T * ~skip_T
-#     if equalize_test_reviews:
-#         mask_T = mask_T * label_is_equalize_review_T
-
-#     loss_tot = (curve_raw_loss * mask_T).sum()
-#     loss_n = mask_T.sum().item()
-#     if not include_other_metrics:
-#         if loss_n == 0:
-#             return torch.zeros_like(loss_tot), torch.zeros_like(loss_tot), 0
-#         return loss_tot / loss_n, loss_tot, loss_n
-#     else:
-#         label_review_th_T = load_tensor(summary_txn, f"{user_id}_label_review_th_T", device)
-#         equalize_review_ths = load_tensor(label_filter_txn, f"{user_id}_review_ths", device).tolist()
-#         rmse_bins = load_tensor(label_filter_txn, f"{user_id}_rmse_bins", device).tolist()
-
-#         rmse_bins_dict = dict(zip(equalize_review_ths, rmse_bins))
-#         bin_y_pred = {bin: [] for bin in set(rmse_bins)}
-#         bin_y = {bin: [] for bin in set(rmse_bins)}
-#         mask_np = mask_T.cpu().numpy()
-#         label_y_np = label_y_T.cpu().numpy()
-#         out_np = aux.float().detach().cpu().numpy()
-#         label_review_th_np = label_review_th_T.cpu().numpy()
-#         y = []
-#         y_pred = []
-#         for t in range(T):
-#             if mask_np[t]:
-#                 y.append(label_y_np[t])
-#                 y_pred.append(out_np[t])
-#                 bin = rmse_bins_dict[label_review_th_np[t]]
-#                 bin_y[bin].append(label_y_np[t])
-#                 bin_y_pred[bin].append(out_np[t])
-
-#         if loss_n == 0:
-#             return 0, 0, 0, 0, 0
-
-#         rmse_raw = root_mean_squared_error(y_true=y, y_pred=y_pred)
-#         try:
-#             auc = round(roc_auc_score(y_true=y, y_score=y_pred), 6)
-#         except:
-#             auc = None
-
-#         rows = []
-#         for bin in bin_y_pred.keys():
-#             for y, pred in zip(bin_y[bin], bin_y_pred[bin]):
-#                 rows.append([bin, y, pred, 1])
-#         assert len(rows) == len(equalize_review_ths)
-
-#         tmp = pd.DataFrame(rows, columns=["bin", "y", "p", "weights"])
-#         tmp = (
-#             tmp.groupby("bin")
-#             .agg({"y": "mean", "p": "mean", "weights": "sum"})
-#             .reset_index()
-#         )
-#         rmse_bins = root_mean_squared_error(
-#             tmp["y"], tmp["p"], sample_weight=tmp["weights"]
-#         )
-
-#         return loss_tot / loss_n, loss_n, rmse_raw, rmse_bins, auc
-
-
 def validate(summarizer_model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_users, device):
     torch.cuda.empty_cache()
     try:
         tot_loss = 0
         tot_loss_n = 0
-        aux_tot_loss = 0
-        aux_tot_loss_n = 0
         for user in validate_users:
             summarizer_model.eval()
             summarizer_in = get_data(summary_txn, user, device)
@@ -238,17 +158,13 @@ def validate(summarizer_model, fsrs_model, summary_txn, fsrs_txn, label_filter_t
                     fsrs_params_P = summarizer_out_TP[fsrs_param_index]
                     parameter_list.append(fsrs_params_P)
                 loss, loss_n, rmse_raw, rmse_bins, auc = evaluate_full(fsrs_txn, fsrs_model, parameter_list, splits, user, device=device, equalize_test_reviews=True)
-                # aux_loss, aux_loss_n, aux_rmse_raw, aux_rmse_bins, aux_auc = evaluate_aux(label_filter_txn, summary_txn, user, aux, device, equalize_test_reviews=True, include_other_metrics=True)
                 print()
                 print(f"FSRS - User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {auc:.6f}, size: {loss_n}")
-                # print(f"AUX  - User: {user}, RMSE: {aux_rmse_raw:.6f}, LogLoss: {aux_loss:.6f}, RMSE (bins): {aux_rmse_bins:.6f}, AUC: {aux_auc:.6f}, size: {aux_loss_n}")
                 for split_i, parameters in enumerate(parameter_list):
                     print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
 
                 tot_loss += loss * loss_n
                 tot_loss_n += loss_n
-                # aux_tot_loss += aux_loss * aux_loss_n
-                # aux_tot_loss_n += aux_loss_n
     except Exception as e:
         print("Exception in validate. RWKV-7 nan?")
         print(e)
@@ -259,13 +175,11 @@ def validate(summarizer_model, fsrs_model, summary_txn, fsrs_txn, label_filter_t
 def get_split(n):
     assert n >= 12
     k = min([random.randint(max(100, int(0.2 * n)), n) for _ in range(2)])
-    # k = random.randint(2, 5)
     # r = l + k - 1 <= n-1 implies l <= n - k
     l = random.randint(0, n - k)
     return l, l + k - 1
 
 def generate_subsplits(l, r, T):
-    # subsplit_values = max(32, 100000 * 32 // T)
     M = 200000
     p = 0.30  # Estimate of the proportion of memory that is used for RWKV evaluation at T = M and 32 subsplits
     v = int(M * 32 * 1 / p)
@@ -320,16 +234,6 @@ def main(config):
             for group in optimizer_state["param_groups"]:
                 group["lr"] = start_lr
         optimizer.load_state_dict(optimizer_state)
-
-        # optimizer.load_state_dict(
-        #     torch.load(
-        #         optim_path,
-        #         weights_only=True,
-        #     )
-        # )
-        # for param in optimizer.param_groups:
-        #     param['lr'] = config.PEAK_LR
-        # print("iNiaizliaed lr", start_factor * param["lr"])
         print("Loaded model:", model_path)
     else:
         print("No model loaded.")
@@ -337,11 +241,11 @@ def main(config):
 
     train_users = list(range(config.TRAIN_USER_START, config.TRAIN_USER_END + 1))
     validate_overfit_users = list(range(config.VALIDATE_OVERFIT_USER_START, config.VALIDATE_OVERFIT_USER_END + 1))
-    # for user in validate_overfit_users:
-    #     assert user in train_users
+    for user in validate_overfit_users:
+        assert user in train_users
     validate_users = list(range(config.VALIDATE_USER_START, config.VALIDATE_USER_END + 1))
-    # for user in validate_users:
-    #     assert user not in train_users
+    for user in validate_users:
+        assert user not in train_users
     if 4371 in train_users:
         train_users.remove(4371)
         print("Removed user 4371 from train_users.")
@@ -352,11 +256,6 @@ def main(config):
     summary_env = lmdb.open(config.SUMMARY_DB_PATH, readonly=True, lock=False)
     fsrs_evaluate_env = lmdb.open(config.FSRS_EVALUATE_DB_PATH, readonly=True, lock=False)
     label_filter_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
-
-    # for i in range(config.WARMUP_STEPS):
-    #     print(i, optimizer.param_groups[0]["lr"])
-    #     scheduler.step()
-    # exit()
 
     if config.USE_WANDB:
         wandb_config = {
@@ -432,11 +331,8 @@ def main(config):
                                 for param_i, param in enumerate(fsrs_params_P.tolist()):
                                     log[f"fsrs_param_{param_i}"] = param
 
-                                # loss_aux_avg, _, loss_aux_n = evaluate_aux(label_filter_txn, summary_txn, user, aux, config.DEVICE, skip_T=skip_T)
-                                # loss = loss_fsrs + 0.1 * loss_aux_avg
                                 loss = loss_fsrs
                                 log["unstable_gradient"] = 0
-                                # loss = loss_aux_avg
                                 if loss_n < 100:
                                     print("Skipping: label sizes are too small.", loss_n)
                                 elif loss.requires_grad:

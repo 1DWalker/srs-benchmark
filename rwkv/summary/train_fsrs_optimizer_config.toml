@@ -2,7 +2,7 @@ SUMMARY_DB_PATH = "summary_db"
 LABEL_FILTER_DB_PATH = "label_filter_db"
 FSRS_EVALUATE_DB_PATH = "fsrs_evaluate_db"
 
-SEED = 123123124
+SEED = 111
 
 TRAIN_USER_START = 5000
 TRAIN_USER_END = 10000
@@ -25,16 +25,16 @@ PEAK_LR = 1.0e-3
 TRAIN_MODE = "WS"
 START_STEP = 0
 WARMUP_STEPS = 20000
-TOTAL_STEPS = 10000000000
+TOTAL_STEPS = 1000000000
 VALIDATE_STEPS = 1000
 
 LOAD_MODEL = false
-LOAD_MODEL_FOLDER = "pretrain/nn_optimizer_large"
+LOAD_MODEL_FOLDER = ""
 LOAD_MODEL_NAME = ""
-SAVE_MODEL_FOLDER = "pretrain/nn_optimizer_large"
+SAVE_MODEL_FOLDER = "pretrain/nn_optimizer"
 SAVE_MODEL_PREFIX = "fsrs_nn_optimizer"
 
-USE_WANDB = true
+USE_WANDB = false
 # Only relevant if USE_WANDB is set to true
 WANDB_PROJECT_NAME = "FSRS-nn-optimizer"
 WANDB_RESUME = false
