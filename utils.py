@@ -1,9 +1,17 @@
+import argparse
+from io import BytesIO
+import os
+from pathlib import Path
+import lmdb
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import root_mean_squared_error  # type: ignore
 import traceback
 from functools import wraps
 from itertools import accumulate
+
+import tomli
+import torch
 
 
 def catch_exceptions(func):
@@ -156,3 +164,45 @@ def get_bin(row):
     )
     i = round(1.99 * np.power(1.89, np.floor(np.log(row["i"]) / np.log(1.89))), 0)
     return (lapse, delta_t, i)
+
+def parse_toml():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, help="Location of the toml file")
+    args, _ = parser.parse_known_args()
+    with open(args.config, "rb") as f:
+        args = tomli.load(f)
+        if "DTYPE" in args:
+            if args["DTYPE"] == "bfloat16":
+                args["DTYPE"] = torch.bfloat16
+            elif args["DTYPE"] in ("float", "float32"):
+                args["DTYPE"] = torch.float32
+            else:
+                raise ValueError("Not currently supported:", args["DTYPE"])
+        if "DEVICE" in args:
+            args["DEVICE"] = torch.device(args["DEVICE"])
+        if "DATA_PATH" in args:
+            args["DATA_PATH"] = Path(args["DATA_PATH"])
+        return argparse.Namespace(**args)
+
+def compact_lmdb(source_path, compacted_path):
+    env = lmdb.open(source_path, readonly=True, lock=False)
+
+    # Make sure the target path is empty
+    if not os.path.exists(compacted_path):
+        os.makedirs(compacted_path)
+
+    # Copy data to a new environment, which will be compact
+    env.copy(compacted_path, compact=True)
+    env.close()
+
+def load_tensor(txn, key, device):
+    tensor_bytes = txn.get(key.encode())
+    buffer = BytesIO(tensor_bytes)
+    return torch.load(buffer, weights_only=True, map_location=device)
+
+
+def save_tensor(txn, key, tensor):
+    tensor = tensor.clone().contiguous()
+    buffer = BytesIO()
+    torch.save(tensor, buffer)
+    txn.put(key.encode(), buffer.getvalue())
