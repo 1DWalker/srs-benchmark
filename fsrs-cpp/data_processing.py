@@ -42,33 +42,16 @@ def process(user_id, config):
     for i in range(len(perm)):
         perm_inv[perm[i]] = i
 
-    perm_T_tensor = torch.tensor(perm, dtype=torch.int)
-    perm_inv_T_tensor = torch.tensor(perm_inv, dtype=torch.int)
-    card_locs_T = torch.tensor(df["card_id"].map(card_locs_dict), dtype=torch.int)
+    with torch.no_grad():
+        perm_T_tensor = torch.tensor(perm, dtype=torch.int)
+        perm_inv_T_tensor = torch.tensor(perm_inv, dtype=torch.int)
+        card_locs_T = torch.tensor(df["card_id"].map(card_locs_dict), dtype=torch.int)
+        packed_review_th_T = torch.tensor(df["review_th"], dtype=torch.int)[perm]
+        packed_rating_T = torch.tensor(df["rating"], dtype=torch.int)[perm]
+        packed_elapsed_days_real_T = torch.tensor(df["elapsed_days_real"], dtype=config.DTYPE)[perm]
+        packed_elapsed_days_int_T = torch.tensor(df["elapsed_days_int"], dtype=config.DTYPE)[perm]
 
-    # Tensors for auxiliary loss
-    df["label_review_th"] = df.groupby("card_id")["review_th"].shift(-1).fillna(0)
-    df["label_elapsed_days_real"] = df.groupby("card_id")["elapsed_days_real"].shift(-1).fillna(0)
-    df["label_elapsed_days_int"] = df.groupby("card_id")["elapsed_days_int"].shift(-1).fillna(0)
-    df["label_rating"] = df.groupby("card_id")["rating"].shift(-1).fillna(0)
-    df["has_label"] = (df.groupby("card_id").cumcount(ascending=False) != 0).astype(int)
-    df["is_same_day"] = df["elapsed_days_int"] == 0
-    df["label_is_same_day"] = df.groupby("card_id")["is_same_day"].shift(-1).fillna(0)
-    df["label_is_equalize_review"] = df.groupby("card_id")["is_equalize_review"].shift(-1).fillna(0)
-    card_id_T = torch.tensor(df["card_id"], dtype=torch.int)
-    rating_T = torch.tensor(df["rating"], dtype=torch.int)
-    elapsed_days_real_T = torch.tensor(df["elapsed_days_real"], dtype=config.DTYPE)
-    elapsed_days_int_T = torch.tensor(df["elapsed_days_int"], dtype=config.DTYPE)
-    label_review_th_T = torch.tensor(df["label_review_th"], dtype=torch.int)
-    label_elapsed_days_real_T = torch.tensor(df["label_elapsed_days_real"], dtype=config.DTYPE)
-    label_elapsed_days_int_T = torch.tensor(df["label_elapsed_days_int"], dtype=config.DTYPE)
-    label_rating_T = torch.tensor(df["label_rating"], dtype=config.DTYPE)
-    has_label_T = torch.tensor(df["has_label"], dtype=torch.bool)
-    label_is_same_day_T = torch.tensor(df["label_is_same_day"], dtype=torch.bool)
-    label_is_equalize_review_T = torch.tensor(df["label_is_equalize_review"], dtype=torch.bool)
-
-    return card_id_T, rating_T, elapsed_days_real_T, elapsed_days_int_T, perm_T_tensor, perm_inv_T_tensor, card_locs_T, label_review_th_T, label_elapsed_days_real_T, \
-        label_elapsed_days_real_T, label_elapsed_days_int_T, label_rating_T, has_label_T, label_is_same_day_T, label_is_equalize_review_T
+    return packed_review_th_T, packed_rating_T, packed_elapsed_days_real_T, packed_elapsed_days_int_T, perm_T_tensor, perm_inv_T_tensor, card_locs_T
 
 def job(user_id, config, writer_queue, progress_queue):
     writer_queue.put((user_id, process(user_id, config)))
@@ -85,37 +68,23 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
 
         with env.begin(write=True) as txn:
             (
-                card_id_T,
-                rating_T,
-                elapsed_days_real_T,
-                elapsed_days_int_T,
+                packed_review_th_T,
+                packed_rating_T,
+                packed_elapsed_days_real_T,
+                packed_elapsed_days_int_T,
                 perm_T_tensor,
                 perm_inv_T_tensor,
                 card_locs_T,
-                label_review_th_T,
-                label_elapsed_days_real_T,
-                label_elapsed_days_int_T,
-                label_rating_T,
-                has_label_T,
-                label_is_same_day_T,
-                label_is_equalize_review_T,
             ) = tensors
-            save_tensor(txn, f"{user_id}_card_id_T", card_id_T)
-            save_tensor(txn, f"{user_id}_rating_T", rating_T)
-            save_tensor(txn, f"{user_id}_elapsed_days_real_T", elapsed_days_real_T)
-            save_tensor(txn, f"{user_id}_elapsed_days_int_T", elapsed_days_int_T)
+            save_tensor(txn, f"{user_id}_packed_review_th_T", packed_review_th_T)
+            save_tensor(txn, f"{user_id}_packed_rating_T", packed_rating_T)
+            save_tensor(txn, f"{user_id}_packed_elapsed_days_real_T", packed_elapsed_days_real_T)
+            save_tensor(txn, f"{user_id}_packed_elapsed_days_int_T", packed_elapsed_days_int_T)
             save_tensor(txn, f"{user_id}_perm_T_tensor", perm_T_tensor)
             save_tensor(txn, f"{user_id}_perm_inv_T_tensor", perm_inv_T_tensor)
             save_tensor(txn, f"{user_id}_card_locs_T", card_locs_T)
-            save_tensor(txn, f"{user_id}_label_review_th_T", label_review_th_T)
-            save_tensor(txn, f"{user_id}_label_elapsed_days_real_T", label_elapsed_days_real_T)
-            save_tensor(txn, f"{user_id}_label_elapsed_days_int_T", label_elapsed_days_int_T)
-            save_tensor(txn, f"{user_id}_label_rating_T", label_rating_T)
-            save_tensor(txn, f"{user_id}_has_label_T", has_label_T)
-            save_tensor(txn, f"{user_id}_label_is_same_day_T", label_is_same_day_T)
-            save_tensor(txn, f"{user_id}_label_is_equalize_review_T", label_is_equalize_review_T)
             txn.put(f"{user_id}_done".encode(), "true".encode())
-            print("Done", user_id, rating_T.shape)
+            print("Done", user_id, packed_rating_T.shape)
 
 def progress_tracker(total_items, progress_queue):
     with tqdm(total=total_items, desc="Generating Data") as pbar:
