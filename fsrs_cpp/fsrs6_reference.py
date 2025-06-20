@@ -115,22 +115,23 @@ class FSRS6(ModuleType):
     def forward(
         self, 
         parameters: Tensor, 
-        feature_elapsed_days_int_bl: Tensor,
         feature_elapsed_days_real_bl: Tensor,
+        feature_elapsed_days_int_bl: Tensor,
         feature_rating: Tensor,
+        label_elapsed_days_real_bl: Tensor,
         label_elapsed_days_int_bl: Tensor, 
-        state: Optional[Tensor] = None
+        state_b2: Optional[Tensor] = None,
     ) -> Tensor:
         """
         :param inputs: shape[seq_len, batch_size, 2]
         """
         inputs_bl2 = torch.stack((feature_elapsed_days_int_bl, feature_rating), dim=-1)
-        if state is None:
-            state = torch.zeros((inputs_bl2.size(0), 2), device=inputs_bl2.device)
-        outputs_list = []
+        if state_b2 is None:
+            state_b2 = torch.zeros((inputs_bl2.size(0), 2), device=inputs_bl2.device)
+        outputs_b2_list = []
         for X in inputs_bl2.transpose(0, 1):
-            state = self.step(parameters, X, state)
-            outputs_list.append(state)
-        output_tensor_bl = torch.stack(outputs_list).transpose(0, 1)
-        output_s_bl, _ = output_tensor_bl.unbind(dim=-1)
+            state_b2 = self.step(parameters, X, state_b2)
+            outputs_b2_list.append(state_b2)
+        output_tensor_bl2 = torch.stack(outputs_b2_list).transpose(0, 1)
+        output_s_bl, output_d_bl = output_tensor_bl2.unbind(dim=-1)
         return self.forgetting_curve(label_elapsed_days_int_bl, output_s_bl, -parameters[20])

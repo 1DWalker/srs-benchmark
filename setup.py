@@ -11,7 +11,7 @@ from torch.utils.cpp_extension import (
 )
 
 
-def get_rwkv_extensions():
+def get_extensions():
     use_cuda = torch.cuda.is_available() and CUDA_HOME is not None
     extension = CUDAExtension if use_cuda else CppExtension
 
@@ -26,19 +26,29 @@ def get_rwkv_extensions():
     }
 
     this_dir = os.path.dirname(os.path.curdir)
-    extensions_dir = os.path.join(this_dir, "rwkv", "model", "csrc")
-    sources = list(glob.glob(os.path.join(extensions_dir, "*.cpp")))
+    rwkv_extensions_dir = os.path.join(this_dir, "rwkv", "model", "csrc")
+    rwkv_sources = list(glob.glob(os.path.join(rwkv_extensions_dir, "*.cpp")))
 
-    extensions_cuda_dir = os.path.join(extensions_dir, "cuda")
-    cuda_sources = list(glob.glob(os.path.join(extensions_cuda_dir, "*.cu")))
+    rwkv_extensions_cuda_dir = os.path.join(rwkv_extensions_dir, "cuda")
+    cuda_sources = list(glob.glob(os.path.join(rwkv_extensions_cuda_dir, "*.cu")))
 
     if use_cuda:
-        sources += cuda_sources
+        rwkv_sources += cuda_sources
+
+    fsrs_extensions_dir = os.path.join(this_dir, "fsrs_cpp", "csrc")
+    fsrs_sources = list(glob.glob(os.path.join(fsrs_extensions_dir, "*.cpp")))
 
     ext_modules = [
+        # extension(
+        #     "rwkv.model.RWKV_CUDA",
+        #     rwkv_sources,
+        #     extra_compile_args=extra_compile_args,
+        #     extra_link_args=extra_link_args,
+        #     py_limited_api=False,
+        # ),
         extension(
-            "rwkv.model.RWKV_CUDA",
-            sources,
+            "fsrs_cpp._FSRS_CPP",
+            fsrs_sources,
             extra_compile_args=extra_compile_args,
             extra_link_args=extra_link_args,
             py_limited_api=False,
@@ -51,7 +61,7 @@ def get_rwkv_extensions():
 setup(
     name="srs-benchmark",
     packages=find_packages(),
-    ext_modules=get_rwkv_extensions(),
+    ext_modules=get_extensions(),
     install_requires=[
         "torch",
         "tqdm",
