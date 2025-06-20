@@ -5,11 +5,11 @@
 #include <vector>
 
 extern "C" {
-  PyObject* PyInit_FSRS_CPP(void)
+  PyObject* PyInit__FSRS_CPP(void)
   {
       static struct PyModuleDef module_def = {
           PyModuleDef_HEAD_INIT,
-          "FSRS_CPP",
+          "_FSRS_CPP",
           NULL,
           -1,
           NULL,
@@ -20,7 +20,7 @@ extern "C" {
 
 namespace fsrs {
     TORCH_LIBRARY(fsrs, m) {
-        m.def("fsrs6_forward_verify(Tensor parameters, Tensor state_3) -> Tensor");
-        m.def("fsrs6_backward_verify(Tensor parameters, Tensor state_3) -> Tensor");
+        m.def("fsrs6_forward_verify(Tensor parameters, Tensor state_2, Tensor input_3) -> Tensor");
+        m.def("fsrs6_backward_verify(Tensor parameters, Tensor state_2) -> Tensor");
     }
 }
