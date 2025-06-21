@@ -160,8 +160,5 @@ weights/
 # temp files
 rwkv/temp
 
-# test files
-**/test/
-
 # wandb
 wandb/
