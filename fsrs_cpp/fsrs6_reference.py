@@ -88,7 +88,6 @@ class FSRS6(ModuleType):
             new_s = torch.ones_like(state[:, 0])
             new_s = w[X[:, 1].long() - 1]
             new_d = self.init_d(w, X[:, 1])
-            new_d = new_d.clamp(1, 10)
         else:
             r = self.forgetting_curve(X[:, 0], state[:, 0], -w[20])
             short_term = X[:, 0] < 1
@@ -103,8 +102,8 @@ class FSRS6(ModuleType):
                 ),
             )
             new_d = self.next_d(w, state, X[:, 1])
-            new_d = new_d.clamp(1, 10)
         new_s = new_s.clamp(self.S_MIN, 36500)
+        new_d = new_d.clamp(1, 10)
         return torch.stack([new_s, new_d], dim=1)
 
     @FunctionType

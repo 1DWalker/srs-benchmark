@@ -10,14 +10,59 @@ struct fsrs_state {
     float d;
 };
 
-float init_d(const float* params, const int rating) {
-    return std::clamp(params[4] - exp(params[5] * (rating - 1)) + 1, 1.0f, 10.0f);
-}
-
 float forgetting_curve(const float t, const float s, const float decay) {
-    std::cout << "forgetting " << t << ' ' << s << ' ' << decay << '\n';
     float factor = pow(0.9, 1 / -decay) - 1;
     return pow(1 + factor * t / s, -decay);
+}
+
+float stability_short_term(const float* params, const fsrs_state state, const int rating) {
+    float sinc = exp(params[17] * (rating - 3 + params[18])) * pow(state.s, -params[19]);
+    return state.s * (rating >= 3 ? std::max(1.0f, sinc) : sinc);
+}
+
+float stability_after_success(const float* params, const fsrs_state state, const float r, const int rating) {
+    float hard_penalty = rating == 2 ? params[15] : 1.0;
+    float easy_bonus = rating == 4 ? params[16] : 1.0;
+    float new_s = state.s * (
+        1
+        + exp(params[8])
+        * (11 - state.d)
+        * pow(state.s, -params[9])
+        * (exp((1 - r) * params[10]) - 1)
+        * hard_penalty
+        * easy_bonus
+    );
+    return new_s;
+}
+
+float stability_after_failure(const float* params, const fsrs_state state, const float r) {
+    float new_s = (
+        params[11]
+        * pow(state.d, -params[12])
+        * (pow(state.s + 1, params[13]) - 1)
+        * exp((1 - r) * params[14])
+    );
+    float new_minimum_s = state.s / exp(params[17] * params[18]);
+    return std::min(new_s, new_minimum_s);
+}
+
+
+float init_d(const float* params, const int rating) {
+    return params[4] - exp(params[5] * (rating - 1)) + 1.0;
+}
+
+float linear_dampening(const float delta_d, const float old_d) {
+    return delta_d * (10 - old_d) / 9;
+}
+
+float mean_reversion(const float* params, const float init, const float current) {
+    return params[7] * init + (1 - params[7]) * current;
+}
+
+float next_d(const float* params, const fsrs_state state, const int rating) {
+    float delta_d = -params[6] * (rating - 3);
+    float new_d = state.d + linear_dampening(delta_d, state.d);
+    return mean_reversion(params, init_d(params, 4), new_d);
 }
 
 void fsrs6_forward(
@@ -38,14 +83,24 @@ void fsrs6_forward(
             new_s = params[rating[0] - 1]; 
             new_d = init_d(params, rating[0]);
         } else {
-            new_s = 1.0;
-            new_d = 5.0;
+            float r = forgetting_curve(elapsed_days_int[l], state.s, params[20]);
+            bool short_term = elapsed_days_int[l] < 1;
+            bool success = rating[l] > 1;
+            if (short_term) {  // Short term
+                new_s = stability_short_term(params, state, rating[l]);
+            } else {
+                if (success) {
+                    new_s = stability_after_success(params, state, r, rating[l]);
+                } else {
+                    new_s = stability_after_failure(params, state, r);
+                }
+            }
+            new_d = next_d(params, state, rating[l]);
         }
+        new_s = std::clamp(new_s, 0.001f, 36500.0f);
+        new_d = std::clamp(new_d, 1.0f, 10.0f);
         state = {new_s, new_d};
         out_L[l] = forgetting_curve(label_elapsed_days_int[l], state.s, params[20]);
-        std::cout << "done " << out_L[l] << '\n';
-        
-        break;
     }
 }
 
