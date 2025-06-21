@@ -20,7 +20,7 @@ extern "C" {
 
 namespace fsrs {
     TORCH_LIBRARY(fsrs, m) {
-        m.def("fsrs6_forward_verify(Tensor parameters, Tensor state_2, Tensor input_3) -> Tensor");
+        m.def("fsrs6_forward_verify(Tensor parameters, Tensor rating_L, Tensor elapsed_days_real_L, Tensor elapsed_days_int_L, Tensor label_elapsed_days_real_L, Tensor label_elapsed_days_int_L) -> Tensor");
         m.def("fsrs6_backward_verify(Tensor parameters, Tensor state_2) -> Tensor");
     }
 }

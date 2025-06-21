@@ -16,6 +16,7 @@ def process(user_id, config):
     len_before = len(df)
     df.drop(df[~df["rating"].isin([1, 2, 3, 4])].index, inplace=True)
     df.reset_index(inplace=True, drop=True)
+    assert len_before == len(df), f"{user_id} has invalid ratings, review_th might be incorrect"
 
     equalize_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
     with equalize_env.begin(write=False) as txn:
@@ -26,7 +27,8 @@ def process(user_id, config):
     df["is_equalize_review"] = df["review_th"].isin(equalize_review_ths_set).astype(int)
     df["elapsed_days_real"] = df["elapsed_seconds"].map(lambda x: max(0, x)) / 86400
     df["elapsed_days_int"] = df["elapsed_days"].map(lambda x: max(0, x))
-    assert len_before == len(df), f"{user_id} has invalid ratings, review_th might be incorrect"
+    df["label_elapsed_days_real"] = df.groupby("card_id")["elapsed_days_real"].shift(-1).fillna(0)
+    df["label_elapsed_days_int"] = df.groupby("card_id")["elapsed_days_int"].shift(-1).fillna(0)
 
     card_locs = df.groupby("card_id")["review_th"].apply(list).to_dict()
     ordered_card_ids = sorted(card_locs, key=lambda k: len(card_locs[k]), reverse=True)
@@ -50,8 +52,10 @@ def process(user_id, config):
         packed_rating_T = torch.tensor(df["rating"], dtype=torch.int)[perm]
         packed_elapsed_days_real_T = torch.tensor(df["elapsed_days_real"], dtype=config.DTYPE)[perm]
         packed_elapsed_days_int_T = torch.tensor(df["elapsed_days_int"], dtype=config.DTYPE)[perm]
+        packed_label_elapsed_days_real_T = torch.tensor(df["label_elapsed_days_real"], dtype=config.DTYPE)[perm]
+        packed_label_elapsed_days_int_T = torch.tensor(df["label_elapsed_days_int"], dtype=config.DTYPE)[perm]
 
-    return packed_review_th_T, packed_rating_T, packed_elapsed_days_real_T, packed_elapsed_days_int_T, perm_T_tensor, perm_inv_T_tensor, card_locs_T
+    return packed_review_th_T, packed_rating_T, packed_elapsed_days_real_T, packed_elapsed_days_int_T, packed_label_elapsed_days_real_T, packed_label_elapsed_days_int_T, perm_T_tensor, perm_inv_T_tensor, card_locs_T
 
 def job(user_id, config, writer_queue, progress_queue):
     writer_queue.put((user_id, process(user_id, config)))
@@ -72,6 +76,8 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
                 packed_rating_T,
                 packed_elapsed_days_real_T,
                 packed_elapsed_days_int_T,
+                packed_label_elapsed_days_real_T,
+                packed_label_elapsed_days_int_T,
                 perm_T_tensor,
                 perm_inv_T_tensor,
                 card_locs_T,
@@ -80,6 +86,8 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
             save_tensor(txn, f"{user_id}_packed_rating_T", packed_rating_T)
             save_tensor(txn, f"{user_id}_packed_elapsed_days_real_T", packed_elapsed_days_real_T)
             save_tensor(txn, f"{user_id}_packed_elapsed_days_int_T", packed_elapsed_days_int_T)
+            save_tensor(txn, f"{user_id}_packed_label_elapsed_days_real_T", packed_label_elapsed_days_real_T)
+            save_tensor(txn, f"{user_id}_packed_label_elapsed_days_int_T", packed_label_elapsed_days_int_T)
             save_tensor(txn, f"{user_id}_perm_T_tensor", perm_T_tensor)
             save_tensor(txn, f"{user_id}_perm_inv_T_tensor", perm_inv_T_tensor)
             save_tensor(txn, f"{user_id}_card_locs_T", card_locs_T)
