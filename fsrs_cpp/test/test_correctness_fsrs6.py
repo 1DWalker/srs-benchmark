@@ -46,7 +46,7 @@ class TestCorrectness(unittest.TestCase):
             elapsed_days_int_L = torch.tensor(np.random.randint(1, 10, size=L), dtype=torch.float)
             label_elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 10.0, size=L), dtype=torch.float)
             label_elapsed_days_int_L = torch.tensor(np.random.randint(1, 10, size=L), dtype=torch.float)
-            cpp_out = torch.ops.fsrs.fsrs6_forward_verify(self.params, rating_L, elapsed_days_real_L, elapsed_days_int_L, label_elapsed_days_real_L, label_elapsed_days_int_L)
+            cpp_out, checkpoints = torch.ops.fsrs.fsrs6_forward_verify(self.params, rating_L, elapsed_days_real_L, elapsed_days_int_L, label_elapsed_days_real_L, label_elapsed_days_int_L)
             reference_out = reference_fsrs.forward(self.params, elapsed_days_real_L.unsqueeze(0), elapsed_days_int_L.unsqueeze(0), rating_L.unsqueeze(0), label_elapsed_days_real_L.unsqueeze(0), label_elapsed_days_int_L.unsqueeze(0))
             torch.testing.assert_close(cpp_out, reference_out.squeeze(0))
 

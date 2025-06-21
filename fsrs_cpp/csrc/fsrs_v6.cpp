@@ -6,6 +6,7 @@
 #include <math.h>
 
 struct fsrs_state {
+    // All fields should be floats, otherwise there is potential UB
     float s;
     float d;
 };
@@ -76,8 +77,9 @@ void fsrs6_forward(
     const float* label_elapsed_days_real,
     const float* label_elapsed_days_int
 ) {
-    fsrs_state state;
+    fsrs_state state = {};
     for (int l = 0; l < L; l++) {
+        checkpoints_L[l] = state;
         float new_s, new_d;
         if (l == 0) {
             new_s = params[rating[0] - 1]; 
@@ -104,7 +106,7 @@ void fsrs6_forward(
     }
 }
 
-torch::Tensor fsrs6_forward_verify(
+std::tuple<torch::Tensor, torch::Tensor> fsrs6_forward_verify(
     const at::Tensor& params_P,
     const at::Tensor& rating_L,
     const at::Tensor& elapsed_days_real_L,
@@ -121,12 +123,11 @@ torch::Tensor fsrs6_forward_verify(
     const float* label_elapsed_days_int_L_ptr = label_elapsed_days_int_L.data_ptr<float>();
     at::Tensor out_L = torch::empty(elapsed_days_real_L.sizes(), elapsed_days_real_L.options());
     float* out_L_ptr = out_L.data_ptr<float>();
-    // at::Tensor checkpoints_L = torch::empty({L, 2}, elapsed_days_real_L.options());
-    // const float* checkpoints_L_ptr = out_L.data_ptr<float>();
-    fsrs6_forward(L, params_P_ptr, out_L_ptr, nullptr, rating_L_ptr, elapsed_days_real_L_ptr, elapsed_days_int_L_ptr, label_elapsed_days_real_L_ptr, label_elapsed_days_int_L_ptr);
-    // fsrs_state next_state = fsrs6_forward(params_P_ptr, state_L2_ptr[0], state_L2_ptr[1], input_3_ptr[0], input_3_ptr[1], input_3_ptr[2]);
-    // return torch::tensor({next_state.s, next_state.d});
-    return out_L;
+    size_t num_chunks = (sizeof(fsrs_state) + 4 - 1) / 4;
+    at::Tensor checkpoints_L = torch::empty({L, (int)num_chunks}, elapsed_days_real_L.options().requires_grad(false));
+    fsrs_state* checkpoints_L_ptr = (fsrs_state*)checkpoints_L.data_ptr();
+    fsrs6_forward(L, params_P_ptr, out_L_ptr, checkpoints_L_ptr, rating_L_ptr, elapsed_days_real_L_ptr, elapsed_days_int_L_ptr, label_elapsed_days_real_L_ptr, label_elapsed_days_int_L_ptr);
+    return {out_L, checkpoints_L};
 }
 
 namespace fsrs {
