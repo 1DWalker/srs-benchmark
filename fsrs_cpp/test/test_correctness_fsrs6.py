@@ -34,7 +34,7 @@ class TestCorrectness(unittest.TestCase):
         ])
 
 
-    def test_forward_step(self):
+    def test_forward(self):
         reference_fsrs = FSRS6()
         random.seed(123)
         np.random.seed(123)
@@ -42,18 +42,40 @@ class TestCorrectness(unittest.TestCase):
         for _ in range(100):
             L = random.randint(1, 50)
             rating_L = torch.tensor(np.random.randint(1, 5, size=L))
-            elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 10.0, size=L), dtype=torch.float)
-            elapsed_days_int_L = torch.tensor(np.random.randint(1, 10, size=L), dtype=torch.float)
-            label_elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 10.0, size=L), dtype=torch.float)
-            label_elapsed_days_int_L = torch.tensor(np.random.randint(1, 10, size=L), dtype=torch.float)
-            cpp_out, checkpoints = torch.ops.fsrs.fsrs6_forward_verify(self.params, rating_L, elapsed_days_real_L, elapsed_days_int_L, label_elapsed_days_real_L, label_elapsed_days_int_L)
+            elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 400.0, size=L), dtype=torch.float)
+            elapsed_days_int_L = torch.tensor(np.random.randint(0, 400, size=L), dtype=torch.float)
+            label_elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 400.0, size=L), dtype=torch.float)
+            label_elapsed_days_int_L = torch.tensor(np.random.randint(0, 400, size=L), dtype=torch.float)
+            cpp_out, _ = torch.ops.fsrs.fsrs6_forward_verify(self.params, rating_L, elapsed_days_real_L, elapsed_days_int_L, label_elapsed_days_real_L, label_elapsed_days_int_L)
             reference_out = reference_fsrs.forward(self.params, elapsed_days_real_L.unsqueeze(0), elapsed_days_int_L.unsqueeze(0), rating_L.unsqueeze(0), label_elapsed_days_real_L.unsqueeze(0), label_elapsed_days_int_L.unsqueeze(0))
             torch.testing.assert_close(cpp_out, reference_out.squeeze(0))
 
     def test_backward(self):
+        reference_fsrs = FSRS6()
         random.seed(123)
-        print("hello backward")
-        pass
+        np.random.seed(123)
+        torch.manual_seed(123)
+        for _ in range(5):
+            # L = random.randint(1, 100)
+            L = 1
+            rating_L = torch.tensor(np.random.randint(1, 5, size=L))
+            elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 400.0, size=L), dtype=torch.float)
+            elapsed_days_int_L = torch.tensor(np.random.randint(0, 400, size=L), dtype=torch.float)
+            label_elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 400.0, size=L), dtype=torch.float)
+            label_elapsed_days_int_L = torch.tensor(np.random.randint(0, 400, size=L), dtype=torch.float)
+            params = self.params.clone().detach().requires_grad_(True)
+            _, checkpoints = torch.ops.fsrs.fsrs6_forward_verify(params, rating_L, elapsed_days_real_L, elapsed_days_int_L, label_elapsed_days_real_L, label_elapsed_days_int_L)
+            reference_out = reference_fsrs.forward(params, elapsed_days_real_L.unsqueeze(0), elapsed_days_int_L.unsqueeze(0), rating_L.unsqueeze(0), label_elapsed_days_real_L.unsqueeze(0), label_elapsed_days_int_L.unsqueeze(0))
+
+            grad_out = torch.randn_like(reference_out)
+            grad_reference = torch.autograd.grad(reference_out, params, grad_out)[0]
+
+            grad_cpp = torch.ops.fsrs.fsrs6_backward_verify(grad_out, checkpoints, params, rating_L, elapsed_days_real_L, elapsed_days_int_L, label_elapsed_days_real_L, label_elapsed_days_int_L)
+            print("grad cpp", grad_cpp)
+            print("grad ref", grad_reference)
+            torch.testing.assert_close(grad_reference, grad_cpp)
+
+
 
 if __name__ == '__main__':
     unittest.main()

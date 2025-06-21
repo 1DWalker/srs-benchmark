@@ -1,15 +1,12 @@
+#pragma once
+
 #include <Python.h>
 #include <ATen/Operators.h>
 #include <torch/all.h>
 #include <torch/library.h>
 #include <vector>
 #include <math.h>
-
-struct fsrs_state {
-    // All fields should be floats, otherwise there is potential UB
-    float s;
-    float d;
-};
+#include "fsrs_forward.h"
 
 float forgetting_curve(const float t, const float s, const float decay) {
     float factor = pow(0.9, 1 / -decay) - 1;
@@ -133,6 +130,5 @@ std::tuple<torch::Tensor, torch::Tensor> fsrs6_forward_verify(
 namespace fsrs {
     TORCH_LIBRARY_IMPL(fsrs, CPU, m) {
         m.impl("fsrs6_forward_verify", &fsrs6_forward_verify);
-        // m.impl("fsrs6_backward", &);
     }
 }
