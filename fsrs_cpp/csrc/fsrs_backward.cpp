@@ -12,22 +12,13 @@ using fsrs_state_grad = fsrs_state;
 
 void forgetting_curve_backward(float* out_grad_params, fsrs_state_grad &grad_state, const float grad_r, const float t, const float s, const float decay) {
     float factor = pow(0.9, 1 / -decay) - 1;
-    double inside = 1 + factor * t / s;
-    // r = pow(1 + factor * t / s, -decay);
-    // dr/ddecay = dr/ddecay e^(-decay * log(1 + factor * t / s))
-    //           =  e^(-decay * log(1 + factor * t / s)) * d/ddecay (-decay * log(1 + factor * t / s))
-    //           = base * d1
+    float inside = 1 + factor * t / s;
     float base = pow(1 + factor * t / s, -decay);
-    // d1 = d/ddecay (-decay * log(1 + factor * t / s))
-    //    = -decay * d/ddecay log(1 + factor * t / s) + (-1) * log(1 + factor * t / s)
-    //    = d11 + d12
-    // d/ddecay log(1 + factor * t / s) = 1 / (1 + factor * t / s) * t / s * d/ddecay factor
-    // d/ddecay factor = 0.9^(1 / -decay) * log(0.9) * 1 / decay^2
-    float d11 = -decay / inside * t / s * pow(0.9, 1 / -decay) * log(0.9) / pow(decay, 2);
-    float d12 = -log(inside);
-    float d1 = d11 + d12;
-    out_grad_params[20] += grad_r * base * d1;
-    grad_state.s += grad_r * base * -decay / inside * factor * t / -pow(s, 2);
+    out_grad_params[20] += -grad_r * base * log(inside);
+    float grad_inside = grad_r * -decay * pow(inside, -decay - 1);
+    float grad_factor = grad_inside * t / s;
+    out_grad_params[20] += grad_factor * pow(0.9, 1 / -decay) * log(0.9) / pow(decay, 2);
+    grad_state.s += grad_inside * factor * t / -pow(s, 2);
 }
 
 void fsrs6_backward(
