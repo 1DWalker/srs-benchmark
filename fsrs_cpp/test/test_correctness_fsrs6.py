@@ -57,10 +57,13 @@ class TestCorrectness(unittest.TestCase):
         torch.manual_seed(123)
         for _ in range(5):
             # L = random.randint(1, 100)
-            L = 1
-            rating_L = torch.tensor(np.random.randint(1, 5, size=L))
-            elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 400.0, size=L), dtype=torch.float)
-            elapsed_days_int_L = torch.tensor(np.random.randint(0, 400, size=L), dtype=torch.float)
+            L = 2
+            # rating_L = torch.tensor(np.random.randint(1, 5, size=L))
+            # elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 400.0, size=L), dtype=torch.float)
+            # elapsed_days_int_L = torch.tensor(np.random.randint(0, 400, size=L), dtype=torch.float)
+            rating_L = torch.tensor([3, 1], dtype=torch.int)
+            elapsed_days_real_L = torch.tensor([0.1, 1.5], dtype=torch.float)
+            elapsed_days_int_L = torch.tensor([0, 1], dtype=torch.float)
             label_elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 400.0, size=L), dtype=torch.float)
             label_elapsed_days_int_L = torch.tensor(np.random.randint(0, 400, size=L), dtype=torch.float)
             params = self.params.clone().detach().requires_grad_(True)

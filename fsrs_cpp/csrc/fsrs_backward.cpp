@@ -10,6 +10,20 @@
 
 using fsrs_state_grad = fsrs_state;
 
+void min_backward(float &grad_x, float &grad_y, const float x, const float y) {
+    if (x <= y) {
+        grad_y = 0;
+    } else {
+        grad_x = 0;
+    }
+}
+
+void clamp_backward(float &grad_x, const float x, const float low, const float high) {
+    if (x < low || high < x) {
+        grad_x = 0;
+    }
+}
+
 void forgetting_curve_backward(float* out_grad_params, fsrs_state_grad &grad_state, const float grad_r, const float t, const float s, const float decay) {
     float factor = pow(0.9, 1 / -decay) - 1;
     float inside = 1 + factor * t / s;
@@ -19,6 +33,71 @@ void forgetting_curve_backward(float* out_grad_params, fsrs_state_grad &grad_sta
     float grad_factor = grad_inside * t / s;
     out_grad_params[20] += grad_factor * pow(0.9, 1 / -decay) * log(0.9) / pow(decay, 2);
     grad_state.s += grad_inside * factor * t / -pow(s, 2);
+}
+
+void stability_after_failure_backward(float* out_grad_params, fsrs_state_grad &grad_state, float &grad_r, const float grad_s, const float* params, const fsrs_state state, const float r) {
+    const int BINS = 4;
+    float vals[BINS];
+    vals[0] = params[11];
+    vals[1] = pow(state.d, -params[12]);
+    vals[2] = (pow(state.s + 1, params[13]) - 1);
+    vals[3] = exp((1 - r) * params[14]);
+
+    float preprod[BINS], sufprod[BINS];
+    for (int i = 0; i < BINS; i++) {
+        preprod[i] = vals[i] * (i == 0 ? 1.0 : preprod[i - 1]);
+    }
+    for (int i = BINS - 1; i >= 0; i--) {
+        sufprod[i] = vals[i] * (i == BINS - 1 ? 1.0 : sufprod[i + 1]);
+    }
+
+    const float new_s = preprod[BINS - 1];
+    const float new_minimum_s = state.s / exp(params[17] * params[18]);
+
+    // Backward
+    if (new_s <= new_minimum_s) {
+        out_grad_params[11] += grad_s * sufprod[1];
+        out_grad_params[12] -= grad_s * preprod[0] * sufprod[2] * vals[1] * log(state.d);
+        grad_state.d        += grad_s * preprod[0] * sufprod[2] * -params[12] * pow(state.d, -params[12] - 1);
+        out_grad_params[13] += grad_s * preprod[1] * sufprod[3] * (vals[2] + 1) * log(state.s + 1);
+        grad_state.s        += grad_s * preprod[1] * sufprod[3] * params[13] * pow(state.s + 1, params[13] - 1);
+        out_grad_params[14] += grad_s * preprod[2] * vals[3] * (1 - r);
+        grad_r              -= grad_s * preprod[2] * vals[3] * params[14];
+    } else {
+        float grad_params17_times_params18 = -grad_s * state.s / pow(exp(params[17] * params[18]), 2);
+        out_grad_params[17] += grad_params17_times_params18 * params[18];
+        out_grad_params[18] += grad_params17_times_params18 * params[17];
+        grad_state.s += grad_s / exp(params[17] * params[18]);
+    }
+}
+
+void init_d_backward(float* out_grad_params, const float grad, const float* params, int rating) {
+    out_grad_params[4] += grad;
+    out_grad_params[5] += -grad * exp(params[5] * (rating - 1)) * (rating - 1);
+}
+
+void linear_dampening_backward(float &grad_delta_d, float &grad_old_d, const float grad, const float delta_d, const float old_d) {
+    grad_delta_d += grad * (10 - old_d) / 9;
+    grad_old_d += -grad * delta_d / 9;
+}
+
+void mean_reversion_backward(float* out_grad_params, float &grad_init, float &grad_current, const float grad, const float* params, const float init, const float current) {
+    out_grad_params[7] += grad * (init - current);
+    grad_init += grad * params[7];
+    grad_current += grad * (1 - params[7]);
+}
+
+void next_d_backward(float* out_grad_params, fsrs_state_grad &grad_state, const float grad_d, const float* params, const fsrs_state state, const int rating) {
+    float delta_d = -params[6] * (rating - 3);
+    float new_d = state.d + linear_dampening(delta_d, state.d);
+
+    float grad_init = 0.0, grad_new_d = 0.0;
+    mean_reversion_backward(out_grad_params, grad_init, grad_new_d, grad_d, params, init_d(params, 4), new_d);
+    init_d_backward(out_grad_params, grad_init, params, 4);
+    float grad_delta_d = 0.0;
+    grad_state.d += grad_new_d;
+    linear_dampening_backward(grad_delta_d, grad_state.d, grad_new_d, delta_d, state.d);
+    out_grad_params[6] += -grad_delta_d * (rating - 3);
 }
 
 void fsrs6_backward(
@@ -37,14 +116,15 @@ void fsrs6_backward(
     for (int l = L - 1; l >= 0; l--) {
         // Starting from the checkpoint, redo a forward pass to recompute intermediate values
         fsrs_state state = checkpoints_L[l];
-        float new_s, new_d;
+        float new_s, new_d, r;
+        bool short_term, success;
         if (l == 0) {
             new_s = params[rating[0] - 1]; 
             new_d = init_d(params, rating[0]);
         } else {
-            float r = forgetting_curve(elapsed_days_int[l], state.s, params[20]);
-            bool short_term = elapsed_days_int[l] < 1;
-            bool success = rating[l] > 1;
+            r = forgetting_curve(elapsed_days_int[l], state.s, params[20]);
+            short_term = elapsed_days_int[l] < 1;
+            success = rating[l] > 1;
             if (short_term) {  // Short term
                 new_s = stability_short_term(params, state, rating[l]);
             } else {
@@ -56,19 +136,37 @@ void fsrs6_backward(
             }
             new_d = next_d(params, state, rating[l]);
         }
-        new_s = std::clamp(new_s, 0.001f, 36500.0f);
-        new_d = std::clamp(new_d, 1.0f, 10.0f);
-        state = {new_s, new_d};
+        float new_s_clamped = std::clamp(new_s, 0.001f, 36500.0f);
+        float new_d_clamped = std::clamp(new_d, 1.0f, 10.0f);
+        fsrs_state new_state = {new_s_clamped, new_d_clamped};
         std::cout << "state back " << new_s << ' ' << new_d << '\n';
         // out_L[l] = forgetting_curve(label_elapsed_days_int[l], state.s, params[20]);
 
-        // Backwards pass
-        forgetting_curve_backward(out_grad_params, grad_state, grad_r_L[l], label_elapsed_days_int[l], state.s, params[20]);
+        // Backward pass begins
+        forgetting_curve_backward(out_grad_params, grad_state, grad_r_L[l], label_elapsed_days_int[l], new_state.s, params[20]);
+        clamp_backward(grad_state.s, new_s, 0.001f, 36500.0f);
+        clamp_backward(grad_state.d, new_d, 1.0f, 10.0f);
+        // TODO clamp
+
         if (l == 0) {
             out_grad_params[rating[0] - 1] = grad_state.s;
-            // TODO d
+            init_d_backward(out_grad_params, grad_state.d, params, rating[0]);
         } else {
+            fsrs_state_grad new_grad_state;
+            float grad_r = 0.0;
+            if (short_term) {
 
+            } else {
+                if (success) {
+                    
+                } else {
+                    stability_after_failure_backward(out_grad_params, new_grad_state, grad_r, grad_state.s, params, state, r);
+                }
+            }
+            forgetting_curve_backward(out_grad_params, new_grad_state, grad_r, elapsed_days_int[l], state.s, params[20]);
+            next_d_backward(out_grad_params, new_grad_state, grad_state.d, params, state, rating[l]);
+
+            grad_state = new_grad_state;
         }
     }
 }
