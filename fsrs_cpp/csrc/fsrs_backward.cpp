@@ -35,6 +35,43 @@ void forgetting_curve_backward(float* out_grad_params, fsrs_state_grad &grad_sta
     grad_state.s += grad_inside * factor * t / -pow(s, 2);
 }
 
+void stability_after_success_backward(float* out_grad_params, fsrs_state_grad &grad_state, float &grad_r, const float grad_s, const float* params, const fsrs_state state, const float r, const int rating) {
+    float hard_penalty = rating == 2 ? params[15] : 1.0;
+    float easy_bonus = rating == 4 ? params[16] : 1.0;
+    const int BINS = 6;
+    float vals[BINS];
+    vals[0] = exp(params[8]);
+    vals[1] = (11 - state.d);
+    vals[2] = pow(state.s, -params[9]);
+    vals[3] = exp((1 - r) * params[10]) - 1;
+    vals[4] = hard_penalty;
+    vals[5] = easy_bonus;
+
+    float preprod[BINS], sufprod[BINS];
+    for (int i = 0; i < BINS; i++) {
+        preprod[i] = vals[i] * (i == 0 ? 1.0 : preprod[i - 1]);
+    }
+    for (int i = BINS - 1; i >= 0; i--) {
+        sufprod[i] = vals[i] * (i == BINS - 1 ? 1.0 : sufprod[i + 1]);
+    }
+
+    grad_state.s += grad_s * (1 + sufprod[0]);
+    float grad_sinc = grad_s * state.s;
+    out_grad_params[8] += grad_sinc * sufprod[1] * vals[0];
+    grad_state.d += -grad_sinc * preprod[0] * sufprod[2];
+    grad_state.s += -grad_sinc * preprod[1] * sufprod[3] * params[9] * vals[2] / state.s;
+    out_grad_params[9] += -grad_sinc * preprod[1] * sufprod[3] * vals[2] * log(state.s);
+    float grad_1_minus_r_times_params10 = grad_sinc * preprod[2] * sufprod[4] * (vals[3] + 1);
+    grad_r += -grad_1_minus_r_times_params10 * params[10];
+    out_grad_params[10] += grad_1_minus_r_times_params10 * (1 - r);
+    if (rating == 2) {
+        out_grad_params[15] += grad_sinc * preprod[3] * sufprod[5];
+    }
+    if (rating == 4) {
+        out_grad_params[16] += grad_sinc * preprod[4];
+    }
+}
+
 void stability_after_failure_backward(float* out_grad_params, fsrs_state_grad &grad_state, float &grad_r, const float grad_s, const float* params, const fsrs_state state, const float r) {
     const int BINS = 4;
     float vals[BINS];
@@ -51,7 +88,7 @@ void stability_after_failure_backward(float* out_grad_params, fsrs_state_grad &g
         sufprod[i] = vals[i] * (i == BINS - 1 ? 1.0 : sufprod[i + 1]);
     }
 
-    const float new_s = preprod[BINS - 1];
+    const float new_s = sufprod[0];
     const float new_minimum_s = state.s / exp(params[17] * params[18]);
 
     // Backward
@@ -157,7 +194,7 @@ void fsrs6_backward(
 
             } else {
                 if (success) {
-                    
+                    stability_after_success_backward(out_grad_params, new_grad_state, grad_r, grad_state.s, params, state, r, rating[l]);
                 } else {
                     stability_after_failure_backward(out_grad_params, new_grad_state, grad_r, grad_state.s, params, state, r);
                 }
