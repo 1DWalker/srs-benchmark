@@ -146,13 +146,12 @@ void fsrs6_backward(
         forgetting_curve_backward(out_grad_params, grad_state, grad_r_L[l], label_elapsed_days_int[l], new_state.s, params[20]);
         clamp_backward(grad_state.s, new_s, 0.001f, 36500.0f);
         clamp_backward(grad_state.d, new_d, 1.0f, 10.0f);
-        // TODO clamp
 
         if (l == 0) {
             out_grad_params[rating[0] - 1] = grad_state.s;
             init_d_backward(out_grad_params, grad_state.d, params, rating[0]);
         } else {
-            fsrs_state_grad new_grad_state;
+            fsrs_state_grad new_grad_state = {};
             float grad_r = 0.0;
             if (short_term) {
 
