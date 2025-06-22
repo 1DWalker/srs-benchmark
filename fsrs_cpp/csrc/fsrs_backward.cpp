@@ -16,18 +16,18 @@ void forgetting_curve_backward(float* out_grad_params, fsrs_state_grad &grad_sta
     // r = pow(1 + factor * t / s, -decay);
     // dr/ddecay = dr/ddecay e^(-decay * log(1 + factor * t / s))
     //           =  e^(-decay * log(1 + factor * t / s)) * d/ddecay (-decay * log(1 + factor * t / s))
-    //           = d0 * d1
-    float d0 = pow(1 + factor * t / s, -decay);
+    //           = base * d1
+    float base = pow(1 + factor * t / s, -decay);
     // d1 = d/ddecay (-decay * log(1 + factor * t / s))
     //    = -decay * d/ddecay log(1 + factor * t / s) + (-1) * log(1 + factor * t / s)
     //    = d11 + d12
     // d/ddecay log(1 + factor * t / s) = 1 / (1 + factor * t / s) * t / s * d/ddecay factor
     // d/ddecay factor = 0.9^(1 / -decay) * log(0.9) * 1 / decay^2
-    float d11 = -decay / (1 + factor * t / s) * t / s * pow(0.9, 1 / -decay) * log(0.9) / pow(decay, 2);
+    float d11 = -decay / inside * t / s * pow(0.9, 1 / -decay) * log(0.9) / pow(decay, 2);
     float d12 = -log(inside);
     float d1 = d11 + d12;
-    // float decay_intermediate = -decay / inside * t / s * pow(0.9, 1 / -decay) * pow(decay, -2);
-    out_grad_params[20] += grad_r * d0 * d1;
+    out_grad_params[20] += grad_r * base * d1;
+    grad_state.s += grad_r * base * -decay / inside * factor * t / -pow(s, 2);
 }
 
 void fsrs6_backward(
@@ -68,13 +68,14 @@ void fsrs6_backward(
         new_s = std::clamp(new_s, 0.001f, 36500.0f);
         new_d = std::clamp(new_d, 1.0f, 10.0f);
         state = {new_s, new_d};
-        std::cout << "state back" << new_s << ' ' << new_d << '\n';
+        std::cout << "state back " << new_s << ' ' << new_d << '\n';
         // out_L[l] = forgetting_curve(label_elapsed_days_int[l], state.s, params[20]);
 
         // Backwards pass
         forgetting_curve_backward(out_grad_params, grad_state, grad_r_L[l], label_elapsed_days_int[l], state.s, params[20]);
         if (l == 0) {
-
+            out_grad_params[rating[0] - 1] = grad_state.s;
+            // TODO d
         } else {
 
         }
