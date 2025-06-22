@@ -1,7 +1,7 @@
 #pragma once
 
 struct fsrs_state {
-    // All fields should be floats, otherwise there is potential UB
+    // All fields should be floats
     float s;
     float d;
 };
