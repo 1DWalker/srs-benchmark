@@ -99,7 +99,6 @@ void fsrs6_forward(
         new_s = std::clamp(new_s, 0.001f, 36500.0f);
         new_d = std::clamp(new_d, 1.0f, 10.0f);
         state = {new_s, new_d};
-        std::cout << "state " << new_s << ' ' << new_d << '\n';
         out_L[l] = forgetting_curve(label_elapsed_days_int[l], state.s, params[20]);
     }
 }
