@@ -7,11 +7,11 @@ import torch
 def __nop(ob):
     return ob
 
-# ModuleType = torch.nn.Module
-# FunctionType = __nop
+ModuleType = torch.nn.Module
+FunctionType = __nop
 
-ModuleType = torch.jit.ScriptModule
-FunctionType = torch.jit.script_method
+# ModuleType = torch.jit.ScriptModule
+# FunctionType = torch.jit.script_method
 
 class FSRS6(ModuleType):
     def __init__(self):

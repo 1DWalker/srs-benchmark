@@ -15,15 +15,6 @@ struct fsrs_state_grad {
 };
 
 template <typename F>
-void min_backward(F &grad_x, F &grad_y, const F x, const F y) {
-    if (x <= y) {
-        grad_y = 0;
-    } else {
-        grad_x = 0;
-    }
-}
-
-template <typename F>
 void clamp_backward(F &grad_x, const F x, const F low, const F high) {
     if (x < low || high < x) {
         grad_x = 0;
@@ -135,7 +126,7 @@ void stability_after_failure_backward(F* out_grad_params, fsrs_state_grad<F> &gr
     if (new_s <= new_minimum_s) {
         out_grad_params[11] += grad_s * sufprod[1];
         out_grad_params[12] -= grad_s * preprod[0] * sufprod[2] * vals[1] * log(state.d);
-        grad_state.d        += grad_s * preprod[0] * sufprod[2] * -params[12] * pow(state.d, -params[12] - 1);
+        grad_state.d        += grad_s * preprod[0] * sufprod[2] * -params[12] * vals[1] / state.d;
         out_grad_params[13] += grad_s * preprod[1] * sufprod[3] * (vals[2] + 1) * log(state.s + 1);
         grad_state.s        += grad_s * preprod[1] * sufprod[3] * params[13] * pow(state.s + 1, params[13] - 1);
         out_grad_params[14] += grad_s * preprod[2] * vals[3] * (1 - r);
