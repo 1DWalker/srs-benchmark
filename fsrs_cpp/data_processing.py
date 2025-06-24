@@ -1,17 +1,132 @@
 
+from argparse import Namespace
+from dataclasses import dataclass
+import logging
 import multiprocessing
 import lmdb
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import TimeSeriesSplit
 import torch
 from tqdm import tqdm
+from features import create_features
+from models.model_factory import create_model
 from utils import load_tensor, parse_toml, save_tensor
+try:
+    from fsrs_optimizer import BatchDataset, BatchLoader, plot_brier, Optimizer  # type: ignore
+except Exception as e:
+    logging.exception("Failed to import fsrs_optimizer: %s", e)
+
+class MinimalBatchLoader:
+    def __init__(self, batch_nums, shuffle: bool = True, seed: int = 2023):
+        self.batch_nums = batch_nums
+        self.shuffle = shuffle
+        self.generator = torch.Generator()
+        self.generator.manual_seed(seed)
+
+    def __iter__(self):
+        if self.shuffle:
+            yield from (
+                idx
+                for idx in torch.randperm(
+                    self.batch_nums, generator=self.generator
+                ).tolist()
+            )
+        else:
+            yield from (self.dataset[idx] for idx in range(self.batch_nums))
+
+    def __len__(self):
+        return self.batch_nums
+
+@dataclass
+class SplitInfo:
+    pretrain_params: torch.Tensor
+    epochs: torch.Tensor
+    review_ths: torch.Tensor
+    batch_lens: torch.Tensor
+    lrs: torch.Tensor
+    train_set_review_ths: torch.Tensor
+    test_set_review_ths: torch.Tensor
+
+def get_fsrs_training_info(df):
+    fsrs_config = {
+        "use_secs_intervals": False,
+        "equalize_test_with_non_secs": False,
+        "model_name": "FSRS-6",
+        "two_buttons": False,
+        "max_seq_len": 64,
+        "include_short_term": True,
+        "n_splits": 5,
+        "batch_size": 512,
+        "n_epoch": 5,
+        "device": torch.device("cpu"),
+        "s_min": 0.001,
+        "init_s_max": 100.0,
+        "s_max": 36500.0,
+        "verbose": False,
+        "verbose_inadequate_data": False,
+    }
+    fsrs_config = Namespace(**fsrs_config)
+    df = create_features(df, config=fsrs_config)
+    tscv = TimeSeriesSplit(n_splits=fsrs_config.n_splits)
+
+    split_infos = []
+    for split_i, (train_index, test_index) in enumerate(tscv.split(df)):
+        train_set = df.iloc[train_index]
+        test_set = df.iloc[test_index]
+
+        # Get and store the initial FSRS stability values
+        model = create_model(fsrs_config)
+        model.pretrain(train_set)
+        pretrain_params = torch.tensor(model.state_dict(), dtype=torch.float)
+
+        # Get the training batches
+        generator = torch.Generator()
+        generator.manual_seed(2023)
+
+        batch_num, remainder = divmod(len(train_set), max(1, fsrs_config.batch_size))
+        batch_num = batch_num + 1 if remainder > 0 else batch_num
+        data_loader = MinimalBatchLoader(batch_num)
+        # random tensor to setup a scheduler
+        optim_tensor = torch.tensor([1.0], requires_grad=True)
+        optim = torch.optim.AdamW([optim_tensor], lr=4e-2)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=batch_num * fsrs_config.n_epoch)
+
+        epochs = []
+        review_ths_all = []
+        batch_lens = []
+        lrs = []
+        for epoch in range(fsrs_config.n_epoch):
+            for batch_i, batch_bin in enumerate(data_loader):
+                lrs.append(scheduler.get_last_lr()[0])
+                batch_l = batch_bin * fsrs_config.batch_size
+                batch_r = min(len(train_set), (batch_bin + 1) * fsrs_config.batch_size)
+                df_slice = train_set.iloc[batch_l:batch_r]
+                review_ths = df_slice["review_th"]
+                epochs.append(epoch)
+                review_ths_all.extend(review_ths.to_numpy())
+                batch_lens.append(len(review_ths))
+                scheduler.step()
+
+        split_infos.append(SplitInfo(
+            pretrain_params=pretrain_params,
+            epochs=torch.tensor(epochs, dtype=torch.int),
+            review_ths= torch.tensor(review_ths_all, dtype=torch.int),
+            batch_lens=torch.tensor(batch_lens, dtype=torch.int),
+            lrs=torch.tensor(lrs, dtype=torch.float),
+            train_set_review_ths=torch.tensor(train_set["review_th"].to_numpy(), dtype=torch.int),
+            test_set_review_ths=torch.tensor(test_set["review_th"].to_numpy(), dtype=torch.int),
+        ))
+    
+    return split_infos
 
 
 def process(user_id, config):
     df = pd.read_parquet(
         config.DATA_PATH / "revlogs", filters=[("user_id", "=", user_id)]
     )
+    split_infos = get_fsrs_training_info(df.copy())
+
     df["review_th"] = range(1, df.shape[0] + 1)
     len_before = len(df)
     df.drop(df[~df["rating"].isin([1, 2, 3, 4])].index, inplace=True)
@@ -55,7 +170,7 @@ def process(user_id, config):
         packed_label_elapsed_days_real_T = torch.tensor(df["label_elapsed_days_real"], dtype=config.DTYPE)[perm]
         packed_label_elapsed_days_int_T = torch.tensor(df["label_elapsed_days_int"], dtype=config.DTYPE)[perm]
 
-    return packed_review_th_T, packed_rating_T, packed_elapsed_days_real_T, packed_elapsed_days_int_T, packed_label_elapsed_days_real_T, packed_label_elapsed_days_int_T, perm_T_tensor, perm_inv_T_tensor, card_locs_T
+    return split_infos, packed_review_th_T, packed_rating_T, packed_elapsed_days_real_T, packed_elapsed_days_int_T, packed_label_elapsed_days_real_T, packed_label_elapsed_days_int_T, perm_T_tensor, perm_inv_T_tensor, card_locs_T
 
 def job(user_id, config, writer_queue, progress_queue):
     writer_queue.put((user_id, process(user_id, config)))
@@ -72,6 +187,7 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
 
         with env.begin(write=True) as txn:
             (
+                split_infos,
                 packed_review_th_T,
                 packed_rating_T,
                 packed_elapsed_days_real_T,
@@ -82,6 +198,15 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
                 perm_inv_T_tensor,
                 card_locs_T,
             ) = tensors
+            assert len(split_infos) == 5
+            for split_i, split_info in enumerate(split_infos):
+                save_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", split_info.pretrain_params)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_epochs", split_info.epochs)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_review_ths", split_info.review_ths)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_batch_lens", split_info.batch_lens)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_lrs", split_info.lrs)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_train_set_review_ths", split_info.train_set_review_ths)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_test_set_review_ths", split_info.test_set_review_ths)   
             save_tensor(txn, f"{user_id}_packed_review_th_T", packed_review_th_T)
             save_tensor(txn, f"{user_id}_packed_rating_T", packed_rating_T)
             save_tensor(txn, f"{user_id}_packed_elapsed_days_real_T", packed_elapsed_days_real_T)
@@ -146,4 +271,5 @@ def main(config):
 
 if __name__ == '__main__':
     config = parse_toml()
+    # process(1, config)
     main(config)

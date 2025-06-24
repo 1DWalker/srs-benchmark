@@ -1,5 +1,5 @@
 DB_PATH = "fsrs_cpp_db"
-DB_SIZE = 1_000_000_000
+DB_SIZE = 100_000_000
 
 DATA_PATH = "../anki-revlogs-10k"
 

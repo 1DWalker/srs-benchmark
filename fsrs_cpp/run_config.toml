@@ -1,0 +1,6 @@
+DB_PATH = "fsrs_cpp_db"
+
+USER_START = 1
+USER_END = 1
+
+PROCESSES = 1

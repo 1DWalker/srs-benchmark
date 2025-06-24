@@ -188,6 +188,7 @@ void fsrs6_backward(
     fsrs_state_grad<F> grad_state = {};
     for (int l = L - 1; l >= 0; l--) {
         // Starting from the checkpoint, redo a forward pass to recompute intermediate values
+        // TODO figure out better checkpointing so that we can avoid this third forward pass
         fsrs_state<F> state = checkpoints_L[l];
         F new_s, new_d, r;
         bool short_term, success;
