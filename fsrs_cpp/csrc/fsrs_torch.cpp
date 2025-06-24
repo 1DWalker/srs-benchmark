@@ -36,24 +36,27 @@ std::tuple<at::Tensor, at::Tensor> fsrs_batch_forward(
     const int* perm_inv_T_ptr = perm_inv_T_tensor.data_ptr<int>();
     const int* card_locs_T_ptr = card_locs_T.data_ptr<int>();
     
-    std::vector<std::tuple<int, int, int>> keys(B);
+    // std::vector<std::tuple<int, int, int>> keys(B);
+    at::Tensor keys = torch::empty({B, 3}, torch::TensorOptions().dtype(torch::kInt32).requires_grad(false));
+    std::tuple<int, int, int>* keys_ptr = (std::tuple<int, int, int>*)keys.data_ptr();
+
     for (int i = 0; i < B; i++) {
         int review_th = review_th_B_ptr[i];
-        keys[i] = {card_locs_T_ptr[review_th - 1], perm_inv_T_ptr[review_th - 1], i};
+        keys_ptr[i] = {card_locs_T_ptr[review_th - 1], perm_inv_T_ptr[review_th - 1], i};
     }
     // Sort by the first element so that reviews with the same card_id are grouped together
-    std::sort(keys.begin(), keys.end(), [&](const auto &a, const auto &b) { return std::get<0>(a) < std::get<0>(b); });
+    std::sort(keys_ptr, keys_ptr + B, [&](const auto &a, const auto &b) { return std::get<0>(a) < std::get<0>(b); });
 
     // std::vector<float> out(B);
     // std::vector<fsrs_state<float>> checkpoint(B);
     int total_review_history = 0;
     int longest_review_history = 0;
     for (int l = 0, r = 1; l < B; l = r++) {
-        int start_loc = std::get<0>(keys[l]);
-        while (r < B && start_loc == std::get<0>(keys[r])) r++;
+        int start_loc = std::get<0>(keys_ptr[l]);
+        while (r < B && start_loc == std::get<0>(keys_ptr[r])) r++;
         int L = 0;
         for (int i = l; i < r; i++) {
-            L = std::max(L, std::get<1>(keys[i]) - start_loc);
+            L = std::max(L, std::get<1>(keys_ptr[i]) - start_loc);
         }
         longest_review_history = std::max(longest_review_history, L);
         total_review_history += L;
@@ -69,12 +72,12 @@ std::tuple<at::Tensor, at::Tensor> fsrs_batch_forward(
     fsrs_state<float>* checkpoints_ptr = (fsrs_state<float>*)checkpoints.data_ptr();
     int checkpoint_offset = 0;
     for (int l = 0, r = 1; l < B; l = r++) {
-        int start_loc = std::get<0>(keys[l]);
-        while (r < B && start_loc == std::get<0>(keys[r])) r++;
+        int start_loc = std::get<0>(keys_ptr[l]);
+        while (r < B && start_loc == std::get<0>(keys_ptr[r])) r++;
         // [l, r) is the range of elements in `keys`, each corresponding to some queried review_th such that the card_ids are the same
         int L = 0;
         for (int i = l; i < r; i++) {
-            L = std::max(L, std::get<1>(keys[i]) - start_loc);
+            L = std::max(L, std::get<1>(keys_ptr[i]) - start_loc);
         }
         fsrs6_forward<float>(
             L,
@@ -88,7 +91,7 @@ std::tuple<at::Tensor, at::Tensor> fsrs_batch_forward(
             packed_label_elapsed_days_int_T_ptr + start_loc
         );
         for (int i = l; i < r; i++) {
-            out_B_ptr[std::get<2>(keys[i])] = out_card_buffer[std::get<1>(keys[i]) - 1 - start_loc];
+            out_B_ptr[std::get<2>(keys_ptr[i])] = out_card_buffer[std::get<1>(keys_ptr[i]) - 1 - start_loc];
         }
         checkpoint_offset += L;
     }
