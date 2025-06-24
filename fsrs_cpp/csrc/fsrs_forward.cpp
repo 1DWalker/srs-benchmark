@@ -6,12 +6,7 @@
 #include <torch/library.h>
 #include <vector>
 #include <math.h>
-
-template <typename F>
-struct fsrs_state {
-    F s;
-    F d;
-};
+#include "fsrs.h"
 
 template <typename F>
 F forgetting_curve(const F t, const F s, const F decay) {

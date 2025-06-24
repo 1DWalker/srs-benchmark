@@ -98,7 +98,7 @@ def bar():
     n = int(1e8)
     source_n = torch.randn((n,))
     weight_1 = torch.randn((1,), requires_grad=True)
-    batch = 8
+    batch = 512
 
     optim = torch.optim.SGD([weight_1])
     P3 = LegendrePolynomial3.apply
@@ -111,7 +111,7 @@ def bar():
         # print(source_n.shape, weight_1.shape, indices_b.shape, taken_b.shape)
         out_b = taken_b * P3(weight_1)
         loss = out_b.sum() ** 2
-        loss.backward()
+        # loss.backward()
         optim.step()
         optim.zero_grad()
         # print(i, weight_1)

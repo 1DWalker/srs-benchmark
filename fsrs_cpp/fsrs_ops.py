@@ -1,5 +1,6 @@
 import torch
 from dataclasses import dataclass
+from fsrs_cpp import _FSRS_CPP
 
 @dataclass
 class RevlogTensors:
@@ -28,17 +29,19 @@ class RevlogTensors:
 
 class FSRSCppFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, params, review_ths, revlog_tensors):
+    def forward(ctx, params, review_ths_B, revlog_tensors):
         print(params)
-        print(review_ths)
-        ctx.save_for_backward(params, review_ths, *revlog_tensors.flatten())
-        pass
+        print(review_ths_B)
+        out_B, checkpoint = torch.ops.fsrs.fsrs_batch_forward(params, review_ths_B, *revlog_tensors.flatten())
+        ctx.save_for_backward(params, review_ths_B, checkpoint, *revlog_tensors.flatten())
+        return out_B
 
     @staticmethod
     def backward(ctx):
         (
             params,
             review_ths,
+            checkpoint,
             packed_review_th_T,
             packed_rating_T,
             packed_elapsed_days_real_T,

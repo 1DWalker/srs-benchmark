@@ -1,4 +1,5 @@
 import lmdb
+from sklearn.metrics import log_loss
 import torch
 from fsrs_cpp.fsrs_ops import FSRSCppFunction, RevlogTensors
 from utils import load_tensor, parse_toml
@@ -29,8 +30,37 @@ def process(config, user_id):
             card_locs_T=card_locs_T,
         )
 
+        test_pred_y_all = []
+        test_y_all = []
         for split_i in range(5):
-            pretrain_params = load_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", device)
+            # pretrain_params = load_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", device)
+            print("Using defaul params")
+            init_w = [
+                0.212,
+                1.2931,
+                2.3065,
+                8.2956,
+                6.4133,
+                0.8334,
+                3.0194,
+                0.001,
+                1.8722,
+                0.1666,
+                0.796,
+                1.4835,
+                0.0614,
+                0.2629,
+                1.6483,
+                0.6014,
+                1.8729,
+                0.5425,
+                0.0912,
+                0.0658,
+                0.1542,
+            ]
+            pretrain_params = torch.tensor(init_w)
+
+
             epochs = load_tensor(txn, f"{user_id}_split_{split_i}_epochs", device)
             review_ths = load_tensor(txn, f"{user_id}_split_{split_i}_review_ths", device)
             batch_lens = load_tensor(txn, f"{user_id}_split_{split_i}_batch_lens", device)
@@ -54,8 +84,12 @@ def process(config, user_id):
             # TODO eval after every epoch
 
             test_pred_y = FSRSCppFunction.apply(params, test_set_review_ths, revlog_tensors)
-            print("got pred", test_pred_y)
-            # TODO get loss
+            test_y = (packed_rating_T[perm_inv_T_tensor[test_set_review_ths - 1]] > 1).float()
+            test_pred_y_all.extend(test_pred_y.detach().numpy())
+            test_y_all.extend(test_y.numpy())
+
+        logloss = log_loss(y_true=test_y_all, y_pred=test_pred_y_all, labels=[0, 1])
+        print("Log loss:", logloss)
 
 
 

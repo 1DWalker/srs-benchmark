@@ -6,6 +6,7 @@
 #include <torch/library.h>
 #include <vector>
 #include <math.h>
+#include "fsrs.h"
 #include "fsrs_forward.cpp"
 
 template <typename F>
