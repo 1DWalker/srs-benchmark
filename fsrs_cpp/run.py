@@ -93,34 +93,54 @@ def process(config, user_id):
             )
 
             # print(params)
-            best_loss = np.inf
-            for batch_i, review_th_batch in enumerate(review_th_batches):
-                is_new_epoch = batch_i == 0 or epochs_np[batch_i - 1] != epochs_np[batch_i]
-                if is_new_epoch:
-                    eval_loss = train_eval(params.detach().clone(), train_set_review_ths, revlog_tensors)
-                    if eval_loss < best_loss:
-                        best_loss = eval_loss
-                        best_params = params.detach().clone()
+            # best_loss = np.inf
+            # for batch_i, review_th_batch in enumerate(review_th_batches):
+            #     is_new_epoch = batch_i == 0 or epochs_np[batch_i - 1] != epochs_np[batch_i]
+            #     if is_new_epoch:
+            #         eval_loss = train_eval(params.detach().clone(), train_set_review_ths, revlog_tensors)
+            #         if eval_loss < best_loss:
+            #             best_loss = eval_loss
+            #             best_params = params.detach().clone()
 
-                pred_y_batch = FSRSCppFunction.apply(params, review_th_batch, revlog_tensors)
-                y_batch = y_T[review_th_batch - 1]
+            #     pred_y_batch = fsrs_fun(params, review_th_batch, revlog_tensors)
+            #     y_batch = y_T[review_th_batch - 1]
+
+            #     # print("Got pred_y", pred_y_batch)
+            #     loss_fn = torch.nn.BCELoss(reduction='none')
+            #     loss = loss_fn(pred_y_batch, y_batch)
+            #     loss_sum = loss.sum()
+            #     # print("loss:", loss.mean())
+            #     loss_sum.backward()
+            #     optim.step()
+            #     optim.zero_grad()
+            #     scheduler.step()
+
+            #     params = fsrs_reference.clip(params)
+            #     # TODO L2 reg
+
+            # eval_loss = train_eval(params.detach().clone(), train_set_review_ths, revlog_tensors)
+            # if eval_loss < best_loss:
+            #     best_loss = eval_loss
+            #     best_params = params.detach().clone()
+            test_set_review_ths = test_set_review_ths[:1]
+
+            for i in range(10000):
+                pred_y_batch = fsrs_fun(params, test_set_review_ths, revlog_tensors)
+                y_batch = y_T[test_set_review_ths - 1]
 
                 # print("Got pred_y", pred_y_batch)
                 loss_fn = torch.nn.BCELoss(reduction='none')
+                print(pred_y_batch, y_batch)
                 loss = loss_fn(pred_y_batch, y_batch)
                 loss_sum = loss.sum()
-                print("loss:", loss.mean())
+                if i % 100 == 0:
+                    print("loss:", loss.mean())
                 loss_sum.backward()
                 optim.step()
                 optim.zero_grad()
-                scheduler.step()
-
-                params = fsrs_reference.clip(params)
-
-            eval_loss = train_eval(params.detach().clone(), train_set_review_ths, revlog_tensors)
-            if eval_loss < best_loss:
-                best_loss = eval_loss
+                # scheduler.step()
                 best_params = params.detach().clone()
+
 
             # TODO eval after every epoch
             print("Best params:", best_params)
