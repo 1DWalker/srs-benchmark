@@ -115,6 +115,7 @@ at::Tensor fsrs_batch_backward(
 ) {
     const int B = review_th_B.size(0);
     const int T = packed_review_th_T.size(0);
+    const int P = params_P.size(0);
     const float* grad_out_B_ptr = grad_out_B.data_ptr<float>();
     const float* params_P_ptr = params_P.data_ptr<float>();
     const int* review_th_B_ptr = review_th_B.data_ptr<int>();
@@ -131,6 +132,8 @@ at::Tensor fsrs_batch_backward(
     const int* card_locs_T_ptr = card_locs_T.data_ptr<int>();
     at::Tensor params_grad = torch::zeros(params_P.sizes(), params_P.options());
     float* params_grad_ptr = params_grad.data_ptr<float>();
+    at::Tensor params_grad_buffer = torch::zeros(params_P.sizes(), params_P.options());
+    float* params_grad_buffer_ptr = params_grad_buffer.data_ptr<float>();
 
     int longest_review_history = 0;
     for (int l = 0, r = 1; l < B; l = r++) {
@@ -168,13 +171,17 @@ at::Tensor fsrs_batch_backward(
             grad_buffer.data(),
             checkpoints_ptr + checkpoint_offset,
             params_P_ptr,
-            params_grad_ptr,
+            params_grad_buffer_ptr,
             packed_rating_T_ptr + start_loc,
             packed_elapsed_days_real_T_ptr + start_loc,
             packed_elapsed_days_int_T_ptr + start_loc,
             packed_label_elapsed_days_real_T_ptr + start_loc,
             packed_label_elapsed_days_int_T_ptr + start_loc
         );
+        for (int i = 0; i < P; i++) {
+            params_grad_ptr[i] += params_grad_buffer_ptr[i];
+            params_grad_buffer_ptr[i] = 0;
+        }
         checkpoint_offset += L;
     }
     return params_grad;

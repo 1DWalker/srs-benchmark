@@ -221,7 +221,7 @@ void fsrs6_backward(
         clamp_backward(grad_state.d, new_d, (F)1.0, (F)10.0);
 
         if (l == 0) {
-            out_grad_params[rating[0] - 1] += grad_state.s;
+            out_grad_params[rating[0] - 1] = grad_state.s;
             init_d_backward(out_grad_params, grad_state.d, params, rating[0]);
         } else {
             fsrs_state_grad<F> new_grad_state = {};
