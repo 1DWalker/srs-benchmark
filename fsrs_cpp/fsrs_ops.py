@@ -30,18 +30,17 @@ class RevlogTensors:
 class FSRSCppFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, params, review_ths_B, revlog_tensors):
-        print(params)
-        print(review_ths_B)
-        out_B, checkpoint = torch.ops.fsrs.fsrs_batch_forward(params, review_ths_B, *revlog_tensors.flatten())
-        ctx.save_for_backward(params, review_ths_B, checkpoint, *revlog_tensors.flatten())
+        out_B, checkpoint, keys = torch.ops.fsrs.fsrs_batch_forward(params, review_ths_B, *revlog_tensors.flatten())
+        ctx.save_for_backward(params, review_ths_B, checkpoint, keys, *revlog_tensors.flatten())
         return out_B
 
     @staticmethod
-    def backward(ctx):
+    def backward(ctx, grad_B):
         (
             params,
-            review_ths,
+            review_ths_B,
             checkpoint,
+            keys,
             packed_review_th_T,
             packed_rating_T,
             packed_elapsed_days_real_T,
@@ -52,3 +51,20 @@ class FSRSCppFunction(torch.autograd.Function):
             perm_inv_T_tensor,
             card_locs_T,
         ) = ctx.saved_tensors
+        params_grad = torch.ops.fsrs.fsrs_batch_backward(
+            grad_B,
+            params, 
+            review_ths_B, 
+            checkpoint, 
+            keys, 
+            packed_review_th_T,
+            packed_rating_T,
+            packed_elapsed_days_real_T,
+            packed_elapsed_days_int_T,
+            packed_label_elapsed_days_real_T,
+            packed_label_elapsed_days_int_T,
+            perm_T_tensor,
+            perm_inv_T_tensor,
+            card_locs_T,
+        )
+        return params_grad, None, None

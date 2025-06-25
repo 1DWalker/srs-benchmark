@@ -18,6 +18,7 @@ def process(config, user_id):
         perm_T_tensor = load_tensor(txn, f"{user_id}_perm_T_tensor", device)
         perm_inv_T_tensor = load_tensor(txn, f"{user_id}_perm_inv_T_tensor", device)
         card_locs_T = load_tensor(txn, f"{user_id}_card_locs_T", device)
+        y_T = (packed_rating_T[perm_inv_T_tensor] > 1).float()
         revlog_tensors = RevlogTensors(
             packed_review_th_T=packed_review_th_T,
             packed_rating_T=packed_rating_T,
@@ -76,15 +77,27 @@ def process(config, user_id):
             )
             
             # print(params)
-            # for review_th_batch in review_th_batches:
-            #     pred_y = FSRSCppFunction.apply(params, review_th_batch, revlog_tensors)
-            #     print("Got pred_y", pred_y)
-            #     exit()
+            for review_th_batch in review_th_batches:
+                for _ in range(100):
+                    pred_y_batch = FSRSCppFunction.apply(params, review_th_batch, revlog_tensors)
+                    y_batch = y_T[review_th_batch - 1]
+
+                    # print("Got pred_y", pred_y_batch)
+                    loss_fn = torch.nn.BCELoss(reduction='none')
+                    loss = loss_fn(pred_y_batch, y_batch)
+                    loss_sum = loss.sum()
+                    print("loss:", loss.mean())
+                    loss_sum.backward()
+                    optim.step()
+                    optim.zero_grad()
+                    scheduler.step()
+
+                exit()
 
             # TODO eval after every epoch
 
             test_pred_y = FSRSCppFunction.apply(params, test_set_review_ths, revlog_tensors)
-            test_y = (packed_rating_T[perm_inv_T_tensor[test_set_review_ths - 1]] > 1).float()
+            test_y = y_T[test_set_review_ths - 1]
             test_pred_y_all.extend(test_pred_y.detach().numpy())
             test_y_all.extend(test_y.numpy())
 
