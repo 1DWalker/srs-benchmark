@@ -62,8 +62,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_batch_forward(
         longest_review_history = std::max(longest_review_history, L);
         total_review_history += L;
     }
-    std::cout << "Longest: " << longest_review_history << '\n';
-    std::cout << "Total: " << total_review_history << '\n';
     std::vector<float> out_card_buffer(longest_review_history);
 
     at::Tensor out_B = torch::empty(review_th_B.sizes(), params_P.options());
@@ -115,7 +113,6 @@ at::Tensor fsrs_batch_backward(
     const at::Tensor& perm_inv_T_tensor,
     const at::Tensor& card_locs_T
 ) {
-    std::cout << "start backward\n";
     const int B = review_th_B.size(0);
     const int T = packed_review_th_T.size(0);
     const float* grad_out_B_ptr = grad_out_B.data_ptr<float>();
@@ -145,7 +142,6 @@ at::Tensor fsrs_batch_backward(
         }
         longest_review_history = std::max(longest_review_history, L);
     }
-    std::cout << "Backwards Longest: " << longest_review_history << '\n';
     std::vector<float> grad_buffer(longest_review_history);
 
     int checkpoint_offset = 0;

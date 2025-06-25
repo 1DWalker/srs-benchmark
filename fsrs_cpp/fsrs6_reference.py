@@ -17,6 +17,7 @@ class FSRS6(ModuleType):
     def __init__(self):
         super().__init__()
         self.S_MIN = 0.001
+        self.INIT_S_MAX = 100.0
 
     @FunctionType
     def forgetting_curve(self, t, s, decay):
@@ -134,3 +135,28 @@ class FSRS6(ModuleType):
         output_tensor_bl2 = torch.stack(outputs_b2_list).transpose(0, 1)
         output_s_bl, output_d_bl = output_tensor_bl2.unbind(dim=-1)
         return self.forgetting_curve(label_elapsed_days_int_bl, output_s_bl, -parameters[20])
+
+    def clip(self, w: Tensor):
+        with torch.no_grad():
+            w[0] = w[0].clamp(self.S_MIN, self.INIT_S_MAX)
+            w[1] = w[1].clamp(self.S_MIN, self.INIT_S_MAX)
+            w[2] = w[2].clamp(self.S_MIN, self.INIT_S_MAX)
+            w[3] = w[3].clamp(self.S_MIN, self.INIT_S_MAX)
+            w[4] = w[4].clamp(1, 10)
+            w[5] = w[5].clamp(0.001, 4)
+            w[6] = w[6].clamp(0.001, 4)
+            w[7] = w[7].clamp(0.001, 0.75)
+            w[8] = w[8].clamp(0, 4.5)
+            w[9] = w[9].clamp(0, 0.8)
+            w[10] = w[10].clamp(0.001, 3.5)
+            w[11] = w[11].clamp(0.001, 5)
+            w[12] = w[12].clamp(0.001, 0.25)
+            w[13] = w[13].clamp(0.001, 0.9)
+            w[14] = w[14].clamp(0, 4)
+            w[15] = w[15].clamp(0, 1)
+            w[16] = w[16].clamp(1, 6)
+            w[17] = w[17].clamp(0, 2)
+            w[18] = w[18].clamp(0, 2)
+            w[19] = w[19].clamp(0, 0.8)
+            w[20] = w[20].clamp(0.1, 0.8)
+            return w
