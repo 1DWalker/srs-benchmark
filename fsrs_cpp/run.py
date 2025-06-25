@@ -60,7 +60,7 @@ def process(config, user_id):
 
             pretrain_params = load_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", device)
             assert pretrain_params.size(0) == 4
-            params = torch.tensor(fsrs_reference.initial_params, dtype=torch.float, requires_grad=True)
+            params = fsrs_reference.initial_params.detach().clone().requires_grad_(True)
             with torch.no_grad():
                 for i in range(4):
                     params[i] = pretrain_params[i]
@@ -86,13 +86,14 @@ def process(config, user_id):
                 loss_fn = torch.nn.BCELoss(reduction='none')
                 loss = loss_fn(pred_y_batch, y_batch)
                 loss_sum = loss.sum()
-                loss_sum.backward()
+                loss_reg = fsrs_reference.get_regularization_loss(params, review_th_batch.size(0)) / train_set_review_ths.size(0)
+                loss_all = loss_sum + loss_reg
+                loss_all.backward()
+                # print("loss:", loss_sum, loss_reg)
                 optim.step()
                 optim.zero_grad()
                 params = fsrs_reference.clip(params)
                 scheduler.step()
-
-                # TODO L2 reg
 
             eval_loss = train_eval(params.detach().clone(), train_set_review_ths, revlog_tensors)
             if eval_loss < best_loss:

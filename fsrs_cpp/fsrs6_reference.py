@@ -16,7 +16,7 @@ FunctionType = __nop
 class FSRS6(ModuleType):
     def __init__(self):
         super().__init__()
-        self.initial_params = [
+        self.initial_params = torch.tensor([
             0.212,
             1.2931,
             2.3065,
@@ -38,7 +38,32 @@ class FSRS6(ModuleType):
             0.0912,
             0.0658,
             0.1542,
-        ]
+        ])
+        self.default_params_stddev_tensor = torch.tensor(
+            [
+                6.43,
+                9.66,
+                17.58,
+                27.85,
+                0.57,
+                0.28,
+                0.6,
+                0.12,
+                0.39,
+                0.18,
+                0.33,
+                0.3,
+                0.09,
+                0.16,
+                0.57,
+                0.25,
+                1.03,
+                0.31,
+                0.32,
+                0.14,
+                0.27,
+            ]
+        )
         self.S_MIN = 0.001
         self.INIT_S_MAX = 100.0
 
@@ -183,3 +208,12 @@ class FSRS6(ModuleType):
             w[19] = w[19].clamp(0, 0.8)
             w[20] = w[20].clamp(0.1, 0.8)
             return w
+
+    def get_regularization_loss(self, params: Tensor, real_batch_size) -> Tensor:
+        return (
+            torch.sum(
+                torch.square(params - self.initial_params)
+                / torch.square(self.default_params_stddev_tensor)
+            )
+            * real_batch_size
+        )
