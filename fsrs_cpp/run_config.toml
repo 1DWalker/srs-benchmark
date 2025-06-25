@@ -1,6 +1,7 @@
+OUT_NAME = "FSRS6Cpp"
 DB_PATH = "fsrs_cpp_db"
 
 USER_START = 1
-USER_END = 1
+USER_END = 1000
 
-PROCESSES = 1
+PROCESSES = 15

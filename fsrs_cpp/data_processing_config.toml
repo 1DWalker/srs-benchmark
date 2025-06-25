@@ -1,12 +1,12 @@
 DB_PATH = "fsrs_cpp_db"
-DB_SIZE = 100_000_000
+DB_SIZE = 10_000_000_000
 
 DATA_PATH = "../anki-revlogs-10k"
 
 LABEL_FILTER_DB_PATH = "label_filter_db"
 
 USER_START = 1
-USER_END = 1
+USER_END = 1000
 
 DTYPE = "float"
-PROCESSES = 9
+PROCESSES = 8
