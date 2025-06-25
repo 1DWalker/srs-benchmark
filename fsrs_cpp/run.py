@@ -1,3 +1,4 @@
+import time
 import lmdb
 import numpy as np
 from sklearn.metrics import log_loss
@@ -9,10 +10,10 @@ from utils import load_tensor, parse_toml
 def fsrs_fun(params, review_th_batch, revlog_tensors):
     return FSRSCppFunction.apply(params, review_th_batch, revlog_tensors)
 
-def train_eval(params, train_set, revlog_tensors: RevlogTensors):
+def train_eval(params, train_set_review_ths, revlog_tensors: RevlogTensors):
     with torch.no_grad():
-        pred_y = fsrs_fun(params, train_set, revlog_tensors)
-        y = (revlog_tensors.packed_rating_T[revlog_tensors.perm_inv_T_tensor[train_set]] > 1).float()
+        pred_y = fsrs_fun(params, train_set_review_ths, revlog_tensors)
+        y = (revlog_tensors.packed_rating_T[revlog_tensors.perm_inv_T_tensor[train_set_review_ths - 1]] > 1).float()
         return log_loss(y_true=y, y_pred=pred_y, labels=[0, 1])
 
 def process(config, user_id):
@@ -22,6 +23,7 @@ def process(config, user_id):
     env = lmdb.open(config.DB_PATH, readonly=True, lock=False)
     with env.begin(write=False) as txn:
         device = torch.device("cpu")
+        start = time.time()
         packed_review_th_T = load_tensor(txn, f"{user_id}_packed_review_th_T", device)
         packed_rating_T = load_tensor(txn, f"{user_id}_packed_rating_T", device)
         packed_elapsed_days_real_T = load_tensor(txn, f"{user_id}_packed_elapsed_days_real_T", device)
@@ -47,34 +49,6 @@ def process(config, user_id):
         test_pred_y_all = []
         test_y_all = []
         for split_i in range(5):
-            # pretrain_params = load_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", device)
-            print("Using defaul params")
-            init_w = [
-                0.212,
-                1.2931,
-                2.3065,
-                8.2956,
-                6.4133,
-                0.8334,
-                3.0194,
-                0.001,
-                1.8722,
-                0.1666,
-                0.796,
-                1.4835,
-                0.0614,
-                0.2629,
-                1.6483,
-                0.6014,
-                1.8729,
-                0.5425,
-                0.0912,
-                0.0658,
-                0.1542,
-            ]
-            pretrain_params = torch.tensor(init_w)
-
-
             epochs = load_tensor(txn, f"{user_id}_split_{split_i}_epochs", device)
             epochs_np = epochs.numpy()
             review_ths = load_tensor(txn, f"{user_id}_split_{split_i}_review_ths", device)
@@ -84,65 +58,47 @@ def process(config, user_id):
             train_set_review_ths = load_tensor(txn, f"{user_id}_split_{split_i}_train_set_review_ths", device)
             test_set_review_ths = load_tensor(txn, f"{user_id}_split_{split_i}_test_set_review_ths", device)
 
-                
+            pretrain_params = load_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", device)
+            assert pretrain_params.size(0) == 4
+            params = torch.tensor(fsrs_reference.initial_params, dtype=torch.float, requires_grad=True)
+            with torch.no_grad():
+                for i in range(4):
+                    params[i] = pretrain_params[i]
 
-            params = pretrain_params.clone().requires_grad_(True)
             optim = torch.optim.Adam([params], lr=4e-2)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optim, T_max=lrs.size(0)
             )
 
             # print(params)
-            # best_loss = np.inf
-            # for batch_i, review_th_batch in enumerate(review_th_batches):
-            #     is_new_epoch = batch_i == 0 or epochs_np[batch_i - 1] != epochs_np[batch_i]
-            #     if is_new_epoch:
-            #         eval_loss = train_eval(params.detach().clone(), train_set_review_ths, revlog_tensors)
-            #         if eval_loss < best_loss:
-            #             best_loss = eval_loss
-            #             best_params = params.detach().clone()
+            best_loss = np.inf
+            for batch_i, review_th_batch in enumerate(review_th_batches):
+                is_new_epoch = batch_i == 0 or epochs_np[batch_i - 1] != epochs_np[batch_i]
+                if is_new_epoch:
+                    eval_loss = train_eval(params.detach().clone(), train_set_review_ths, revlog_tensors)
+                    if eval_loss < best_loss:
+                        best_loss = eval_loss
+                        best_params = params.detach().clone()
 
-            #     pred_y_batch = fsrs_fun(params, review_th_batch, revlog_tensors)
-            #     y_batch = y_T[review_th_batch - 1]
+                pred_y_batch = fsrs_fun(params, review_th_batch, revlog_tensors)
+                y_batch = y_T[review_th_batch - 1]
 
-            #     # print("Got pred_y", pred_y_batch)
-            #     loss_fn = torch.nn.BCELoss(reduction='none')
-            #     loss = loss_fn(pred_y_batch, y_batch)
-            #     loss_sum = loss.sum()
-            #     # print("loss:", loss.mean())
-            #     loss_sum.backward()
-            #     optim.step()
-            #     optim.zero_grad()
-            #     scheduler.step()
-
-            #     params = fsrs_reference.clip(params)
-            #     # TODO L2 reg
-
-            # eval_loss = train_eval(params.detach().clone(), train_set_review_ths, revlog_tensors)
-            # if eval_loss < best_loss:
-            #     best_loss = eval_loss
-            #     best_params = params.detach().clone()
-            test_set_review_ths = test_set_review_ths[:1]
-
-            for i in range(10000):
-                pred_y_batch = fsrs_fun(params, test_set_review_ths, revlog_tensors)
-                y_batch = y_T[test_set_review_ths - 1]
-
-                # print("Got pred_y", pred_y_batch)
                 loss_fn = torch.nn.BCELoss(reduction='none')
-                print(pred_y_batch, y_batch)
                 loss = loss_fn(pred_y_batch, y_batch)
                 loss_sum = loss.sum()
-                if i % 100 == 0:
-                    print("loss:", loss.mean())
                 loss_sum.backward()
                 optim.step()
                 optim.zero_grad()
-                # scheduler.step()
+                params = fsrs_reference.clip(params)
+                scheduler.step()
+
+                # TODO L2 reg
+
+            eval_loss = train_eval(params.detach().clone(), train_set_review_ths, revlog_tensors)
+            if eval_loss < best_loss:
+                best_loss = eval_loss
                 best_params = params.detach().clone()
 
-
-            # TODO eval after every epoch
             print("Best params:", best_params)
             test_pred_y = fsrs_fun(best_params, test_set_review_ths, revlog_tensors)
             test_y = y_T[test_set_review_ths - 1]
@@ -150,7 +106,7 @@ def process(config, user_id):
             test_y_all.extend(test_y.numpy())
 
         logloss = log_loss(y_true=test_y_all, y_pred=test_pred_y_all, labels=[0, 1])
-        print("Log loss:", logloss)
+        print("Log loss:", logloss, "size:", len(test_y_all))
 
 def main(config):
     USER_IDS = list(range(config.USER_START, config.USER_END + 1))

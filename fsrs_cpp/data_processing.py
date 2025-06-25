@@ -78,7 +78,7 @@ def get_fsrs_training_info(df):
         # Get and store the initial FSRS stability values
         model = create_model(fsrs_config)
         model.pretrain(train_set)
-        pretrain_params = torch.tensor(model.state_dict(), dtype=torch.float)
+        pretrain_params = torch.tensor(model.state_dict(), dtype=torch.float)[:4]
 
         # Get the training batches
         generator = torch.Generator()
@@ -89,7 +89,7 @@ def get_fsrs_training_info(df):
         data_loader = MinimalBatchLoader(batch_num)
         # random tensor to setup a scheduler
         optim_tensor = torch.tensor([1.0], requires_grad=True)
-        optim = torch.optim.AdamW([optim_tensor], lr=4e-2)
+        optim = torch.optim.AdamW([optim_tensor], lr=4e-3)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=batch_num * fsrs_config.n_epoch)
 
         epochs = []

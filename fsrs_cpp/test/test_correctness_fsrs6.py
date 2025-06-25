@@ -33,6 +33,10 @@ class TestCorrectness(unittest.TestCase):
             0.0658,
             0.1542,
         ])
+        # self.params = torch.tensor([1.0000e-03, 1.7030e-01, 1.3751e+01, 1.8097e+01, 8.2403e+00, 1.0000e-03,
+        #     3.7933e+00, 1.6532e-01, 1.2000e+00, 8.0000e-01, 9.9291e-02, 2.0709e+00,
+        #     1.0000e-03, 7.8550e-01, 1.9190e+00, 0.0000e+00, 6.0000e+00, 0.0000e+00,
+        #     0.0000e+00, 7.2275e-01, 8.0000e-01])
 
 
     def _test_forward(self, dtype):
@@ -67,12 +71,13 @@ class TestCorrectness(unittest.TestCase):
         np.random.seed(123)
         torch.manual_seed(123)
         for iter in range(iters):
-            print(f"iter: {iter + 1} / {iters}")
+            MX = random.randint(1, 400)
+            print(f"iter: {iter + 1} / {iters}, L:", L, "MX:", MX)
             rating_L = torch.tensor(np.random.randint(1, 5, size=L))
-            elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 400.0, size=L), dtype=dtype)
-            elapsed_days_int_L = torch.tensor(np.random.randint(0, 400, size=L), dtype=dtype)
-            label_elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, 400.0, size=L), dtype=dtype)
-            label_elapsed_days_int_L = torch.tensor(np.random.randint(0, 400, size=L), dtype=dtype)
+            elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, MX, size=L), dtype=dtype)
+            elapsed_days_int_L = torch.tensor(np.random.randint(0, MX, size=L), dtype=dtype)
+            label_elapsed_days_real_L = torch.tensor(np.random.uniform(0.1, MX, size=L), dtype=dtype)
+            label_elapsed_days_int_L = torch.tensor(np.random.randint(0, MX, size=L), dtype=dtype)
             params = self.params.clone().detach().to(dtype).requires_grad_(True)
             print("start forward ref")
             ref_start = time.time()
