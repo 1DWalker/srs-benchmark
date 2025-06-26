@@ -9,6 +9,7 @@
 #include "fsrs.h"
 #include "fsrs_forward.cpp"
 #include "fsrs_backward.cpp"
+#include "adam.cpp"
 
 int accum = 0;
 const std::vector<float> initial_params = {
@@ -62,7 +63,7 @@ void clip_params(std::vector<float> &params) {
 }
 
 float get_lr(int step, int total_steps) {
-    const float pi = std::acos(-1.0);
+    const float pi = 3.141592653589f;
     return 4e-2 * 0.5 * (1 + std::cos((float) step / total_steps * pi));
 }
 
@@ -197,6 +198,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
         params[i] = pretrain_params_ptr[i];
     }
 
+    adam optim(&params);
+
     int total_steps = keys_lens.size(0);
     std::cout << "total steps:" << total_steps << '\n';
     int locs_offset = 0;
@@ -208,12 +211,15 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
         param_grad_buffer.assign((int)initial_params.size(), 0.0f); // zero_grad
         std::cout << "begin step " << step << " " << lr << '\n';
         float loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, keys_lens_ptr[step], keys_ptr + keys_offset, locs_ptr + locs_offset, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
-        std::cout << step << ' ' << loss << '\n';
-        for (int i = 0; i < 21; i++) {
-            std::cout << param_grad_buffer[i] << ' ';
-            params[i] -= lr * param_grad_buffer[i]; 
-        }
-        std::cout << '\n';
+        optim.step(param_grad_buffer, get_lr(step, total_steps));
+        // TODO regularization
+
+        // std::cout << step << ' ' << loss << '\n';
+        // for (int i = 0; i < (int)param_grad_buffer.size(); i++) {
+        //     std::cout << param_grad_buffer[i] << ' ';
+        //     params[i] -= lr * param_grad_buffer[i]; 
+        // }
+        // std::cout << '\n';
         clip_params(params);
 
         locs_offset += locs_lens_ptr[step];

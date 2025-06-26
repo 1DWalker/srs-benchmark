@@ -57,8 +57,10 @@ def process(config, user_id, env):
                 packed_label_elapsed_days_int_T,
             )
             print("received:", loss, loss_n, params)
+            print("pretrain", pretrain_params)
             loss_tot += loss
             loss_n_tot += loss_n
+            # exit()
 
         print("Log loss:", loss_tot / loss_n_tot)
 
@@ -160,7 +162,7 @@ def main(config):
 if __name__ == '__main__':
     config = parse_toml()
 
-    # env = lmdb.open(config.DB_PATH, readonly=True, lock=False)
-    # process(config, 1, env)
+    env = lmdb.open(config.DB_PATH, readonly=True, lock=False)
+    process(config, 1, env)
 
-    main(config)
+    # main(config)
