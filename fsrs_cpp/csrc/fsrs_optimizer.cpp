@@ -112,7 +112,7 @@ float run_batch(
     std::vector<float> &param_grad_buffer_2,
     std::vector<float> &out_buffer,
     std::vector<float> &r_grad_buffer,
-    std::vector<fsrs_state<float>> &checkpoint_buffer,
+    std::vector<checkpoint_t<float>> &checkpoint_buffer,
     const std::vector<float> &params,
     const int num_keys,
     const key_t* keys_ptr,
@@ -127,7 +127,7 @@ float run_batch(
     float loss = 0;
     for (int key_i = 0; key_i < num_keys; key_i++) {
         key_t key = keys_ptr[key_i];
-        fsrs6_forward<float>(
+        fsrs6_forward<float, requires_grad>(
             key.L,
             params.data(),
             out_buffer.data(),
@@ -208,12 +208,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
     const float* packed_label_elapsed_days_real_T_ptr = packed_label_elapsed_days_real_T.data_ptr<float>();
     const float* packed_label_elapsed_days_int_T_ptr = packed_label_elapsed_days_int_T.data_ptr<float>();
 
-    static std::vector<fsrs_state<float>> checkpoint_buffer;
+    static std::vector<checkpoint_t<float>> checkpoint_buffer;
     static std::vector<float> out_buffer, r_grad_buffer, param_grad_buffer, param_grad_buffer_2;
 
     // Ensure that buffer sizes are sufficient
     if ((int)checkpoint_buffer.size() < T) {
-        fsrs_state<float> empty_checkpoint = {};
+        checkpoint_t<float> empty_checkpoint = {};
         checkpoint_buffer.assign(T, empty_checkpoint);
         out_buffer.assign(T, 0.0f);
         r_grad_buffer.assign(T, 0.0f);

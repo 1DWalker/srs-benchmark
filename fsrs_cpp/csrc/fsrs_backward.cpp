@@ -177,7 +177,7 @@ template <typename F>
 void fsrs6_backward(
     const int L,
     const F* grad_r_L,
-    const fsrs_state<F>* checkpoints_L,
+    const checkpoint_t<F>* checkpoints_L,
     const F* params, 
     F* out_grad_params,
     const int* rating,
@@ -188,55 +188,32 @@ void fsrs6_backward(
 ) {
     fsrs_state_grad<F> grad_state = {};
     for (int l = L - 1; l >= 0; l--) {
-        // Starting from the checkpoint, redo a forward pass to recompute intermediate values
-        // TODO figure out better checkpointing so that we can avoid this third forward pass
-        fsrs_state<F> state = checkpoints_L[l];
-        F new_s, new_d, r;
-        bool short_term, success;
-        if (l == 0) {
-            new_s = params[rating[0] - 1]; 
-            new_d = init_d(params, rating[0]);
-        } else {
-            r = forgetting_curve(elapsed_days_int[l], state.s, params[20]);
-            short_term = elapsed_days_int[l] < 1;
-            success = rating[l] > 1;
-            if (short_term) {  // Short term
-                new_s = stability_short_term(params, state, rating[l]);
-            } else {
-                if (success) {
-                    new_s = stability_after_success(params, state, r, rating[l]);
-                } else {
-                    new_s = stability_after_failure(params, state, r);
-                }
-            }
-            new_d = next_d(params, state, rating[l]);
+        const checkpoint_t<F> &checkpoint = checkpoints_L[l];
+        if (grad_r_L[l] != 0) {
+            forgetting_curve_backward(out_grad_params, grad_state, grad_r_L[l], label_elapsed_days_int[l], checkpoint.new_state.s, params[20]);
         }
-        F new_s_clamped = std::clamp(new_s, (F)0.001, (F)36500.0);
-        F new_d_clamped = std::clamp(new_d, (F)1.0, (F)10.0);
-        fsrs_state<F> new_state = {new_s_clamped, new_d_clamped};
-
-        // Backward pass begins
-        forgetting_curve_backward(out_grad_params, grad_state, grad_r_L[l], label_elapsed_days_int[l], new_state.s, params[20]);
-        clamp_backward(grad_state.s, new_s, (F)0.001, (F)36500.0);
-        clamp_backward(grad_state.d, new_d, (F)1.0, (F)10.0);
+        clamp_backward(grad_state.s, checkpoint.new_s, (F)0.001, (F)36500.0);
+        clamp_backward(grad_state.d, checkpoint.new_d, (F)1.0, (F)10.0);
 
         if (l == 0) {
             out_grad_params[rating[0] - 1] = grad_state.s;
             init_d_backward(out_grad_params, grad_state.d, params, rating[0]);
         } else {
+            bool short_term = elapsed_days_int[l] < 1;
+            bool success = rating[l] > 1;
             fsrs_state_grad<F> new_grad_state = {};
             F grad_r = 0.0;
             if (short_term) {
-                stability_short_term_backward(out_grad_params, new_grad_state, grad_state.s, params, state, rating[l]);
+                stability_short_term_backward(out_grad_params, new_grad_state, grad_state.s, params, checkpoint.start_state, rating[l]);
             } else {
                 if (success) {
-                    stability_after_success_backward(out_grad_params, new_grad_state, grad_r, grad_state.s, params, state, r, rating[l]);
+                    stability_after_success_backward(out_grad_params, new_grad_state, grad_r, grad_state.s, params, checkpoint.start_state, checkpoint.r, rating[l]);
                 } else {
-                    stability_after_failure_backward(out_grad_params, new_grad_state, grad_r, grad_state.s, params, state, r);
+                    stability_after_failure_backward(out_grad_params, new_grad_state, grad_r, grad_state.s, params, checkpoint.start_state, checkpoint.r);
                 }
             }
-            forgetting_curve_backward(out_grad_params, new_grad_state, grad_r, elapsed_days_int[l], state.s, params[20]);
-            next_d_backward(out_grad_params, new_grad_state, grad_state.d, params, state, rating[l]);
+            forgetting_curve_backward(out_grad_params, new_grad_state, grad_r, elapsed_days_int[l], checkpoint.start_state.s, params[20]);
+            next_d_backward(out_grad_params, new_grad_state, grad_state.d, params, checkpoint.start_state, rating[l]);
 
             grad_state = new_grad_state;
         }
@@ -256,7 +233,7 @@ torch::Tensor fsrs6_backward_verify(
 ) {
     const int L = rating_L.size(0);
     const F* grad_r_L_ptr = grad_r_L.data_ptr<F>();
-    const fsrs_state<F>* checkpoints_L_ptr = (fsrs_state<F>*)checkpoints_L.data_ptr();
+    const checkpoint_t<F>* checkpoints_L_ptr = (checkpoint_t<F>*)checkpoints_L.data_ptr();
     const F* params_P_ptr = params_P.data_ptr<F>();
     const int* rating_L_ptr = rating_L.data_ptr<int>();
     const F* elapsed_days_real_L_ptr = elapsed_days_real_L.data_ptr<F>();

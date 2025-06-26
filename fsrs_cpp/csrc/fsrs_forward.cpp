@@ -70,12 +70,12 @@ F next_d(const F* params, const fsrs_state<F> state, const int rating) {
     return mean_reversion(params, init_d(params, 4), new_d);
 }
 
-template <typename F>
+template <typename F, bool requires_grad>
 void fsrs6_forward(
     const int L,
     const F* params, 
     F* out_L,
-    fsrs_state<F>* checkpoints_L,
+    checkpoint_t<F>* checkpoints_L,
     const int* rating,
     const F* elapsed_days_real,
     const F* elapsed_days_int,
@@ -84,13 +84,18 @@ void fsrs6_forward(
 ) {
     fsrs_state<F> state = {};
     for (int l = 0; l < L; l++) {
-        checkpoints_L[l] = state;
+        if constexpr (requires_grad) {
+            checkpoints_L[l].start_state = state;
+        }
         F new_s, new_d;
         if (l == 0) {
             new_s = params[rating[0] - 1]; 
             new_d = init_d(params, rating[0]);
         } else {
             F r = forgetting_curve(elapsed_days_int[l], state.s, params[20]);
+            if constexpr (requires_grad) {
+                checkpoints_L[l].r = r;
+            }
             bool short_term = elapsed_days_int[l] < 1;
             bool success = rating[l] > 1;
             if (short_term) {  // Short term
@@ -104,9 +109,17 @@ void fsrs6_forward(
             }
             new_d = next_d(params, state, rating[l]);
         }
-        new_s = std::clamp(new_s, (F)0.001, (F)36500.0);
-        new_d = std::clamp(new_d, (F)1.0, (F)10.0);
-        state = {new_s, new_d};
+        
+        if constexpr (requires_grad) {
+            checkpoints_L[l].new_s = new_s;
+            checkpoints_L[l].new_d = new_d;
+        }
+        F new_s_clamped = std::clamp(new_s, (F)0.001, (F)36500.0);
+        F new_d_clamped = std::clamp(new_d, (F)1.0, (F)10.0);
+        state = {new_s_clamped, new_d_clamped};
+        if constexpr (requires_grad) {
+            checkpoints_L[l].new_state = state;
+        }
         out_L[l] = forgetting_curve(label_elapsed_days_int[l], state.s, params[20]);
     }
 }
@@ -129,10 +142,10 @@ std::tuple<torch::Tensor, torch::Tensor> fsrs6_forward_verify(
     const F* label_elapsed_days_int_L_ptr = label_elapsed_days_int_L.data_ptr<F>();
     at::Tensor out_L = torch::empty(elapsed_days_real_L.sizes(), elapsed_days_real_L.options());
     F* out_L_ptr = out_L.data_ptr<F>();
-    size_t num_chunks = (sizeof(fsrs_state<F>) + 4 - 1) / 4;
-    at::Tensor checkpoints_L = torch::empty({L, (int)num_chunks}, elapsed_days_real_L.options().requires_grad(false));
-    fsrs_state<F>* checkpoints_L_ptr = (fsrs_state<F>*)checkpoints_L.data_ptr();
-    fsrs6_forward(L, params_P_ptr, out_L_ptr, checkpoints_L_ptr, rating_L_ptr, elapsed_days_real_L_ptr, elapsed_days_int_L_ptr, label_elapsed_days_real_L_ptr, label_elapsed_days_int_L_ptr);
+    size_t num_chunks = (sizeof(checkpoint_t<F>) + 4 - 1) / 4;
+    at::Tensor checkpoints_L = torch::zeros({L, (int)num_chunks}, elapsed_days_real_L.options().requires_grad(false));
+    checkpoint_t<F>* checkpoints_L_ptr = (checkpoint_t<F>*)checkpoints_L.data_ptr();
+    fsrs6_forward<F, true>(L, params_P_ptr, out_L_ptr, checkpoints_L_ptr, rating_L_ptr, elapsed_days_real_L_ptr, elapsed_days_int_L_ptr, label_elapsed_days_real_L_ptr, label_elapsed_days_int_L_ptr);
     return {out_L, checkpoints_L};
 }
 

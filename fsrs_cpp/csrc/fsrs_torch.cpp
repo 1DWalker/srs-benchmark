@@ -66,9 +66,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_batch_forward(
 
     at::Tensor out_B = torch::empty(review_th_B.sizes(), params_P.options());
     float* out_B_ptr = out_B.data_ptr<float>();
-    size_t num_chunks = (sizeof(fsrs_state<float>) + 4 - 1) / 4;
+    size_t num_chunks = (sizeof(checkpoint_t<float>) + 4 - 1) / 4;
     at::Tensor checkpoints = torch::empty({total_review_history, (int)num_chunks}, params_P.options().requires_grad(false));
-    fsrs_state<float>* checkpoints_ptr = (fsrs_state<float>*)checkpoints.data_ptr();
+    checkpoint_t<float>* checkpoints_ptr = (checkpoint_t<float>*)checkpoints.data_ptr();
     int checkpoint_offset = 0;
     for (int l = 0, r = 1; l < B; l = r++) {
         int start_loc = std::get<0>(keys_ptr[l]);
@@ -78,7 +78,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_batch_forward(
         for (int i = l; i < r; i++) {
             L = std::max(L, std::get<1>(keys_ptr[i]) - start_loc);
         }
-        fsrs6_forward<float>(
+        fsrs6_forward<float, true>(
             L,
             params_P_ptr,
             out_card_buffer.data(),
@@ -120,7 +120,7 @@ at::Tensor fsrs_batch_backward(
     const float* params_P_ptr = params_P.data_ptr<float>();
     const int* review_th_B_ptr = review_th_B.data_ptr<int>();
     std::tuple<int, int, int>* keys_ptr = (std::tuple<int, int, int>*)keys.data_ptr();
-    fsrs_state<float>* checkpoints_ptr = (fsrs_state<float>*)checkpoints.data_ptr();
+    checkpoint_t<float>* checkpoints_ptr = (checkpoint_t<float>*)checkpoints.data_ptr();
     const int* packed_review_th_T_ptr = packed_review_th_T.data_ptr<int>();
     const int* packed_rating_T_ptr = packed_rating_T.data_ptr<int>();
     const float* packed_elapsed_days_real_T_ptr = packed_elapsed_days_real_T.data_ptr<float>();
