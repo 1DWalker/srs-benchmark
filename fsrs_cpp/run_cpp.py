@@ -27,6 +27,7 @@ def process(config, user_id, env):
         for split_i in range(5):
             pretrain_params = load_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", device)
             epochs = load_tensor(txn, f"{user_id}_split_{split_i}_epochs", device)
+            train_ords = load_tensor(txn, f"{user_id}_split_{split_i}_train_ords", device)   
             locs = load_tensor(txn, f"{user_id}_split_{split_i}_locs", device)   
             locs_lens = load_tensor(txn, f"{user_id}_split_{split_i}_locs_lens", device)   
             keys = load_tensor(txn, f"{user_id}_split_{split_i}_keys", device)   
@@ -39,6 +40,7 @@ def process(config, user_id, env):
             loss, loss_n, best_params = torch.ops.fsrs.fsrs_optimizer(
                 pretrain_params,
                 epochs,
+                train_ords,
                 locs,
                 locs_lens,
                 keys,

@@ -4,7 +4,7 @@ DB_SIZE = 15_000_000_000
 DATA_PATH = "../anki-revlogs-10k"
 
 USER_START = 1
-USER_END = 1000
+USER_END = 1
 
 DTYPE = "float"
 PROCESSES = 8

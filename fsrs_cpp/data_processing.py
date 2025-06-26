@@ -43,6 +43,7 @@ class SplitInfo:
     pretrain_params: torch.Tensor
     epochs: torch.Tensor
     review_ths_all: list
+    train_ords_all: list
     batch_lens: torch.Tensor
     lrs: torch.Tensor
     train_set_review_ths: torch.Tensor
@@ -72,7 +73,8 @@ def get_fsrs_training_info(df) -> SplitInfo:
 
     split_infos = []
     for split_i, (train_index, test_index) in enumerate(tscv.split(df)):
-        train_set = df.iloc[train_index]
+        train_set = df.iloc[train_index].copy()
+        train_set["train_set_ord"] = list(range(0, len(train_set)))
         test_set = df.iloc[test_index]
 
         # Get and store the initial FSRS stability values
@@ -94,6 +96,7 @@ def get_fsrs_training_info(df) -> SplitInfo:
 
         epochs = []
         review_ths_all = []
+        train_ords_all = []
         batch_lens = []
         lrs = []
         for epoch in range(fsrs_config.n_epoch):
@@ -103,8 +106,10 @@ def get_fsrs_training_info(df) -> SplitInfo:
                 batch_r = min(len(train_set), (batch_bin + 1) * fsrs_config.batch_size)
                 df_slice = train_set.iloc[batch_l:batch_r]
                 review_ths = df_slice["review_th"]
+                train_ords = df_slice["train_set_ord"]
                 epochs.append(epoch)
                 review_ths_all.append(review_ths.to_numpy())
+                train_ords_all.append(train_ords.to_numpy())
                 batch_lens.append(len(review_ths))
                 scheduler.step()
 
@@ -112,6 +117,7 @@ def get_fsrs_training_info(df) -> SplitInfo:
             pretrain_params=pretrain_params,
             epochs=torch.tensor(epochs, dtype=torch.int),
             review_ths_all=review_ths_all,
+            train_ords_all=train_ords_all,
             batch_lens=torch.tensor(batch_lens, dtype=torch.int),
             lrs=torch.tensor(lrs, dtype=torch.float),
             train_set_review_ths=torch.tensor(train_set["review_th"].to_numpy(), dtype=torch.int),
@@ -125,6 +131,7 @@ class PackedSplitInfo:
     pretrain_params: torch.Tensor
     epochs: torch.Tensor
     locs: torch.Tensor
+    train_ords: torch.Tensor
     locs_lens: torch.Tensor
     keys: torch.Tensor
     keys_lens: torch.Tensor
@@ -173,8 +180,11 @@ def process(user_id, config):
         perm_inv[perm[i]] = i
     perm_inv = np.array(perm_inv)
 
-    def review_ths_to_packed_query(review_ths):
-        rows = df.iloc[review_ths - 1].sort_values('card_id')
+    def review_ths_to_packed_query(review_ths, train_ords=None):
+        rows = df.iloc[review_ths - 1].copy()
+        if train_ords is not None:
+            rows["train_ord"] = train_ords
+        rows = rows.sort_values('card_id')
         rows["start_loc"] = rows["card_id"].map(card_locs_dict)
         rows["loc"] = perm_inv[rows["review_th"] - 1]
         rows["req_L"] = rows["loc"] - rows["start_loc"]
@@ -184,20 +194,26 @@ def process(user_id, config):
         ls = rows.groupby("card_id", sort=False)["batch_loc"].min().to_numpy()
         rs = rows.groupby("card_id", sort=False)["batch_loc"].max().to_numpy()
         Ls = rows.groupby("card_id", sort=False)["req_L"].max().to_numpy()
-        locs = torch.tensor(rows["loc"].to_list(), dtype=torch.int)
+        locs = torch.tensor(rows["loc"].to_numpy(), dtype=torch.int)
         keys = torch.stack(tuple(map(lambda x: torch.tensor(x, dtype=torch.int), (start_locs, ls, rs, Ls))), dim=-1)
-        return locs, keys
+        if train_ords is not None:
+            query_train_ords = torch.tensor(rows["train_ord"].to_numpy(), dtype=torch.int)
+            return locs, query_train_ords, keys
+        else:
+            return locs, keys
 
     packed_split_infos = []
     with torch.no_grad():
         for split_info in split_infos:
             locs_all = []
+            train_ords_all = []
             keys_all = []
             locs_lens = []
             keys_lens = []
-            for review_ths in split_info.review_ths_all:
-                locs, keys = review_ths_to_packed_query(review_ths)
+            for review_ths, train_ords in zip(split_info.review_ths_all, split_info.train_ords_all):
+                locs, query_train_ords, keys = review_ths_to_packed_query(review_ths, train_ords)
                 locs_all.append(locs)
+                train_ords_all.append(query_train_ords)
                 keys_all.append(keys)
                 locs_lens.append(locs.size(0))
                 keys_lens.append(keys.size(0))
@@ -209,6 +225,7 @@ def process(user_id, config):
                 pretrain_params=split_info.pretrain_params,
                 epochs=split_info.epochs,
                 locs=torch.cat(locs_all),
+                train_ords=torch.cat(train_ords_all),
                 locs_lens=torch.tensor(locs_lens, dtype=torch.int),
                 keys=torch.cat(keys_all),
                 keys_lens=torch.tensor(keys_lens, dtype=torch.int),
@@ -255,6 +272,7 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
                 save_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", packed_split_info.pretrain_params)   
                 save_tensor(txn, f"{user_id}_split_{split_i}_epochs", packed_split_info.epochs)   
                 save_tensor(txn, f"{user_id}_split_{split_i}_locs", packed_split_info.locs)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_train_ords", packed_split_info.train_ords)   
                 save_tensor(txn, f"{user_id}_split_{split_i}_locs_lens", packed_split_info.locs_lens)   
                 save_tensor(txn, f"{user_id}_split_{split_i}_keys", packed_split_info.keys)   
                 save_tensor(txn, f"{user_id}_split_{split_i}_keys_lens", packed_split_info.keys_lens)   
