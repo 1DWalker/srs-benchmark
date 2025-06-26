@@ -230,35 +230,40 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
     int total_steps = keys_lens.size(0);
     int locs_offset = 0;
     int keys_offset = 0;
+    auto best_params = params;
+    float best_loss = (float)1e9;
     for (int step = 0; step < total_steps; step++) {
-        // TODO keep track of the best per epoch
+        if (step == 0 || epochs_ptr[step] != epochs_ptr[step - 1]) {
+            float eval_loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, train_set_keys.size(0), train_set_keys_ptr, train_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
+            if (eval_loss < best_loss) {
+                best_loss = eval_loss;
+                best_params = params;
+            }
+        }
 
         const float lr = get_lr(step, total_steps);
         param_grad_buffer.assign((int)initial_params.size(), 0.0f); // zero_grad
         float loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, keys_lens_ptr[step], keys_ptr + keys_offset, locs_ptr + locs_offset, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
-        // TODO regularization
         for (int i = 0; i < (int)params.size(); i++) {
             param_grad_buffer[i] += 2.0f * (params[i] - initial_params[i]) / (default_params_stddev[i] * default_params_stddev[i]) * locs_lens_ptr[step] / train_set_locs.size(0);
         }
-
         optim.step(param_grad_buffer, get_lr(step, total_steps));
-
-        // std::cout << step << ' ' << loss << '\n';
-        // for (int i = 0; i < (int)param_grad_buffer.size(); i++) {
-        //     std::cout << param_grad_buffer[i] << ' ';
-        //     params[i] -= lr * param_grad_buffer[i]; 
-        // }
-        // std::cout << '\n';
         clip_params(params);
 
         locs_offset += locs_lens_ptr[step];
         keys_offset += keys_lens_ptr[step];
     }
-    float test_loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, test_set_keys.size(0), test_set_keys_ptr, test_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
+    float eval_loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, train_set_keys.size(0), train_set_keys_ptr, train_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
+    if (eval_loss < best_loss) {
+        best_loss = eval_loss;
+        best_params = params;
+    }
+
+    float test_loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, best_params, test_set_keys.size(0), test_set_keys_ptr, test_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
     at::Tensor test_loss_tensor = at::tensor(test_loss);
     at::Tensor test_loss_n_tensor = at::tensor(test_set_locs.size(0));
-    at::Tensor params_tensor = at::tensor(params);
-    return {test_loss_tensor, test_loss_n_tensor, params_tensor};
+    at::Tensor best_params_tensor = at::tensor(best_params);
+    return {test_loss_tensor, test_loss_n_tensor, best_params_tensor};
 }
 
 namespace fsrs {
