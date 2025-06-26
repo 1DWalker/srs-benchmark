@@ -13,8 +13,6 @@ from utils import load_tensor, parse_toml
 import multiprocessing as mp
 
 def process(config, user_id, env):
-    print("Process:", user_id)
-
     with env.begin(write=False) as txn:
         device = torch.device("cpu")
         packed_review_th_T = load_tensor(txn, f"{user_id}_packed_review_th_T", device)
@@ -38,7 +36,7 @@ def process(config, user_id, env):
             test_set_locs = load_tensor(txn, f"{user_id}_split_{split_i}_test_set_locs", device)   
             test_set_keys = load_tensor(txn, f"{user_id}_split_{split_i}_test_set_keys", device)   
 
-            loss, loss_n, params = torch.ops.fsrs.fsrs_optimizer(
+            loss, loss_n, best_params = torch.ops.fsrs.fsrs_optimizer(
                 pretrain_params,
                 epochs,
                 locs,
@@ -56,25 +54,21 @@ def process(config, user_id, env):
                 packed_label_elapsed_days_real_T,
                 packed_label_elapsed_days_int_T,
             )
-            print("received:", loss, loss_n, params)
-            print("pretrain", pretrain_params)
             loss_tot += loss
             loss_n_tot += loss_n
-            # exit()
 
-        print("Log loss:", loss_tot / loss_n_tot)
+        logloss = loss_tot / loss_n_tot
 
-
-    # return {
-    #     "metrics": {
-    #         "LogLoss": round(logloss, 6)
-    #     },
-    #     "user": int(user_id),
-    #     "size": len(test_y_all),
-    #     "parameters": {
-    #         "0": list(map(lambda x: round(x, 4), best_params.tolist()))
-    #     },
-    # }
+        return {
+            "metrics": {
+                "LogLoss": round(logloss.item(), 6)
+            },
+            "user": int(user_id),
+            "size": loss_n_tot.item(),
+            "parameters": {
+                "0": list(map(lambda x: round(x, 4), best_params.tolist()))
+            },
+        }
 
 
 def worker_job(config, job_queue, writer_queue, progress_queue):
@@ -163,6 +157,6 @@ if __name__ == '__main__':
     config = parse_toml()
 
     env = lmdb.open(config.DB_PATH, readonly=True, lock=False)
-    process(config, 1, env)
+    # process(config, 1, env)
 
-    # main(config)
+    main(config)

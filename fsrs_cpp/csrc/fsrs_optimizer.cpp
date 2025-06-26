@@ -210,14 +210,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
     static std::vector<float> out_buffer, r_grad_buffer, param_grad_buffer, param_grad_buffer_2;
 
     // Ensure that buffer sizes are sufficient
-    for (int key_i = 0; key_i < keys.size(0); key_i++) {
-        const int L = keys_ptr[key_i].L;
-        if ((int)checkpoint_buffer.size() < L) {
-            fsrs_state<float> empty_checkpoint = {};
-            checkpoint_buffer.assign(L, empty_checkpoint);
-            out_buffer.assign(L, 0.0f);
-            r_grad_buffer.assign(L, 0.0f);
-        }
+    if ((int)checkpoint_buffer.size() < T) {
+        fsrs_state<float> empty_checkpoint = {};
+        checkpoint_buffer.assign(T, empty_checkpoint);
+        out_buffer.assign(T, 0.0f);
+        r_grad_buffer.assign(T, 0.0f);
     }
 
     std::vector<float> params = initial_params;

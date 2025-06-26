@@ -174,17 +174,16 @@ def process(user_id, config):
     perm_inv = np.array(perm_inv)
 
     def review_ths_to_packed_query(review_ths):
-        # Sort by card_id, return (start_loc, loc, b)
         rows = df.iloc[review_ths - 1].sort_values('card_id')
         rows["start_loc"] = rows["card_id"].map(card_locs_dict)
         rows["loc"] = perm_inv[rows["review_th"] - 1]
         rows["req_L"] = rows["loc"] - rows["start_loc"]
         rows["batch_loc"] = range(0, len(rows))
 
-        def get_info(group):
-            return group["start_loc"].min(), group["batch_loc"].min(), group["batch_loc"].max(), group["req_L"].max()
-        result = rows.groupby("card_id").apply(lambda group: get_info(group)).tolist()
-        start_locs, ls, rs, Ls = map(list, zip(*result))
+        start_locs = rows.groupby("card_id", sort=False)["start_loc"].min().to_numpy()
+        ls = rows.groupby("card_id", sort=False)["batch_loc"].min().to_numpy()
+        rs = rows.groupby("card_id", sort=False)["batch_loc"].max().to_numpy()
+        Ls = rows.groupby("card_id", sort=False)["req_L"].max().to_numpy()
         locs = torch.tensor(rows["loc"].to_list(), dtype=torch.int)
         keys = torch.stack(tuple(map(lambda x: torch.tensor(x, dtype=torch.int), (start_locs, ls, rs, Ls))), dim=-1)
         return locs, keys
