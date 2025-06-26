@@ -138,10 +138,12 @@ float run_batch(
             packed_label_elapsed_days_real + key.start_loc,
             packed_label_elapsed_days_int + key.start_loc
         );
-        r_grad_buffer.assign(key.L, 0.0f);
+        if constexpr (requires_grad) {
+            r_grad_buffer.assign(key.L, 0.0f);
+        }
         for (int i = key.l; i <= key.r; i++) {
-            int offset = locs_ptr[i] - key.start_loc - 1;
             float target = float(packed_rating[locs_ptr[i]] > 1);
+            int offset = locs_ptr[i] - key.start_loc - 1;
             loss += bce_loss(out_buffer[offset], target);
             if constexpr (requires_grad) {
                 r_grad_buffer[offset] += bce_loss_grad(out_buffer[offset], target);
@@ -231,7 +233,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
     float best_loss = (float)1e9;
     for (int step = 0; step < total_steps; step++) {
         if (step == 0 || epochs_ptr[step] != epochs_ptr[step - 1]) {
-            float eval_loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, train_set_keys.size(0), train_set_keys_ptr, train_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
+            float eval_loss = run_batch<false>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, train_set_keys.size(0), train_set_keys_ptr, train_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
             if (eval_loss < best_loss) {
                 best_loss = eval_loss;
                 best_params = params;
@@ -250,7 +252,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
         locs_offset += locs_lens_ptr[step];
         keys_offset += keys_lens_ptr[step];
     }
-    float eval_loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, train_set_keys.size(0), train_set_keys_ptr, train_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
+    float eval_loss = run_batch<false>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, train_set_keys.size(0), train_set_keys_ptr, train_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
     if (eval_loss < best_loss) {
         best_loss = eval_loss;
         best_params = params;
