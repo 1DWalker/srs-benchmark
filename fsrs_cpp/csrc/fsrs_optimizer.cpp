@@ -36,6 +36,30 @@ const std::vector<float> initial_params = {
     0.1542f,
 };
 
+const std::vector<float> default_params_stddev = {
+    6.43f,
+    9.66f,
+    17.58f,
+    27.85f,
+    0.57f,
+    0.28f,
+    0.6f,
+    0.12f,
+    0.39f,
+    0.18f,
+    0.33f,
+    0.3f,
+    0.09f,
+    0.16f,
+    0.57f,
+    0.25f,
+    1.03f,
+    0.31f,
+    0.32f,
+    0.14f,
+    0.27f,
+};
+
 void clip_params(std::vector<float> &params) {
     const float S_MIN = 0.001f;
     const float INIT_S_MAX = 100.0f;
@@ -186,11 +210,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
     static std::vector<float> out_buffer, r_grad_buffer, param_grad_buffer, param_grad_buffer_2;
 
     // Ensure that buffer sizes are sufficient
-    if ((int)checkpoint_buffer.size() < T) {
-        fsrs_state<float> empty_checkpoint = {};
-        checkpoint_buffer.assign(T, empty_checkpoint);
-        out_buffer.assign(T, 0.0f);
-        r_grad_buffer.assign(T, 0.0f);
+    for (int key_i = 0; key_i < keys.size(0); key_i++) {
+        const int L = keys_ptr[key_i].L;
+        if ((int)checkpoint_buffer.size() < L) {
+            fsrs_state<float> empty_checkpoint = {};
+            checkpoint_buffer.assign(L, empty_checkpoint);
+            out_buffer.assign(L, 0.0f);
+            r_grad_buffer.assign(L, 0.0f);
+        }
     }
 
     std::vector<float> params = initial_params;
@@ -201,7 +228,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
     adam optim(&params);
 
     int total_steps = keys_lens.size(0);
-    std::cout << "total steps:" << total_steps << '\n';
     int locs_offset = 0;
     int keys_offset = 0;
     for (int step = 0; step < total_steps; step++) {
@@ -209,10 +235,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
 
         const float lr = get_lr(step, total_steps);
         param_grad_buffer.assign((int)initial_params.size(), 0.0f); // zero_grad
-        std::cout << "begin step " << step << " " << lr << '\n';
         float loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, keys_lens_ptr[step], keys_ptr + keys_offset, locs_ptr + locs_offset, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
-        optim.step(param_grad_buffer, get_lr(step, total_steps));
         // TODO regularization
+        for (int i = 0; i < (int)params.size(); i++) {
+            param_grad_buffer[i] += 2.0f * (params[i] - initial_params[i]) / (default_params_stddev[i] * default_params_stddev[i]) * locs_lens_ptr[step] / train_set_locs.size(0);
+        }
+
+        optim.step(param_grad_buffer, get_lr(step, total_steps));
 
         // std::cout << step << ' ' << loss << '\n';
         // for (int i = 0; i < (int)param_grad_buffer.size(); i++) {
@@ -225,21 +254,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
         locs_offset += locs_lens_ptr[step];
         keys_offset += keys_lens_ptr[step];
     }
-    // for (int step = 0; step < total_steps; step++) {
-    //     const float lr = get_lr(step, total_steps);
-    //     param_grad_buffer.assign((int)initial_params.size(), 0.0f); // zero_grad
-    //     float loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, test_set_keys.size(0), test_set_keys_ptr, test_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
-    //     std::cout << "step " << step << " lr: " << lr << " loss: " << loss / test_set_locs.size(0) << '\n';
-    //     optim.step(param_grad_buffer, get_lr(step, total_steps));
-    //     clip_params(params);
-    // }
-    std::cout << "done\n";
-    for (int i = 0; i < 21; i++) {
-        std::cout << params[i] << ' ';
-    }
-    std::cout << '\n';
     float test_loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, test_set_keys.size(0), test_set_keys_ptr, test_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
-    std::cout << "test loss: " << test_loss << '\n';
     at::Tensor test_loss_tensor = at::tensor(test_loss);
     at::Tensor test_loss_n_tensor = at::tensor(test_set_locs.size(0));
     at::Tensor params_tensor = at::tensor(params);
