@@ -42,13 +42,13 @@ class MinimalBatchLoader:
 class SplitInfo:
     pretrain_params: torch.Tensor
     epochs: torch.Tensor
-    review_ths: torch.Tensor
+    review_ths_all: list
     batch_lens: torch.Tensor
     lrs: torch.Tensor
     train_set_review_ths: torch.Tensor
     test_set_review_ths: torch.Tensor
 
-def get_fsrs_training_info(df):
+def get_fsrs_training_info(df) -> SplitInfo:
     fsrs_config = {
         "use_secs_intervals": False,
         "equalize_test_with_non_secs": False,
@@ -104,14 +104,14 @@ def get_fsrs_training_info(df):
                 df_slice = train_set.iloc[batch_l:batch_r]
                 review_ths = df_slice["review_th"]
                 epochs.append(epoch)
-                review_ths_all.extend(review_ths.to_numpy())
+                review_ths_all.append(review_ths.to_numpy())
                 batch_lens.append(len(review_ths))
                 scheduler.step()
 
         split_infos.append(SplitInfo(
             pretrain_params=pretrain_params,
             epochs=torch.tensor(epochs, dtype=torch.int),
-            review_ths= torch.tensor(review_ths_all, dtype=torch.int),
+            review_ths_all=review_ths_all,
             batch_lens=torch.tensor(batch_lens, dtype=torch.int),
             lrs=torch.tensor(lrs, dtype=torch.float),
             train_set_review_ths=torch.tensor(train_set["review_th"].to_numpy(), dtype=torch.int),
@@ -120,6 +120,18 @@ def get_fsrs_training_info(df):
     
     return split_infos
 
+@dataclass
+class PackedSplitInfo:
+    pretrain_params: torch.Tensor
+    epochs: torch.Tensor
+    locs: torch.Tensor
+    locs_lens: torch.Tensor
+    keys: torch.Tensor
+    keys_lens: torch.Tensor
+    train_set_locs: torch.Tensor
+    train_set_keys: torch.Tensor
+    test_set_locs: torch.Tensor
+    test_set_keys: torch.Tensor
 
 def process(user_id, config):
     df = pd.read_parquet(
@@ -133,13 +145,13 @@ def process(user_id, config):
     df.reset_index(inplace=True, drop=True)
     assert len_before == len(df), f"{user_id} has invalid ratings, review_th might be incorrect"
 
-    equalize_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
-    with equalize_env.begin(write=False) as txn:
-        equalize_review_ths = load_tensor(txn, f"{user_id}_review_ths", device="cpu")
-        # rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device="cpu")
-    equalize_review_ths_set = set(equalize_review_ths.tolist())
+    # equalize_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
+    # with equalize_env.begin(write=False) as txn:
+    #     equalize_review_ths = load_tensor(txn, f"{user_id}_review_ths", device="cpu")
+    #     # rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device="cpu")
+    # equalize_review_ths_set = set(equalize_review_ths.tolist())
 
-    df["is_equalize_review"] = df["review_th"].isin(equalize_review_ths_set).astype(int)
+    # df["is_equalize_review"] = df["review_th"].isin(equalize_review_ths_set).astype(int)
     df["elapsed_days_real"] = df["elapsed_seconds"].map(lambda x: max(0, x)) / 86400
     df["elapsed_days_int"] = df["elapsed_days"].map(lambda x: max(0, x))
     df["label_elapsed_days_real"] = df.groupby("card_id")["elapsed_days_real"].shift(-1).fillna(0)
@@ -154,15 +166,59 @@ def process(user_id, config):
         card_locs_dict[card_id] = len(perm)
         for review_th in card_locs[card_id]:
             perm.append(review_th - 1)
+    perm = np.array(perm)
 
     perm_inv = [-1 for _ in range(len(perm))]
     for i in range(len(perm)):
         perm_inv[perm[i]] = i
+    perm_inv = np.array(perm_inv)
 
+    def review_ths_to_packed_query(review_ths):
+        # Sort by card_id, return (start_loc, loc, b)
+        rows = df.iloc[review_ths - 1].sort_values('card_id')
+        rows["start_loc"] = rows["card_id"].map(card_locs_dict)
+        rows["loc"] = perm_inv[rows["review_th"] - 1]
+        rows["req_L"] = rows["loc"] - rows["start_loc"]
+        rows["batch_loc"] = range(0, len(rows))
+
+        def get_info(group):
+            return group["start_loc"].min(), group["batch_loc"].min(), group["batch_loc"].max(), group["req_L"].max()
+        result = rows.groupby("card_id").apply(lambda group: get_info(group)).tolist()
+        start_locs, ls, rs, Ls = map(list, zip(*result))
+        locs = torch.tensor(rows["loc"].to_list(), dtype=torch.int)
+        keys = torch.stack(tuple(map(lambda x: torch.tensor(x, dtype=torch.int), (start_locs, ls, rs, Ls))), dim=-1)
+        return locs, keys
+
+    packed_split_infos = []
     with torch.no_grad():
-        perm_T_tensor = torch.tensor(perm, dtype=torch.int)
-        perm_inv_T_tensor = torch.tensor(perm_inv, dtype=torch.int)
-        card_locs_T = torch.tensor(df["card_id"].map(card_locs_dict), dtype=torch.int)
+        for split_info in split_infos:
+            locs_all = []
+            keys_all = []
+            locs_lens = []
+            keys_lens = []
+            for review_ths in split_info.review_ths_all:
+                locs, keys = review_ths_to_packed_query(review_ths)
+                locs_all.append(locs)
+                keys_all.append(keys)
+                locs_lens.append(locs.size(0))
+                keys_lens.append(keys.size(0))
+
+            train_set_locs, train_set_keys = review_ths_to_packed_query(split_info.train_set_review_ths)
+            test_set_locs, test_set_keys = review_ths_to_packed_query(split_info.test_set_review_ths)
+
+            packed_split_infos.append(PackedSplitInfo(
+                pretrain_params=split_info.pretrain_params,
+                epochs=split_info.epochs,
+                locs=torch.cat(locs_all),
+                locs_lens=torch.tensor(locs_lens, dtype=torch.int),
+                keys=torch.cat(keys_all),
+                keys_lens=torch.tensor(keys_lens, dtype=torch.int),
+                train_set_locs=train_set_locs,
+                train_set_keys=train_set_keys,
+                test_set_locs=test_set_locs,
+                test_set_keys=test_set_keys,
+            ))
+
         packed_review_th_T = torch.tensor(df["review_th"], dtype=torch.int)[perm]
         packed_rating_T = torch.tensor(df["rating"], dtype=torch.int)[perm]
         packed_elapsed_days_real_T = torch.tensor(df["elapsed_days_real"], dtype=config.DTYPE)[perm]
@@ -170,7 +226,7 @@ def process(user_id, config):
         packed_label_elapsed_days_real_T = torch.tensor(df["label_elapsed_days_real"], dtype=config.DTYPE)[perm]
         packed_label_elapsed_days_int_T = torch.tensor(df["label_elapsed_days_int"], dtype=config.DTYPE)[perm]
 
-    return split_infos, packed_review_th_T, packed_rating_T, packed_elapsed_days_real_T, packed_elapsed_days_int_T, packed_label_elapsed_days_real_T, packed_label_elapsed_days_int_T, perm_T_tensor, perm_inv_T_tensor, card_locs_T
+    return packed_split_infos, packed_review_th_T, packed_rating_T, packed_elapsed_days_real_T, packed_elapsed_days_int_T, packed_label_elapsed_days_real_T, packed_label_elapsed_days_int_T
 
 def job(user_id, config, writer_queue, progress_queue):
     writer_queue.put((user_id, process(user_id, config)))
@@ -187,37 +243,33 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
 
         with env.begin(write=True) as txn:
             (
-                split_infos,
+                packed_split_infos,
                 packed_review_th_T,
                 packed_rating_T,
                 packed_elapsed_days_real_T,
                 packed_elapsed_days_int_T,
                 packed_label_elapsed_days_real_T,
                 packed_label_elapsed_days_int_T,
-                perm_T_tensor,
-                perm_inv_T_tensor,
-                card_locs_T,
             ) = tensors
-            assert len(split_infos) == 5
-            for split_i, split_info in enumerate(split_infos):
-                save_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", split_info.pretrain_params)   
-                save_tensor(txn, f"{user_id}_split_{split_i}_epochs", split_info.epochs)   
-                save_tensor(txn, f"{user_id}_split_{split_i}_review_ths", split_info.review_ths)   
-                save_tensor(txn, f"{user_id}_split_{split_i}_batch_lens", split_info.batch_lens)   
-                save_tensor(txn, f"{user_id}_split_{split_i}_lrs", split_info.lrs)   
-                save_tensor(txn, f"{user_id}_split_{split_i}_train_set_review_ths", split_info.train_set_review_ths)   
-                save_tensor(txn, f"{user_id}_split_{split_i}_test_set_review_ths", split_info.test_set_review_ths)   
+            assert len(packed_split_infos) == 5
+            for split_i, packed_split_info in enumerate(packed_split_infos):
+                save_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", packed_split_info.pretrain_params)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_epochs", packed_split_info.epochs)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_locs", packed_split_info.locs)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_locs_lens", packed_split_info.locs_lens)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_keys", packed_split_info.keys)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_keys_lens", packed_split_info.keys_lens)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_train_set_locs", packed_split_info.train_set_locs)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_train_set_keys", packed_split_info.train_set_keys)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_test_set_locs", packed_split_info.test_set_locs)   
+                save_tensor(txn, f"{user_id}_split_{split_i}_test_set_keys", packed_split_info.test_set_keys)   
             save_tensor(txn, f"{user_id}_packed_review_th_T", packed_review_th_T)
             save_tensor(txn, f"{user_id}_packed_rating_T", packed_rating_T)
             save_tensor(txn, f"{user_id}_packed_elapsed_days_real_T", packed_elapsed_days_real_T)
             save_tensor(txn, f"{user_id}_packed_elapsed_days_int_T", packed_elapsed_days_int_T)
             save_tensor(txn, f"{user_id}_packed_label_elapsed_days_real_T", packed_label_elapsed_days_real_T)
             save_tensor(txn, f"{user_id}_packed_label_elapsed_days_int_T", packed_label_elapsed_days_int_T)
-            save_tensor(txn, f"{user_id}_perm_T_tensor", perm_T_tensor)
-            save_tensor(txn, f"{user_id}_perm_inv_T_tensor", perm_inv_T_tensor)
-            save_tensor(txn, f"{user_id}_card_locs_T", card_locs_T)
             txn.put(f"{user_id}_done".encode(), "true".encode())
-            print("Done", user_id, packed_rating_T.shape)
 
 def progress_tracker(total_items, progress_queue):
     with tqdm(total=total_items, desc="Generating Data") as pbar:
