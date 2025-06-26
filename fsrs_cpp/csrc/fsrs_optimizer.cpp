@@ -117,7 +117,7 @@ float run_batch(
         r_grad_buffer.assign(key.L, 0.0f);
         for (int i = key.l; i <= key.r; i++) {
             int offset = locs_ptr[i] - key.start_loc - 1;
-            float target = float(packed_rating[offset] > 1);
+            float target = float(packed_rating[locs_ptr[i]] > 1);
             loss += bce_loss(out_buffer[offset], target);
             if constexpr (requires_grad) {
                 r_grad_buffer[offset] += bce_loss_grad(out_buffer[offset], target);
@@ -225,6 +225,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
         locs_offset += locs_lens_ptr[step];
         keys_offset += keys_lens_ptr[step];
     }
+    // for (int step = 0; step < total_steps; step++) {
+    //     const float lr = get_lr(step, total_steps);
+    //     param_grad_buffer.assign((int)initial_params.size(), 0.0f); // zero_grad
+    //     float loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, test_set_keys.size(0), test_set_keys_ptr, test_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
+    //     std::cout << "step " << step << " lr: " << lr << " loss: " << loss / test_set_locs.size(0) << '\n';
+    //     optim.step(param_grad_buffer, get_lr(step, total_steps));
+    //     clip_params(params);
+    // }
     std::cout << "done\n";
     for (int i = 0; i < 21; i++) {
         std::cout << params[i] << ' ';
