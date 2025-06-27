@@ -4,7 +4,7 @@ import queue
 import time
 import lmdb
 import numpy as np
-from sklearn.metrics import log_loss
+from sklearn.metrics import log_loss, roc_auc_score, root_mean_squared_error
 import torch
 from tqdm import tqdm
 from fsrs_cpp import _FSRS_CPP
@@ -21,9 +21,12 @@ def process(config, user_id, env):
         packed_elapsed_days_int_T = load_tensor(txn, f"{user_id}_packed_elapsed_days_int_T", device)
         packed_label_elapsed_days_real_T = load_tensor(txn, f"{user_id}_packed_label_elapsed_days_real_T", device)
         packed_label_elapsed_days_int_T = load_tensor(txn, f"{user_id}_packed_label_elapsed_days_int_T", device)
+        all_test_set_rmse_bin_ind = load_tensor(txn, f"{user_id}_all_test_set_rmse_bin_ind", device)
 
         loss_tot = 0
         loss_n_tot = 0
+        y_all = []
+        y_pred_all = []
         for split_i in range(5):
             pretrain_params = load_tensor(txn, f"{user_id}_split_{split_i}_pretrain_params", device)
             epochs = load_tensor(txn, f"{user_id}_split_{split_i}_epochs", device)
@@ -37,7 +40,7 @@ def process(config, user_id, env):
             test_set_locs = load_tensor(txn, f"{user_id}_split_{split_i}_test_set_locs", device)   
             test_set_keys = load_tensor(txn, f"{user_id}_split_{split_i}_test_set_keys", device)   
 
-            loss, loss_n, best_params = torch.ops.fsrs.fsrs_optimizer(
+            loss, loss_n, best_params, y, y_pred = torch.ops.fsrs.fsrs_optimizer(
                 pretrain_params,
                 epochs,
                 train_ords,
@@ -58,12 +61,27 @@ def process(config, user_id, env):
             )
             loss_tot += loss
             loss_n_tot += loss_n
+            y_all.append(y)
+            y_pred_all.append(y_pred)
 
-        logloss = loss_tot / loss_n_tot
+        test_y = torch.cat(y_all)
+        test_y_pred = torch.cat(y_pred_all)
+        test_y_np = test_y.numpy()
+        test_y_pred_np = test_y_pred.numpy()
+        logloss = loss_tot.item() / loss_n_tot.item()
+        rmse_raw = root_mean_squared_error(y_true=test_y_np, y_pred=test_y_pred_np)
+        rmse_bins = torch.ops.fsrs.compute_rmse_bins(test_y, test_y_pred, all_test_set_rmse_bin_ind)
+        try:
+            auc = round(roc_auc_score(y_true=test_y_np, y_score=test_y_pred_np), 6)
+        except Exception:
+            auc = None
 
         return {
             "metrics": {
-                "LogLoss": round(logloss.item(), 6)
+                "RMSE": round(rmse_raw, 6),
+                "LogLoss": round(logloss, 6),
+                "RMSE(bins)": round(rmse_bins.item(), 6),
+                "AUC": auc,
             },
             "user": int(user_id),
             "size": loss_n_tot.item(),
@@ -159,6 +177,6 @@ if __name__ == '__main__':
     config = parse_toml()
 
     env = lmdb.open(config.DB_PATH, readonly=True, lock=False)
-    # process(config, 1, env)
+    # process(config, 2, env)
 
     main(config)

@@ -106,11 +106,13 @@ struct key_t {
     int L;
 };
 
-template <bool requires_grad>
+template <bool requires_grad, bool store_out>
 float run_batch(
     std::vector<float> &param_grad_buffer,
     std::vector<float> &param_grad_buffer_2,
-    std::vector<float> &out_buffer,
+    std::vector<float> &out_card_buffer,
+    std::vector<float> &y_buffer,
+    std::vector<float> &y_pred_buffer,
     std::vector<float> &r_grad_buffer,
     std::vector<checkpoint_t<float>> &checkpoint_buffer,
     const std::vector<float> &params,
@@ -127,12 +129,13 @@ float run_batch(
 ) {
     // Both forward and backward passes are performed one by one for better cache locality
     float loss = 0;
+    int y_buffer_offset = 0;
     for (int key_i = 0; key_i < num_keys; key_i++) {
         key_t key = keys_ptr[key_i];
         fsrs6_forward<float, requires_grad>(
             key.L,
             params.data(),
-            out_buffer.data(),
+            out_card_buffer.data(),
             checkpoint_buffer.data(),
             packed_rating + key.start_loc,
             packed_elapsed_days_real + key.start_loc,
@@ -146,11 +149,16 @@ float run_batch(
         for (int i = key.l; i <= key.r; i++) {
             const float target = float(packed_rating[locs_ptr[i]] > 1);
             const int offset = locs_ptr[i] - key.start_loc - 1;
-            loss += bce_loss(out_buffer[offset], target);
+            loss += bce_loss(out_card_buffer[offset], target);
+            if constexpr (store_out) {
+                y_pred_buffer[y_buffer_offset] = out_card_buffer[offset];
+                y_buffer[y_buffer_offset] = float(packed_rating[locs_ptr[i]] > 1);
+                y_buffer_offset += 1;
+            }
             if constexpr (requires_grad) {
                 const int train_ord = train_ords_ptr[i];
                 const float recency_weight = 0.25 + 0.75 * (float) pow((float) train_ord / train_size, 3);
-                r_grad_buffer[offset] += recency_weight * bce_loss_grad(out_buffer[offset], target);
+                r_grad_buffer[offset] += recency_weight * bce_loss_grad(out_card_buffer[offset], target);
             }
         }
 
@@ -176,7 +184,7 @@ float run_batch(
     return loss;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
     const at::Tensor& pretrain_params,
     const at::Tensor& epochs,
     const at::Tensor& train_ords,
@@ -215,13 +223,15 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
     const float* packed_label_elapsed_days_int_T_ptr = packed_label_elapsed_days_int_T.data_ptr<float>();
 
     static std::vector<checkpoint_t<float>> checkpoint_buffer;
-    static std::vector<float> out_buffer, r_grad_buffer, param_grad_buffer, param_grad_buffer_2;
+    static std::vector<float> y_pred_buffer, y_buffer, out_card_buffer, r_grad_buffer, param_grad_buffer, param_grad_buffer_2;
 
     // Ensure that buffer sizes are sufficient
     if ((int)checkpoint_buffer.size() < T) {
         checkpoint_t<float> empty_checkpoint = {};
         checkpoint_buffer.assign(T, empty_checkpoint);
-        out_buffer.assign(T, 0.0f);
+        out_card_buffer.assign(T, 0.0f);
+        y_pred_buffer.assign(T, 0.0f);
+        y_buffer.assign(T, 0.0f);
         r_grad_buffer.assign(T, 0.0f);
     }
 
@@ -233,14 +243,15 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
     adam optim(&params);
 
     const int train_size = train_set_locs.size(0);
-    int total_steps = keys_lens.size(0);
+    const int test_size = test_set_locs.size(0);
+    const int total_steps = keys_lens.size(0);
     int locs_offset = 0;
     int keys_offset = 0;
     auto best_params = params;
     float best_loss = (float)1e9;
     for (int step = 0; step < total_steps; step++) {
         if (step == 0 || epochs_ptr[step] != epochs_ptr[step - 1]) {
-            float eval_loss = run_batch<false>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, train_set_keys.size(0), train_set_keys_ptr, -1, nullptr, train_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
+            float eval_loss = run_batch<false, false>(param_grad_buffer, param_grad_buffer_2, out_card_buffer, y_buffer, y_pred_buffer, r_grad_buffer, checkpoint_buffer, params, train_set_keys.size(0), train_set_keys_ptr, -1, nullptr, train_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
             if (eval_loss < best_loss) {
                 best_loss = eval_loss;
                 best_params = params;
@@ -249,9 +260,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
 
         const float lr = get_lr(step, total_steps);
         param_grad_buffer.assign((int)initial_params.size(), 0.0f); // zero_grad
-        float loss = run_batch<true>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, keys_lens_ptr[step], keys_ptr + keys_offset, train_size, train_ords_ptr + locs_offset, locs_ptr + locs_offset, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
+        float loss = run_batch<true, false>(param_grad_buffer, param_grad_buffer_2, out_card_buffer, y_buffer, y_pred_buffer, r_grad_buffer, checkpoint_buffer, params, keys_lens_ptr[step], keys_ptr + keys_offset, train_size, train_ords_ptr + locs_offset, locs_ptr + locs_offset, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
         for (int i = 0; i < (int)params.size(); i++) {
-            param_grad_buffer[i] += 2.0f * (params[i] - initial_params[i]) / (default_params_stddev[i] * default_params_stddev[i]) * locs_lens_ptr[step] / train_set_locs.size(0);
+            param_grad_buffer[i] += 2.0f * (params[i] - initial_params[i]) / (default_params_stddev[i] * default_params_stddev[i]) * locs_lens_ptr[step] / train_size;
         }
         optim.step(param_grad_buffer, get_lr(step, total_steps));
         clip_params(params);
@@ -259,21 +270,58 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fsrs_optimizer(
         locs_offset += locs_lens_ptr[step];
         keys_offset += keys_lens_ptr[step];
     }
-    float eval_loss = run_batch<false>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, params, train_set_keys.size(0), train_set_keys_ptr, -1, nullptr, train_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
+    float eval_loss = run_batch<false, false>(param_grad_buffer, param_grad_buffer_2, out_card_buffer, y_buffer, y_pred_buffer, r_grad_buffer, checkpoint_buffer, params, train_set_keys.size(0), train_set_keys_ptr, -1, nullptr, train_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
     if (eval_loss < best_loss) {
         best_loss = eval_loss;
         best_params = params;
     }
 
-    float test_loss = run_batch<false>(param_grad_buffer, param_grad_buffer_2, out_buffer, r_grad_buffer, checkpoint_buffer, best_params, test_set_keys.size(0), test_set_keys_ptr, -1, nullptr, test_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
+    float test_loss = run_batch<false, true>(param_grad_buffer, param_grad_buffer_2, out_card_buffer, y_buffer, y_pred_buffer, r_grad_buffer, checkpoint_buffer, best_params, test_set_keys.size(0), test_set_keys_ptr, -1, nullptr, test_set_locs_ptr, packed_rating_T_ptr, packed_elapsed_days_real_T_ptr, packed_elapsed_days_int_T_ptr, packed_label_elapsed_days_real_T_ptr, packed_label_elapsed_days_int_T_ptr);
     at::Tensor test_loss_tensor = at::tensor(test_loss);
-    at::Tensor test_loss_n_tensor = at::tensor(test_set_locs.size(0));
+    at::Tensor test_loss_n_tensor = at::tensor(test_size);
     at::Tensor best_params_tensor = at::tensor(best_params);
-    return {test_loss_tensor, test_loss_n_tensor, best_params_tensor};
+    at::Tensor y_tensor = at::from_blob(y_buffer.data(), {test_size}, torch::kFloat).clone();
+    at::Tensor y_pred_tensor = at::from_blob(y_pred_buffer.data(), {test_size}, torch::kFloat).clone();
+    return {test_loss_tensor, test_loss_n_tensor, best_params_tensor, y_tensor, y_pred_tensor};
+}
+
+at::Tensor compute_rmse_bins(
+    at::Tensor y,
+    at::Tensor y_pred,
+    at::Tensor rmse_bin_ind
+) {
+    const int L = y.size(0);
+    const float* y_ptr = y.data_ptr<float>();
+    const float* y_pred_ptr = y_pred.data_ptr<float>();
+    const int* rmse_bin_ind_ptr = rmse_bin_ind.data_ptr<int>();
+    static std::vector<float> rmse_bin_tot_buffer;
+    static std::vector<int> rmse_bin_n_buffer;
+    if ((int)rmse_bin_tot_buffer.size() < L) {
+        rmse_bin_tot_buffer.assign(L, 0.0f);
+        rmse_bin_n_buffer.assign(L, 0);
+    }
+    // Compute RMSE (bins)
+    for (int i = 0; i < L; i++) {
+        rmse_bin_tot_buffer[rmse_bin_ind_ptr[i]] += y_ptr[i] - y_pred_ptr[i];
+        rmse_bin_n_buffer[rmse_bin_ind_ptr[i]] += 1;
+    }
+    float rmse_bins_tot = 0;
+    for (int i = 0; i < L; i++) {
+        int &cnt = rmse_bin_n_buffer[rmse_bin_ind_ptr[i]];
+        if (cnt > 0) {
+            float &diff = rmse_bin_tot_buffer[rmse_bin_ind_ptr[i]];
+            rmse_bins_tot += diff * diff / cnt;
+            cnt = 0;
+            diff = 0;
+        }
+    }
+    float rmse_bins = sqrt(rmse_bins_tot / L);
+    return at::tensor(rmse_bins);
 }
 
 namespace fsrs {
     TORCH_LIBRARY_IMPL(fsrs, CPU, m) {
         m.impl("fsrs_optimizer", &fsrs_optimizer);
+        m.impl("compute_rmse_bins", &compute_rmse_bins);
     }
 }

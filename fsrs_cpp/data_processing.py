@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 from features import create_features
 from models.model_factory import create_model
-from utils import load_tensor, parse_toml, save_tensor
+from utils import get_bin, load_tensor, parse_toml, save_tensor
 try:
     from fsrs_optimizer import BatchDataset, BatchLoader, plot_brier, Optimizer  # type: ignore
 except Exception as e:
@@ -49,7 +49,7 @@ class SplitInfo:
     train_set_review_ths: torch.Tensor
     test_set_review_ths: torch.Tensor
 
-def get_fsrs_training_info(df) -> SplitInfo:
+def get_fsrs_training_info(df):
     fsrs_config = {
         "use_secs_intervals": False,
         "equalize_test_with_non_secs": False,
@@ -70,6 +70,15 @@ def get_fsrs_training_info(df) -> SplitInfo:
     fsrs_config = Namespace(**fsrs_config)
     df = create_features(df, config=fsrs_config)
     tscv = TimeSeriesSplit(n_splits=fsrs_config.n_splits)
+
+    # rmse bins
+    df["rmse_bin"] = df.apply(get_bin, axis=1)
+    bins_set = set(df["rmse_bin"])
+    bins_ind = {}
+    for i, x in enumerate(bins_set):
+        bins_ind[x] = i
+    df["rmse_bin_index"] = df["rmse_bin"].map(bins_ind)
+    review_th_to_rmse_bin = df.set_index("review_th")["rmse_bin_index"].to_dict()
 
     split_infos = []
     for split_i, (train_index, test_index) in enumerate(tscv.split(df)):
@@ -124,7 +133,7 @@ def get_fsrs_training_info(df) -> SplitInfo:
             test_set_review_ths=torch.tensor(test_set["review_th"].to_numpy(), dtype=torch.int),
         ))
     
-    return split_infos
+    return review_th_to_rmse_bin, split_infos
 
 @dataclass
 class PackedSplitInfo:
@@ -144,7 +153,7 @@ def process(user_id, config):
     df = pd.read_parquet(
         config.DATA_PATH / "revlogs", filters=[("user_id", "=", user_id)]
     )
-    split_infos = get_fsrs_training_info(df.copy())
+    review_th_to_rmse_bin, split_infos = get_fsrs_training_info(df.copy())
 
     df["review_th"] = range(1, df.shape[0] + 1)
     len_before = len(df)
@@ -152,17 +161,11 @@ def process(user_id, config):
     df.reset_index(inplace=True, drop=True)
     assert len_before == len(df), f"{user_id} has invalid ratings, review_th might be incorrect"
 
-    # equalize_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
-    # with equalize_env.begin(write=False) as txn:
-    #     equalize_review_ths = load_tensor(txn, f"{user_id}_review_ths", device="cpu")
-    #     # rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device="cpu")
-    # equalize_review_ths_set = set(equalize_review_ths.tolist())
-
-    # df["is_equalize_review"] = df["review_th"].isin(equalize_review_ths_set).astype(int)
     df["elapsed_days_real"] = df["elapsed_seconds"].map(lambda x: max(0, x)) / 86400
     df["elapsed_days_int"] = df["elapsed_days"].map(lambda x: max(0, x))
     df["label_elapsed_days_real"] = df.groupby("card_id")["elapsed_days_real"].shift(-1).fillna(0)
     df["label_elapsed_days_int"] = df.groupby("card_id")["elapsed_days_int"].shift(-1).fillna(0)
+    df["rmse_bin_ind"] = df["review_th"].map(review_th_to_rmse_bin).fillna(-1)
 
     card_locs = df.groupby("card_id")["review_th"].apply(list).to_dict()
     ordered_card_ids = sorted(card_locs, key=lambda k: len(card_locs[k]), reverse=True)
@@ -195,15 +198,17 @@ def process(user_id, config):
         rs = rows.groupby("card_id", sort=False)["batch_loc"].max().to_numpy()
         Ls = rows.groupby("card_id", sort=False)["req_L"].max().to_numpy()
         locs = torch.tensor(rows["loc"].to_numpy(), dtype=torch.int)
+        query_review_ths = torch.tensor(rows["review_th"].to_numpy(), dtype=torch.int)
         keys = torch.stack(tuple(map(lambda x: torch.tensor(x, dtype=torch.int), (start_locs, ls, rs, Ls))), dim=-1)
         if train_ords is not None:
             query_train_ords = torch.tensor(rows["train_ord"].to_numpy(), dtype=torch.int)
-            return locs, query_train_ords, keys
+            return locs, query_review_ths, query_train_ords, keys
         else:
-            return locs, keys
+            return locs, query_review_ths, keys
 
     packed_split_infos = []
     with torch.no_grad():
+        test_set_review_ths_list = []
         for split_info in split_infos:
             locs_all = []
             train_ords_all = []
@@ -211,15 +216,16 @@ def process(user_id, config):
             locs_lens = []
             keys_lens = []
             for review_ths, train_ords in zip(split_info.review_ths_all, split_info.train_ords_all):
-                locs, query_train_ords, keys = review_ths_to_packed_query(review_ths, train_ords)
+                locs, _, query_train_ords, keys = review_ths_to_packed_query(review_ths, train_ords)
                 locs_all.append(locs)
                 train_ords_all.append(query_train_ords)
                 keys_all.append(keys)
                 locs_lens.append(locs.size(0))
                 keys_lens.append(keys.size(0))
 
-            train_set_locs, train_set_keys = review_ths_to_packed_query(split_info.train_set_review_ths)
-            test_set_locs, test_set_keys = review_ths_to_packed_query(split_info.test_set_review_ths)
+            train_set_locs, _, train_set_keys = review_ths_to_packed_query(split_info.train_set_review_ths)
+            test_set_locs, test_set_review_ths, test_set_keys = review_ths_to_packed_query(split_info.test_set_review_ths)
+            test_set_review_ths_list.extend(test_set_review_ths)
 
             packed_split_infos.append(PackedSplitInfo(
                 pretrain_params=split_info.pretrain_params,
@@ -241,8 +247,9 @@ def process(user_id, config):
         packed_elapsed_days_int_T = torch.tensor(df["elapsed_days_int"], dtype=config.DTYPE)[perm]
         packed_label_elapsed_days_real_T = torch.tensor(df["label_elapsed_days_real"], dtype=config.DTYPE)[perm]
         packed_label_elapsed_days_int_T = torch.tensor(df["label_elapsed_days_int"], dtype=config.DTYPE)[perm]
+        all_test_set_rmse_bin_ind = torch.tensor(df.iloc[np.array(test_set_review_ths_list) - 1]["rmse_bin_ind"].to_numpy(), dtype=torch.int)
 
-    return packed_split_infos, packed_review_th_T, packed_rating_T, packed_elapsed_days_real_T, packed_elapsed_days_int_T, packed_label_elapsed_days_real_T, packed_label_elapsed_days_int_T
+    return packed_split_infos, packed_review_th_T, packed_rating_T, packed_elapsed_days_real_T, packed_elapsed_days_int_T, packed_label_elapsed_days_real_T, packed_label_elapsed_days_int_T, all_test_set_rmse_bin_ind
 
 def job(user_id, config, writer_queue, progress_queue):
     writer_queue.put((user_id, process(user_id, config)))
@@ -266,6 +273,7 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
                 packed_elapsed_days_int_T,
                 packed_label_elapsed_days_real_T,
                 packed_label_elapsed_days_int_T,
+                all_test_set_rmse_bin_ind,
             ) = tensors
             assert len(packed_split_infos) == 5
             for split_i, packed_split_info in enumerate(packed_split_infos):
@@ -286,6 +294,7 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
             save_tensor(txn, f"{user_id}_packed_elapsed_days_int_T", packed_elapsed_days_int_T)
             save_tensor(txn, f"{user_id}_packed_label_elapsed_days_real_T", packed_label_elapsed_days_real_T)
             save_tensor(txn, f"{user_id}_packed_label_elapsed_days_int_T", packed_label_elapsed_days_int_T)
+            save_tensor(txn, f"{user_id}_all_test_set_rmse_bin_ind", all_test_set_rmse_bin_ind)
             txn.put(f"{user_id}_done".encode(), "true".encode())
 
 def progress_tracker(total_items, progress_queue):
