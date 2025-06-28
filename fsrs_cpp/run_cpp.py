@@ -142,7 +142,7 @@ def main(config):
     print("Unprocessed users length:", len(unprocessed_users))
 
     job_queue = mp.Queue()
-    for user_id in users:
+    for user_id in unprocessed_users:
         job_queue.put(user_id)
 
     with mp.Manager() as manager:

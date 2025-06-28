@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 from features import create_features
 from models.model_factory import create_model
-from utils import get_bin, load_tensor, parse_toml, save_tensor
+from utils import get_bin, load_tensor, parse_toml, print_lmdb_storage, save_tensor
 try:
     from fsrs_optimizer import BatchDataset, BatchLoader, plot_brier, Optimizer  # type: ignore
 except Exception as e:
@@ -256,7 +256,6 @@ def job(user_id, config, writer_queue, progress_queue):
     progress_queue.put(1)
 
 def save_job(lmdb_path, lmdb_size, writer_queue):
-    print(f"lmdb size: {lmdb_size}")
     env = lmdb.open(lmdb_path, lmdb_size)
     while True:
         sample = writer_queue.get()
@@ -319,7 +318,7 @@ def main(config):
             else:
                 unprocessed_users.append(user_id)
     env.close()
-    print("unprocessed:", unprocessed_users)
+    print("unprocessed length:", len(unprocessed_users))
 
     with multiprocessing.Manager() as manager:
         writer_queue = manager.Queue()
@@ -348,6 +347,9 @@ def main(config):
         progress_process.terminate()
 
 if __name__ == '__main__':
+
     config = parse_toml()
+    # print_lmdb_storage(config.DB_PATH)
+    # exit()
     # process(1, config)
     main(config)
