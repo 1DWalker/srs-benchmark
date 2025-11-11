@@ -1,4 +1,3 @@
-import ebisu  # type: ignore
 
 
 class Ebisu:
