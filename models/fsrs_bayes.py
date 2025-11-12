@@ -63,7 +63,7 @@ class FSRS6Bayes(FSRS6):
         1.8729, 0.5425, 0.0912, 0.0658, 0.1542,
         0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001,
         1.8722, 0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014,
-        1.8729, 0.5425, 0.0912, 0.0658, 0.2042,
+        1.8729, 0.5425, 0.0912, 0.0658, 0.1542,
     ], dtype=torch.float32)
 
     param_stddev = torch.tensor([
@@ -80,20 +80,19 @@ class FSRS6Bayes(FSRS6):
         if w is None:
             w = self.init_w.clone()
 
-        self.w = nn.Parameter(w.to(self.config.device))  # 42 params
+        self.ws = nn.Parameter(torch.tensor(w).to(self.config.device))  # 42 params
 
-        if init_belief is None:
-            init_belief = [0.0, 0.0]
-        self.belief_logits = nn.Parameter(torch.tensor(init_belief, dtype=torch.float32))
+        # if init_belief is None:
+        #     init_belief = [0.0, 0.0]
+        # self.belief_logits = nn.Parameter(torch.tensor(init_belief, dtype=torch.float32))
 
-        self.log_likelihood = torch.zeros(2, dtype=torch.float32)
-        self.initial_w = self.w.clone().detach()
+        self.initial_w = self.ws.clone().detach()
         self.clipper = FSRS6BayesParameterClipper(config)
 
 
     def split(self):
-        w1 = self.w[:21]
-        w2 = self.w[21:]
+        w1 = self.ws[:21]
+        w2 = self.ws[21:]
         return w1, w2
 
     def forgetting_curve(self, t, s, decay_param):
@@ -106,17 +105,43 @@ class FSRS6Bayes(FSRS6):
         return new_s
 
     def stability_after_success(self, w, state, r, rating):
-        hard_penalty = torch.exp(w[13] * (rating - 3))
-        success_bonus = torch.pow(state[:, 0], w[12])
-        new_s = state[:, 0] * (1 + success_bonus * hard_penalty * (1 / r - 1))
+        hard_penalty = torch.where(rating == 2, w[15], 1)
+        easy_bonus = torch.where(rating == 4, w[16], 1)
+        new_s = state[:, 0] * (
+            1
+            + torch.exp(self.w[8])
+            * (11 - state[:, 1])
+            * torch.pow(state[:, 0], -w[9])
+            * (torch.exp((1 - r) * w[10]) - 1)
+            * hard_penalty
+            * easy_bonus
+        )
         return new_s
+    
+    def stability_after_failure(self, w, state: Tensor, r: Tensor) -> Tensor:
+        old_s = state[:, 0]
+        new_s = (
+            w[11]
+            * torch.pow(state[:, 1], -w[12])
+            * (torch.pow(old_s + 1, w[13]) - 1)
+            * torch.exp((1 - r) * w[14])
+        )
+        new_minimum_s = old_s / torch.exp(w[17] * w[18])
+        return torch.minimum(new_s, new_minimum_s)
 
-    def stability_after_failure(self, w, state, r):
-        return state[:, 0] * torch.pow(r, -w[10]) * w[11]
+    def init_d(self, w, rating) -> Tensor:
+        new_d = w[4] - torch.exp(w[5] * (rating - 1)) + 1
+        return new_d
+    
+    def linear_damping(self, delta_d: Tensor, old_d: Tensor) -> Tensor:
+        return delta_d * (10 - old_d) / 9
 
-    def next_difficulty(self, w, state, rating):
-        return state[:, 1] + w[14] * (rating - 3) + w[15]
-
+    def next_d(self, w, state: Tensor, rating: Tensor) -> Tensor:
+        delta_d = -w[6] * (rating - 3)
+        new_d = state[:, 1] + self.linear_damping(delta_d, state[:, 1])
+        new_d = self.mean_reversion(self.init_d(w, 4), new_d)
+        return new_d
+    
     def step(self, w, X, state):
         if torch.equal(state, torch.zeros_like(state)):
             keys = torch.tensor([1,2,3,4], device=self.config.device)
@@ -124,7 +149,8 @@ class FSRS6Bayes(FSRS6):
             index = (X[:,1].long().unsqueeze(1) == keys).nonzero(as_tuple=True)
             new_s = torch.ones_like(state[:,0])
             new_s[index[0]] = w[index[1]]
-            new_d = torch.clamp(torch.ones_like(state[:,1])*w[3],1,10)
+            new_d = self.init_d(w, X[:, 1])
+            new_d = new_d.clamp(1, 10)
         else:
             r = self.forgetting_curve(X[:,0], state[:,0], -w[20])
             short_term = X[:,0]<1
@@ -134,7 +160,7 @@ class FSRS6Bayes(FSRS6):
                                 torch.where(success,
                                             self.stability_after_success(w,state,r,X[:,1]),
                                             self.stability_after_failure(w,state,r)))
-            new_d = self.next_difficulty(w,state,X[:,1])
+            new_d = self.next_d(w,state,X[:,1])
             new_d = new_d.clamp(1,10)
         new_s = new_s.clamp(self.config.s_min, 36500)
         return torch.stack([new_s,new_d],dim=1)
@@ -151,27 +177,42 @@ class FSRS6Bayes(FSRS6):
 
     def batch_process(self, sequences, delta_ts, seq_lens, real_batch_size):
         w1,w2 = self.split()
-        # last_rating = sequences[torch.arange(real_batch_size), seq_lens-1, 1]
         p1,s1,d1 = self._evaluate_model(w1,sequences,delta_ts,seq_lens,real_batch_size)
         p2,s2,d2 = self._evaluate_model(w2,sequences,delta_ts,seq_lens,real_batch_size)
-        # self.update_bayes(p1.detach(), p2.detach(),last_rating)
-        # post = self.posterior()
-        # w1w,w2w = post[0],post[1]
-        w1w = 0.5
-        w2w = 0.5
+
+        last_rating_LB = sequences[:, :, 1]
+        L, B = last_rating_LB.shape
+        success = last_rating_LB > 1
+        L1 = torch.where(success,p1,1-p1).clamp(1e-9,1.0)
+        L2 = torch.where(success,p2,1-p2).clamp(1e-9,1.0)
+        zeros = torch.zeros((1, B))
+        log_likelihood1 = torch.concat([zeros, L1.detach().log()], dim=0).cumsum(dim=0)
+        log_likelihood2 = torch.concat([zeros, L2.detach().log()], dim=0).cumsum(dim=0)
+
+        log_likelihood_LB2 = torch.stack((log_likelihood1, log_likelihood2), dim=-1)
+        posterior_LB2 = torch.softmax(log_likelihood_LB2, dim=-1)
+
+        # print(posterior_LB)
+        posterior_B2 = posterior_LB2[seq_lens - 1, torch.arange(real_batch_size,device=self.config.device)]
+        print("TEMP")
+        posterior_B2 = torch.stack((torch.ones(B), torch.zeros(B)), dim=-1)
+        p_B = (posterior_B2 * 
+               torch.stack((p1[seq_lens - 1, torch.arange(real_batch_size,device=self.config.device)], p2[seq_lens - 1, torch.arange(real_batch_size,device=self.config.device)]), dim=-1)).sum(dim=-1)
         return {
-            'retentions': w1w*p1 + w2w*p2,
-            'stabilities': w1w*s1 + w2w*s2,
-            'difficulties': w1w*d1 + w2w*d2,
+            'retentions': p_B,
+            # 'stabilities': w1w*s1 + w2w*s2,
+            # 'difficulties': w1w*d1 + w2w*d2,
             # 'posterior': post,
-            'penalty': torch.sum(torch.square(self.w - self.initial_w)/torch.square(self.param_stddev))*real_batch_size*self.gamma
+            'penalty': torch.sum(torch.square(self.ws - self.initial_w)/torch.square(self.param_stddev))*real_batch_size*self.gamma
         }
 
     def _evaluate_model(self, w, sequences, delta_ts, seq_lens, real_batch_size):
         outputs,_ = self.forward(w, sequences)
-        s,d = outputs[seq_lens-1,torch.arange(real_batch_size,device=self.config.device)].transpose(0,1)
-        p = self.forgetting_curve(delta_ts,s,-w[20])
-        return p,s,d
+        s_LB = outputs[:, :, 0]
+        d_LB = outputs[:, :, 1]
+        # s,d = outputs[seq_lens-1,torch.arange(real_batch_size,device=self.config.device)].transpose(0,1)
+        p_LB = self.forgetting_curve(delta_ts,s_LB,-w[20])
+        return p_LB,s_LB,d_LB
 
     def forward(
         self, w, inputs: Tensor, state: Optional[Tensor] = None
@@ -339,7 +380,7 @@ class FSRS6Bayes(FSRS6):
             initial_stabilities = [
                 item[1] for item in sorted(rating_stability.items(), key=lambda x: x[0])
             ]
-        self.w.data[0:4] = Tensor(
+        self.ws.data[0:4] = Tensor(
             list(
                 map(
                     lambda x: max(min(self.config.init_s_max, x), self.config.s_min),
@@ -348,7 +389,7 @@ class FSRS6Bayes(FSRS6):
             )
         )
 
-        self.init_w_tensor = self.w.data.clone().to(self.config.device)
+        self.init_w_tensor = self.ws.data.clone().to(self.config.device)
     
     def init2(self, train_set) -> None:
         S0_dataset_group = (
@@ -378,7 +419,7 @@ class FSRS6Bayes(FSRS6):
             init_s0 = r_s0_default[first_rating]
 
             def loss(stability):
-                y_pred = self.forgetting_curve(delta_t, stability, -self.init_w[20].item())
+                y_pred = self.forgetting_curve(delta_t, stability, -self.init_w[41].item())
                 logloss = sum(
                     -(recall * np.log(y_pred) + (1 - recall) * np.log(1 - y_pred))
                     * count
@@ -497,7 +538,7 @@ class FSRS6Bayes(FSRS6):
             initial_stabilities = [
                 item[1] for item in sorted(rating_stability.items(), key=lambda x: x[0])
             ]
-        self.w.data[21:25] = Tensor(
+        self.ws.data[21:25] = Tensor(
             list(
                 map(
                     lambda x: max(min(self.config.init_s_max, x), self.config.s_min),
@@ -506,4 +547,4 @@ class FSRS6Bayes(FSRS6):
             )
         )
 
-        self.init_w_tensor = self.w.data.clone().to(self.config.device)
+        self.init_w_tensor = self.ws.data.clone().to(self.config.device)
