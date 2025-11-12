@@ -11,43 +11,43 @@ class FSRS6BayesParameterClipper(FSRS6ParameterClipper):
         self.config = config
 
     def __call__(self, module):
-        if hasattr(module, 'w'):
-            w = module.w.data
+        if hasattr(module, 'ws'):
+            ws = module.ws.data
             for i in range(42):
                 # duplicate the original 21-clamp pattern for both halves
                 if i % 21 == 0 or i % 21 == 1 or i % 21 == 2 or i % 21 == 3:
-                    w[i] = w[i].clamp(self.config.s_min, self.config.init_s_max)
+                    ws[i] = ws[i].clamp(self.config.s_min, self.config.init_s_max)
                 elif i % 21 == 4:
-                    w[i] = w[i].clamp(1, 10)
+                    ws[i] = ws[i].clamp(1, 10)
                 elif i % 21 == 5 or i % 21 == 6:
-                    w[i] = w[i].clamp(0.001, 4)
+                    ws[i] = ws[i].clamp(0.001, 4)
                 elif i % 21 == 7:
-                    w[i] = w[i].clamp(0.001, 0.75)
+                    ws[i] = ws[i].clamp(0.001, 0.75)
                 elif i % 21 == 8:
-                    w[i] = w[i].clamp(0, 4.5)
+                    ws[i] = ws[i].clamp(0, 4.5)
                 elif i % 21 == 9:
-                    w[i] = w[i].clamp(0, 0.8)
+                    ws[i] = ws[i].clamp(0, 0.8)
                 elif i % 21 == 10:
-                    w[i] = w[i].clamp(0.001, 3.5)
+                    ws[i] = ws[i].clamp(0.001, 3.5)
                 elif i % 21 == 11:
-                    w[i] = w[i].clamp(0.001, 5)
+                    ws[i] = ws[i].clamp(0.001, 5)
                 elif i % 21 == 12:
-                    w[i] = w[i].clamp(0.001, 0.25)
+                    ws[i] = ws[i].clamp(0.001, 0.25)
                 elif i % 21 == 13:
-                    w[i] = w[i].clamp(0.001, 0.9)
+                    ws[i] = ws[i].clamp(0.001, 0.9)
                 elif i % 21 == 14:
-                    w[i] = w[i].clamp(0, 4)
+                    ws[i] = ws[i].clamp(0, 4)
                 elif i % 21 == 15:
-                    w[i] = w[i].clamp(0, 1)
+                    ws[i] = ws[i].clamp(0, 1)
                 elif i % 21 == 16:
-                    w[i] = w[i].clamp(1, 6)
+                    ws[i] = ws[i].clamp(1, 6)
                 elif i % 21 == 17 or i % 21 == 18:
-                    w[i] = w[i].clamp(0, 2)
+                    ws[i] = ws[i].clamp(0, 2)
                 elif i % 21 == 19:
-                    w[i] = w[i].clamp(0, 0.8)
+                    ws[i] = ws[i].clamp(0, 0.8)
                 elif i % 21 == 20:
-                    w[i] = w[i].clamp(0.1, 0.8)
-            module.w.data = w
+                    ws[i] = ws[i].clamp(0.1, 0.8)
+            module.ws.data = ws
 
 
 class FSRS6Bayes(FSRS6):
@@ -63,7 +63,7 @@ class FSRS6Bayes(FSRS6):
         1.8729, 0.5425, 0.0912, 0.0658, 0.1542,
         0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001,
         1.8722, 0.1666, 0.796, 1.4835, 0.0614, 0.2629, 1.6483, 0.6014,
-        1.8729, 0.5425, 0.0912, 0.0658, 0.1542,
+        1.8729, 0.5425, 0.0912, 0.0658, 0.2042,
     ], dtype=torch.float32)
 
     param_stddev = torch.tensor([
@@ -88,7 +88,7 @@ class FSRS6Bayes(FSRS6):
 
         self.initial_w = self.ws.clone().detach()
         self.clipper = FSRS6BayesParameterClipper(config)
-
+        self.w = None
 
     def split(self):
         w1 = self.ws[:21]
@@ -109,7 +109,7 @@ class FSRS6Bayes(FSRS6):
         easy_bonus = torch.where(rating == 4, w[16], 1)
         new_s = state[:, 0] * (
             1
-            + torch.exp(self.w[8])
+            + torch.exp(w[8])
             * (11 - state[:, 1])
             * torch.pow(state[:, 0], -w[9])
             * (torch.exp((1 - r) * w[10]) - 1)
@@ -136,10 +136,13 @@ class FSRS6Bayes(FSRS6):
     def linear_damping(self, delta_d: Tensor, old_d: Tensor) -> Tensor:
         return delta_d * (10 - old_d) / 9
 
+    def mean_reversion(self, w, init: Tensor, current: Tensor) -> Tensor:
+        return w[7] * init + (1 - w[7]) * current
+
     def next_d(self, w, state: Tensor, rating: Tensor) -> Tensor:
         delta_d = -w[6] * (rating - 3)
         new_d = state[:, 1] + self.linear_damping(delta_d, state[:, 1])
-        new_d = self.mean_reversion(self.init_d(w, 4), new_d)
+        new_d = self.mean_reversion(w, self.init_d(w, 4), new_d)
         return new_d
     
     def step(self, w, X, state):
@@ -165,18 +168,10 @@ class FSRS6Bayes(FSRS6):
         new_s = new_s.clamp(self.config.s_min, 36500)
         return torch.stack([new_s,new_d],dim=1)
 
-    def update_bayes(self, p1, p2, rating):
-        success = rating>1
-        L1 = torch.where(success,p1,1-p1).clamp(1e-9,1.0)
-        L2 = torch.where(success,p2,1-p2).clamp(1e-9,1.0)
-        self.log_likelihood[0] += L1.log().sum().detach()
-        self.log_likelihood[1] += L2.log().sum().detach()
-
-    def posterior(self):
-        return torch.softmax(self.belief_logits + self.log_likelihood.to(self.belief_logits.device), dim=0)
-
     def batch_process(self, sequences, delta_ts, seq_lens, real_batch_size):
         w1,w2 = self.split()
+        # print(w1)
+        # print(self.state_dict())
         p1,s1,d1 = self._evaluate_model(w1,sequences,delta_ts,seq_lens,real_batch_size)
         p2,s2,d2 = self._evaluate_model(w2,sequences,delta_ts,seq_lens,real_batch_size)
 
@@ -228,7 +223,14 @@ class FSRS6Bayes(FSRS6):
             outputs.append(state)
         return torch.stack(outputs), state
 
-
+    def state_dict(self):
+        return list(
+            map(
+                lambda x: round(float(x), 4),
+                dict(self.named_parameters())["ws"].data,
+            )
+        )
+    
     def initialize_parameters(self, train_set: pd.DataFrame) -> None:
         self.init1(train_set)
         self.init2(train_set)
@@ -389,7 +391,7 @@ class FSRS6Bayes(FSRS6):
             )
         )
 
-        self.init_w_tensor = self.ws.data.clone().to(self.config.device)
+        self.initial_w = self.ws.data.clone().to(self.config.device)
     
     def init2(self, train_set) -> None:
         S0_dataset_group = (
@@ -547,4 +549,4 @@ class FSRS6Bayes(FSRS6):
             )
         )
 
-        self.init_w_tensor = self.ws.data.clone().to(self.config.device)
+        self.initial_w = self.ws.data.clone().to(self.config.device)
