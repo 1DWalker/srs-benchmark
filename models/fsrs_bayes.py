@@ -66,6 +66,11 @@ class FSRS6Bayes(FSRS6):
         1.8729, 0.5425, 0.0912, 0.0658, 0.2042,
     ], dtype=torch.float32)
 
+    # log loss 0.3417784944496836 on first 200 users
+    # init_w = torch.tensor([0.5139, 1.4347, 5.2845, 11.9841, 10.0, 1.1486, 3.692, 0.1578, 4.4822, 0.4916, 3.4769, 2.3738, 0.05, 0.8989, 1.6648, 0.2648, 5.2526, 0.425, 0.0011, 0.0797, 0.5977, 
+    #                        0.0727, 0.8604, 0.9481, 8.413, 3.2228, 0.0026, 0.0011, 0.2875, 0.2534, 0.1881, 0.8479, 0.426, 0.2287, 0.7259, 0.7835, 0.4972, 1.0, 0.7749, 0.0011, 0.1114, 0.136
+    #                        ], dtype=torch.float32)
+
     param_stddev = torch.tensor([
         6.43, 9.66, 17.58, 27.85, 0.57, 0.28, 0.6, 0.12, 0.39, 0.18,
         0.33, 0.3, 0.09, 0.16, 0.57, 0.25, 1.03, 0.31, 0.32, 0.14, 0.27,
@@ -178,19 +183,22 @@ class FSRS6Bayes(FSRS6):
         last_rating_LB = sequences[:, :, 1]
         L, B = last_rating_LB.shape
         success = last_rating_LB > 1
-        L1 = torch.where(success,p1,1-p1).clamp(1e-9,1.0)
-        L2 = torch.where(success,p2,1-p2).clamp(1e-9,1.0)
+        # short_term = sequences[:, :, 0] < 1  # turn off for same-day reviews
+        short_term = torch.zeros_like(success)  # TODO remove
+        L1 = torch.where(short_term, 1.0, torch.where(success,p1,1-p1).clamp(1e-9,1.0))
+        L2 = torch.where(short_term, 1.0, torch.where(success,p2,1-p2).clamp(1e-9,1.0))
+
         zeros = torch.zeros((1, B))
-        log_likelihood1 = torch.concat([zeros, L1.detach().log()], dim=0).cumsum(dim=0)
-        log_likelihood2 = torch.concat([zeros, L2.detach().log()], dim=0).cumsum(dim=0)
+        log_likelihood1 = torch.concat([zeros, L1.log()], dim=0).cumsum(dim=0)
+        log_likelihood2 = torch.concat([zeros, L2.log()], dim=0).cumsum(dim=0)
 
         log_likelihood_LB2 = torch.stack((log_likelihood1, log_likelihood2), dim=-1)
         posterior_LB2 = torch.softmax(log_likelihood_LB2, dim=-1)
 
         # print(posterior_LB)
         posterior_B2 = posterior_LB2[seq_lens - 1, torch.arange(real_batch_size,device=self.config.device)]
-        print("TEMP")
-        posterior_B2 = torch.stack((torch.ones(B), torch.zeros(B)), dim=-1)
+        # print("TEMP")
+        # posterior_B2 = torch.stack((torch.ones(B), torch.zeros(B)), dim=-1)
         p_B = (posterior_B2 * 
                torch.stack((p1[seq_lens - 1, torch.arange(real_batch_size,device=self.config.device)], p2[seq_lens - 1, torch.arange(real_batch_size,device=self.config.device)]), dim=-1)).sum(dim=-1)
         return {
