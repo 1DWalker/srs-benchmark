@@ -78,7 +78,7 @@ def weighted_avg_and_std(values, weights):
 
 
 if __name__ == "__main__":
-    dev_mode_name = "FSRS-6-dev"
+    dev_mode_name = "FSRS-6-bayes-recency"
     dev_file = pathlib.Path(f"./result/{dev_mode_name}.jsonl")
     if dev_file.exists():
         with open(dev_file, "r") as f:
@@ -103,43 +103,43 @@ if __name__ == "__main__":
     models = (
         [
             (dev_mode_name, None, None),
-            ("RWKV-P", 2762884, ""),
-            ("RWKV", 2762884, ""),
-            ("LSTM-short-secs-equalize_test_with_non_secs", 8869, "FIL, G, SR, AT"),
-            ("MOVING-AVG", 0, "---"),
-            ("FSRS-6-recency", 21, "IL, G, SR"),
-            ("FSRS-rs", 21, "IL, G, SR"),
-            ("FSRS-6", 21, "IL, G, SR"),
-            ("GRU-P-short", 297, "IL, G, SR"),
-            ("FSRS-6-preset", 21, "IL, G, SR"),
-            ("GRU-P", 297, "IL, G"),
-            ("FSRS-6-binary", 17, "IL, G, SR"),
-            ("FSRS-5", 19, "IL, G, SR"),
-            ("FSRS-6-deck", 21, "IL, G, SR"),
-            ("FSRS-4.5", 17, "IL, G"),
-            ("FSRSv4", 17, "IL, G"),
-            ("FSRS-6-S0", 4, "IL, G, SR"),
-            ("DASH", 9, "IL, G"),
-            ("DASH[MCM]", 9, "IL, G"),
-            ("GRU", 39, "IL, G"),
-            ("DASH-short", 9, "IL, G, SR"),
-            ("DASH[ACT-R]", 5, "IL, G"),
-            ("FSRSv2", 14, "IL, G"),
-            ("FSRSv3", 13, "IL, G"),
-            ("FSRS-6-default", 0, "IL, G, SR"),
-            ("ACT-R", 5, "IL"),
-            ("FSRSv1", 7, "IL, G"),
-            ("AVG", 0, "---"),
-            ("Anki", 7, "IL, G"),
-            ("HLR", 3, "IL, G"),
-            ("HLR-short", 3, "IL, G, SR"),
-            ("SM2-trainable", 6, "IL, G"),
-            ("Anki-default", 0, "IL, G"),
-            ("SM2-short", 0, "IL, G, SR"),
-            ("SM2", 0, "IL, G"),
-            ("Ebisu-v2", 0, "IL, G"),
-            ("Transformer", 127, "IL, G"),
-            ("RMSE-BINS-EXPLOIT", 0, "IL, G"),
+            # ("RWKV-P", 2762884, ""),
+            # ("RWKV", 2762884, ""),
+            # ("LSTM-short-secs-equalize_test_with_non_secs", 8869, "FIL, G, SR, AT"),
+            # ("MOVING-AVG", 0, "---"),
+            ("FSRS-6-recency-copy", 21, "IL, G, SR"),
+            # ("FSRS-rs", 21, "IL, G, SR"),
+            # ("FSRS-6", 21, "IL, G, SR"),
+            # ("GRU-P-short", 297, "IL, G, SR"),
+            # ("FSRS-6-preset", 21, "IL, G, SR"),
+            # ("GRU-P", 297, "IL, G"),
+            # ("FSRS-6-binary", 17, "IL, G, SR"),
+            # ("FSRS-5", 19, "IL, G, SR"),
+            # ("FSRS-6-deck", 21, "IL, G, SR"),
+            # ("FSRS-4.5", 17, "IL, G"),
+            # ("FSRSv4", 17, "IL, G"),
+            # ("FSRS-6-S0", 4, "IL, G, SR"),
+            # ("DASH", 9, "IL, G"),
+            # ("DASH[MCM]", 9, "IL, G"),
+            # ("GRU", 39, "IL, G"),
+            # ("DASH-short", 9, "IL, G, SR"),
+            # ("DASH[ACT-R]", 5, "IL, G"),
+            # ("FSRSv2", 14, "IL, G"),
+            # ("FSRSv3", 13, "IL, G"),
+            # ("FSRS-6-default", 0, "IL, G, SR"),
+            # ("ACT-R", 5, "IL"),
+            # ("FSRSv1", 7, "IL, G"),
+            # ("AVG", 0, "---"),
+            # ("Anki", 7, "IL, G"),
+            # ("HLR", 3, "IL, G"),
+            # ("HLR-short", 3, "IL, G, SR"),
+            # ("SM2-trainable", 6, "IL, G"),
+            # ("Anki-default", 0, "IL, G"),
+            # ("SM2-short", 0, "IL, G, SR"),
+            # ("SM2", 0, "IL, G"),
+            # ("Ebisu-v2", 0, "IL, G"),
+            # ("Transformer", 127, "IL, G"),
+            # ("RMSE-BINS-EXPLOIT", 0, "IL, G"),
         ]
         if not args.secs
         else [
@@ -216,7 +216,11 @@ if __name__ == "__main__":
 
             # print(f"LogLoss 99%: {round(np.percentile(np.array([item['LogLoss'] for item in m]), 99), 4)}")
             # print(f"RMSE(bins) 99%: {round(np.percentile(np.array([item['RMSE(bins)'] for item in m]), 99), 4)}")
-            if len(parameters) > 0:
+            if model.startswith("FSRS-6-bayes"):
+                params = np.median(parameters, axis=0).reshape((2, 21)).round(6).tolist()
+                print(f"parameters_1: {params[0]}\n")
+                print(f"parameters_2: {params[1]}\n")
+            elif len(parameters) > 0:
                 print(
                     f"parameters: {np.median(parameters, axis=0).round(6).tolist()}\n"
                 )
