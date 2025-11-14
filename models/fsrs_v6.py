@@ -32,6 +32,9 @@ class FSRS6ParameterClipper(FSRS5ParameterClipper):
             w[18] = w[18].clamp(0, 2)
             w[19] = w[19].clamp(0, 0.8)
             w[20] = w[20].clamp(0.1, 0.8)
+            w[21] = w[21].clamp(-0.5, 0.5)
+            w[22] = w[22].clamp(-0.5, 0)
+            w[23] = w[23].clamp(-1, 4)
             module.w.data = w
 
 
@@ -58,6 +61,9 @@ class FSRS6(FSRS5):
         0.0912,
         0.0658,
         0.1542,
+        0.00,
+        -0.05,
+        2.2,
     ]
     default_params_stddev_tensor = torch.tensor(
         [
@@ -82,6 +88,9 @@ class FSRS6(FSRS5):
             0.32,
             0.14,
             0.27,
+            0.1,
+            0.1,
+            1,
         ]
     )
 
@@ -105,7 +114,7 @@ class FSRS6(FSRS5):
             seq_lens - 1,
             torch.arange(real_batch_size, device=self.config.device),
         ].transpose(0, 1)
-        retentions = self.forgetting_curve(delta_ts, stabilities, -self.w[20])
+        retentions = self.forgetting_curve2(delta_ts, stabilities, difficulties, -self.w[20])
         output = {
             "retentions": retentions,
             "stabilities": stabilities,
@@ -120,9 +129,15 @@ class FSRS6(FSRS5):
             * self.gamma
         )
         return output
-
+        
     def forgetting_curve(self, t, s, decay=-init_w[20]):
         factor = 0.9 ** (1 / decay) - 1
+        return (1 + factor * t / s) ** decay
+
+    def forgetting_curve2(self, t, s, d, base_decay=-init_w[20]):
+        decay = (base_decay * torch.pow(0.1 + s, self.w[21])).clamp(-0.8, -0.1)
+        # decay = (base_decay * torch.exp((d - 6) * self.w[21])).clamp(-0.8, -0.1)
+        factor = (torch.sigmoid(self.w[23] + (d - 6) * self.w[22])) ** (1 / decay) - 1
         return (1 + factor * t / s) ** decay
 
     def stability_short_term(self, state: Tensor, rating: Tensor) -> Tensor:
@@ -148,7 +163,7 @@ class FSRS6(FSRS5):
             new_d = self.init_d(X[:, 1])
             new_d = new_d.clamp(1, 10)
         else:
-            r = self.forgetting_curve(X[:, 0], state[:, 0], -self.w[20])
+            r = self.forgetting_curve2(X[:, 0], state[:, 0], state[:, 1], -self.w[20])
             short_term = X[:, 0] < 1
             success = X[:, 1] > 1
             new_s = torch.where(
