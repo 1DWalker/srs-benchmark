@@ -17,9 +17,9 @@ class FSRS6Batched(ModuleType):
         self.S_MIN = 0.001
 
     @FunctionType
-    def forgetting_curve(self, t_bl, s_hbl, decay_h):
+    def forgetting_curve(self, t_b, s_hb, decay_h):
         factor_h = 0.9 ** (1 / decay_h) - 1
-        return (1 + factor_h.view(-1, 1, 1) * t_bl.unsqueeze(0) / s_hbl) ** decay_h.view(-1, 1, 1)
+        return (1 + factor_h.view(-1, 1) * t_b.unsqueeze(0) / s_hb) ** decay_h.view(-1, 1)
 
     @FunctionType
     def stability_after_success(
@@ -95,7 +95,7 @@ class FSRS6Batched(ModuleType):
             new_d_hb = self.init_d(w_hp, X_b2[:, 1])
             new_d_hb = new_d_hb.clamp(1, 10)
         else:
-            r_hb = self.forgetting_curve(X_b2[:, 0].unsqueeze(-1), state_hb2[:, :, 0].unsqueeze(-1), -w_hp[:, 20]).squeeze(-1)
+            r_hb = self.forgetting_curve(X_b2[:, 0], state_hb2[:, :, 0], -w_hp[:, 20])
             short_term_b = X_b2[:, 0] < 1
             success_b = X_b2[:, 1] > 1
             new_s_hb = torch.where(
@@ -123,11 +123,12 @@ class FSRS6Batched(ModuleType):
         feature_elapsed_days_int_bl: Tensor,
         feature_elapsed_days_real_bl: Tensor,
         feature_rating_bl: Tensor,
-        label_elapsed_days_int_bl: Tensor, 
+        label_elapsed_days_int_b: Tensor, 
+        seq_len_b: Tensor,
     ) -> Tensor:
         """
         parameters_hp: h is the number of parameters sets to evaluate, p is the number of parameters (e.g. 21 for FSRS-6)
-        returns: h x b x l tensor of probabilities
+        returns: h x b tensor of probabilities
         """
         assert len(parameters_hp.shape) == 2
         inputs_bl2 = torch.stack((feature_elapsed_days_int_bl, feature_rating_bl), dim=-1)
@@ -138,5 +139,10 @@ class FSRS6Batched(ModuleType):
             outputs_list.append(state_hb2)
         output_tensor_hbl2 = torch.stack(outputs_list).permute(1, 2, 0, 3)
         output_s_hbl, _ = output_tensor_hbl2.unbind(dim=-1)
-
-        return self.forgetting_curve(label_elapsed_days_int_bl, output_s_hbl, -parameters_hp[:, 20])
+        H, B, L = output_s_hbl.shape
+        output_s_hb = torch.take_along_dim(
+            output_s_hbl,                          # (H, B, L)
+            (seq_len_b - 1).view(1, B, 1),              # (1, B, 1) → broadcast over H
+            dim=2,
+        ).squeeze(-1)                       # → (H, B)
+        return self.forgetting_curve(label_elapsed_days_int_b, output_s_hb, -parameters_hp[:, 20])

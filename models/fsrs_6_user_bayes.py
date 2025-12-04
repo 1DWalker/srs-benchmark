@@ -104,12 +104,7 @@ class FSRS6UserBayes(BaseModel):
             H = self.user_parameters.size(0)
             L, B, _ = sequences.shape
             feature_delta_t, feature_rating = sequences.transpose(0, 1).unbind(dim=-1)
-            p_hbl = self.fsrs.forward(self.user_parameters, feature_delta_t, None, feature_rating, delta_ts.unsqueeze(-1).expand(-1, L))
-            p_hb = torch.take_along_dim(
-                p_hbl,                          # (H, B, L)
-                (seq_lens - 1).view(1, B, 1),              # (1, B, 1) → broadcast over H
-                dim=2,
-            ).squeeze(-1)                       # → (H, B)
+            p_hb = self.fsrs.forward(self.user_parameters, feature_delta_t, None, feature_rating, delta_ts, seq_lens)
             review_likelihood_hb = p_hb * labels + (1 - p_hb) * (1 - labels)
             review_log_likelihood_h = (review_likelihood_hb.log() * weights.view(1, -1)).sum(dim=-1)
             self.log_belief.add_(review_log_likelihood_h)
@@ -119,9 +114,12 @@ class FSRS6UserBayes(BaseModel):
         values, indices = torch.topk(self.log_belief, k=10)
 
         # print(self.belief)
-        print("users:", indices + 1)
+        print(user_id, "users:", indices + 1)
         print("log-likelihood:", values)
+        print("log-sizes:", torch.log(self.sizes[indices]))
+        print("sizes:", self.sizes[indices])
         print(f"elapsed {time.time() - start}")
+        print()
 
     def batch_process(
         self,
@@ -133,14 +131,8 @@ class FSRS6UserBayes(BaseModel):
         H = self.user_parameters.size(0)
         L, B, _ = sequences.shape
         feature_delta_t, feature_rating = sequences.transpose(0, 1).unbind(dim=-1)
-        p_hbl = self.fsrs.forward(self.user_parameters, feature_delta_t, None, feature_rating, delta_ts.unsqueeze(-1).expand(-1, L))
-        p_hb = torch.take_along_dim(
-            p_hbl,                          # (H, B, L)
-            (seq_lens - 1).view(1, B, 1),              # (1, B, 1) → broadcast over H
-            dim=2,
-        ).squeeze(-1)                       # → (H, B)
+        p_hb = self.fsrs.forward(self.user_parameters, feature_delta_t, None, feature_rating, delta_ts, seq_lens)
         belief = torch.nn.functional.softmax(self.log_belief)
-        # print(self.log_belief)
         pred = (p_hb * belief.view(-1, 1)).sum(dim=0)
         output = {}
         output["retentions"] = pred
