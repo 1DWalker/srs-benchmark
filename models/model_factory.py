@@ -13,6 +13,7 @@ MODEL_REGISTRY: dict[ModelName, Type[TrainableModel]] = {
     "FSRS-4.5": FSRS4dot5,
     "FSRS-5": FSRS5,
     "FSRS-6": FSRS6,
+    "FSRS-6-user-bayes": FSRS6UserBayes,
     "HLR": HLR,
     "ACT-R": ACT_R,
     "DASH": DASH,
@@ -64,7 +65,6 @@ def create_model(
             f"Model '{model_name}' is not supported by the model factory. "
             f"Supported models: {list(MODEL_REGISTRY.keys())}"
         )
-
     model_cls = MODEL_REGISTRY[model_name]
 
     # Common arguments for all model constructors
@@ -102,6 +102,7 @@ def create_model(
         "GRU-P",
         "Transformer",
         "NN-17",
+        "FSRS-6-user-bayes",
     ]:  # Neural nets
         if model_params is not None:
             if not isinstance(model_params, dict):
