@@ -13,6 +13,7 @@ ModelName = Literal[
     "FSRS-5",
     "FSRS-6",
     "FSRS-6-one-step",
+    "FSRS-6-user-bayes",
     # Neural networks
     "RNN",
     "GRU",

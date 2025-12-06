@@ -29,6 +29,7 @@ FEATURE_ENGINEER_REGISTRY: dict[ModelName, Type[BaseFeatureEngineer]] = {
     "FSRS-5": FSRSFeatureEngineer,
     "FSRS-6": FSRSFeatureEngineer,
     "FSRS-6-one-step": FSRSOneStepFeatureEngineer,
+    "FSRS-6-user-bayes": FSRSFeatureEngineer,
     "RNN": FSRSFeatureEngineer,
     "GRU": FSRSFeatureEngineer,
     "Transformer": FSRSFeatureEngineer,

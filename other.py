@@ -211,8 +211,9 @@ class Collection:
         self.model.eval()
 
     def batch_predict(self, dataset):
+        batch_size = 1024 if config.model_name == "FSRS-6-user-bayes" else 8192
         batch_dataset = BatchDataset(
-            dataset, batch_size=8192, sort_by_length=False, device=config.device
+            dataset, batch_size=batch_size, sort_by_length=False, device=config.device
         )
         batch_loader = BatchLoader(batch_dataset, shuffle=False)
         retentions = []
@@ -502,6 +503,9 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
                     partition_weights[partition] = copy.deepcopy(
                         trained_model.state_dict()
                     )
+                elif config.model_name == "FSRS-6-user-bayes":
+                    model.fit(train_partition, user_id)
+                    partition_weights[partition] = model.state_dict()
                 else:
                     trainer = Trainer(
                         model=model,
@@ -534,9 +538,8 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
         for partition in testset["partition"].unique():
             partition_testset = testset[testset["partition"] == partition].copy()
             weights = w.get(partition, None)
-            my_collection = Collection(
-                create_model(config, weights) if weights else create_model(config)
-            )
+            model = create_model(config, weights) if weights else create_model(config)
+            my_collection = Collection(model)
             retentions, stabilities, difficulties = my_collection.batch_predict(
                 partition_testset
             )
@@ -556,6 +559,21 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
     stats, raw = evaluate(
         y, p, save_tmp_df, config.get_evaluation_file_name(), user_id, w_list
     )
+    if config.model_name == "FSRS-6-user-bayes":
+        similar_users = []
+        belief_sizes = []
+        for i, (w, testset) in enumerate(zip(w_list, testsets)):
+            weights = w.get(partition, None)
+            model = create_model(config, weights) if weights else create_model(config)
+            sim_users, value = model.get_similar_users(n=5)
+            user_dict = {}
+            for user, x in zip(sim_users.tolist(), value.tolist()):
+                user_dict[user] = round(x, 4)
+
+            similar_users.append(user_dict)
+            belief_sizes.append(model.get_belief_size())
+        stats["Belief sizes"] = belief_sizes
+        stats["Similar users"] = similar_users
     return stats, raw
 
 
@@ -651,6 +669,7 @@ if __name__ == "__main__":
         unprocessed_users.append(user_id_value)
 
     unprocessed_users.sort()
+    # unprocessed_users = [3]
 
     with ProcessPoolExecutor(max_workers=config.num_processes) as executor:
         futures = [
