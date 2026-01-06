@@ -1,6 +1,13 @@
 import copy
+<<<<<<< HEAD
+=======
+import math
+import random
+>>>>>>> 1348a1ecb58 (Add fsrs-7)
 import sys
 import os
+import time
+
 import pandas as pd
 import numpy as np
 from typing import Optional
@@ -20,6 +27,7 @@ from script import sort_jsonl
 import multiprocessing as mp
 import pyarrow.parquet as pq  # type: ignore
 from config import create_parser, Config
+<<<<<<< HEAD
 from utils import (
     catch_exceptions,
     save_evaluation_file,
@@ -27,6 +35,9 @@ from utils import (
     batch_process_wrapper,
     Collection,
 )
+=======
+from utils import catch_exceptions, get_bin, rmse_matrix
+>>>>>>> 1348a1ecb58 (Add fsrs-7)
 from data_loader import UserDataLoader
 from model_processors import (
     process_untrainable,
@@ -54,6 +65,19 @@ warnings.filterwarnings("ignore", category=UserWarning)
 torch.manual_seed(config.seed)
 tqdm.pandas()
 
+<<<<<<< HEAD
+=======
+def batch_process_wrapper(
+    model: TrainableModel, batch: tuple[Tensor, Tensor, Tensor, Tensor, Tensor]
+) -> dict[str, Tensor]:
+    sequences, delta_ts, labels, seq_lens, weights = batch
+    real_batch_size = seq_lens.shape[0]
+    result = {"labels": labels, "weights": weights}
+    outputs = model.batch_process(sequences, delta_ts, seq_lens, real_batch_size)
+    result.update(outputs)
+    return result
+
+>>>>>>> 1348a1ecb58 (Add fsrs-7)
 
 class Trainer:
     optimizer: torch.optim.Optimizer
@@ -67,26 +91,27 @@ class Trainer:
         max_seq_len: int = 64,
     ) -> None:
         self.model = model.to(device=config.device)
-        self.model.initialize_parameters(train_set)
+        self.model.pretrain(train_set)
 
-        # Setup optimizer
-        self.optimizer = self.model.get_optimizer(lr=self.model.lr, wd=self.model.wd)
-
-        self.batch_size = batch_size
+        self.batch_size = getattr(self.model, 'batch_size', batch_size)
+        self.betas = getattr(self.model, 'betas', (0.9, 0.999))
+        self.wd = getattr(self.model, 'wd', 0.)
         self.max_seq_len = max_seq_len
         self.n_epoch = self.model.n_epoch
 
-        # Build datasets
+        # Build datasets (done before the hyperparameter probe so that we can read batches)
         self.build_dataset(self.model.filter_training_data(train_set), test_set)
 
-        # Setup scheduler
+        # loss_fn must exist before the hyperparameter probe uses it
+        self.loss_fn = nn.BCELoss(reduction="none")
+
+        self.optimizer = self.model.get_optimizer(lr=self.model.lr, wd=self.wd, betas=self.betas)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=self.train_data_loader.batch_nums * self.n_epoch
-        )
+            self.optimizer,
+            T_max=self.train_data_loader.batch_nums * self.n_epoch)
 
         self.avg_train_losses: list[float] = []
         self.avg_eval_losses: list[float] = []
-        self.loss_fn = nn.BCELoss(reduction="none")
 
     def build_dataset(self, train_set: pd.DataFrame, test_set: Optional[pd.DataFrame]):
         self.train_set = BatchDataset(
@@ -113,8 +138,17 @@ class Trainer:
         best_loss = np.inf
         epoch_len = len(self.train_set.y_train)
 
+        per_epoch_time_adam = []
         for k in range(self.n_epoch):
+            start_1 = time.perf_counter()
             weighted_loss, w = self.eval()
+
+            # print('')
+            # print(f'Epoch {k}')
+            # print(f'Loss={weighted_loss:.4f}')
+            # print(f'lr={self.scheduler.get_last_lr()}')
+            # print('')
+
             if weighted_loss < best_loss:
                 best_loss = weighted_loss
                 best_w = w
@@ -124,11 +158,13 @@ class Trainer:
                 self.optimizer.zero_grad()
                 result = batch_process_wrapper(self.model, batch)
                 loss = (
-                    self.loss_fn(result["retentions"], result["labels"])
-                    * result["weights"]
+                        self.loss_fn(result["retentions"], result["labels"])
+                        * result["weights"]
                 ).sum()
+
                 if "penalty" in result:
                     loss += result["penalty"] / epoch_len
+
                 loss.backward()
 
                 # Apply model-specific gradient constraints
@@ -137,13 +173,17 @@ class Trainer:
                 self.optimizer.step()
                 self.scheduler.step()
 
-                # Apply model-specific parameter constraints (clipper)
+                # Apply model-specific parameter constraints
                 self.model.apply_parameter_clipper()
 
+            end_1 = time.perf_counter()
+            per_epoch_time_adam.append(end_1 - start_1)
+
+        # print(f'Adam takes {np.mean(per_epoch_time_adam):.1f} s per epoch')
         weighted_loss, w = self.eval()
         if weighted_loss < best_loss:
-            best_loss = weighted_loss
             best_w = w
+
         return best_w
 
     def eval(self):
@@ -178,6 +218,8 @@ class Trainer:
             self.avg_eval_losses.append(losses[1])
 
             w = self.model.state_dict()
+            # print(f'Train set loss={losses[0]:.4f}')
+            # print(f'Test set loss={losses[1]:.4f}')
 
             weighted_loss = (
                 losses[0] * len(self.train_set) + losses[1] * len(self.test_set)
@@ -198,6 +240,148 @@ class Trainer:
         return fig
 
 
+<<<<<<< HEAD
+=======
+class Collection:
+    def __init__(self, model: TrainableModel) -> None:
+        self.model = model.to(device=config.device)
+        self.model.eval()
+
+    def batch_predict(self, dataset):
+        batch_dataset = BatchDataset(
+            dataset, batch_size=8192, sort_by_length=False, device=config.device
+        )
+        batch_loader = BatchLoader(batch_dataset, shuffle=False)
+        retentions = []
+        stabilities = []
+        difficulties = []
+        with torch.no_grad():
+            for batch in batch_loader:
+                result = batch_process_wrapper(self.model, batch)
+                retentions.extend(result["retentions"].cpu().tolist())
+                if "stabilities" in result:
+                    stabilities.extend(result["stabilities"].cpu().tolist())
+                if "difficulties" in result:
+                    difficulties.extend(result["difficulties"].cpu().tolist())
+
+        return retentions, stabilities, difficulties
+
+
+def process_untrainable(
+    user_id: int, dataset: pd.DataFrame
+) -> tuple[dict, Optional[dict]]:
+    """Process untrainable models (SM2, Ebisu-v2)."""
+    testsets = []
+    tscv = TimeSeriesSplit(n_splits=config.n_splits)
+    for _, test_index in tscv.split(dataset):
+        test_set = dataset.iloc[test_index].copy()
+        testsets.append(test_set)
+
+    p = []
+    y = []
+    save_tmp = []
+    ebisu = Ebisu()
+
+    for i, testset in enumerate(testsets):
+        if config.model_name == "SM2":
+            testset["stability"] = testset["sequence"].map(lambda x: sm2(x, config))
+            testset["p"] = np.exp(
+                np.log(0.9) * testset["delta_t"] / testset["stability"]
+            )
+        elif config.model_name == "Ebisu-v2":
+            testset["model"] = testset["sequence"].map(ebisu.ebisu_v2)
+            testset["p"] = testset.apply(
+                lambda x: ebisu.predict(x["model"], x["delta_t"]),
+                axis=1,
+            )
+
+        p.extend(testset["p"].tolist())
+        y.extend(testset["y"].tolist())
+        save_tmp.append(testset)
+    save_tmp = pd.concat(save_tmp)
+    stats, raw = evaluate(y, p, save_tmp, config.model_name, user_id)
+    return stats, raw
+
+
+def baseline(user_id: int, dataset: pd.DataFrame) -> tuple[dict, Optional[dict]]:
+    testsets = []
+    avg_ps = []
+    tscv = TimeSeriesSplit(n_splits=config.n_splits)
+    for train_index, test_index in tscv.split(dataset):
+        test_set = dataset.iloc[test_index].copy()
+        testsets.append(test_set)
+        train_set = dataset.iloc[train_index].copy()
+        avg_ps.append(train_set["y"].mean())
+
+    p = []
+    y = []
+    save_tmp = []
+
+    for avg_p, testset in zip(avg_ps, testsets):
+        testset["p"] = avg_p
+        p.extend([avg_p] * testset.shape[0])
+        y.extend(testset["y"].tolist())
+        save_tmp.append(testset)
+    save_tmp = pd.concat(save_tmp)
+    stats, raw = evaluate(y, p, save_tmp, config.model_name, user_id)
+    return stats, raw
+
+def constant(user_id: int, dataset: pd.DataFrame) -> tuple[dict, Optional[dict]]:
+    constant_p_recall = 0.9999  # 99.99% probability of recall
+
+    testsets = []
+    avg_ps = []
+    tscv = TimeSeriesSplit(n_splits=config.n_splits)
+    for train_index, test_index in tscv.split(dataset):
+        test_set = dataset.iloc[test_index].copy()
+        testsets.append(test_set)
+        avg_ps.append(constant_p_recall)
+
+    p = []
+    y = []
+    save_tmp = []
+
+    for avg_p, testset in zip(avg_ps, testsets):
+        testset["p"] = avg_p
+        p.extend([avg_p] * testset.shape[0])
+        y.extend(testset["y"].tolist())
+        save_tmp.append(testset)
+    save_tmp = pd.concat(save_tmp)
+    stats, raw = evaluate(y, p, save_tmp, config.model_name, user_id)
+    return stats, raw
+
+
+def rmse_bins_exploit(
+    user_id: int, dataset: pd.DataFrame
+) -> tuple[dict, Optional[dict]]:
+    """Process RMSE-BINS-EXPLOIT model."""
+    tscv = TimeSeriesSplit(n_splits=config.n_splits)
+    save_tmp = []
+    first_test_index = int(1e9)
+    for _, test_index in tscv.split(dataset):
+        first_test_index = min(first_test_index, test_index.min())
+        test_set = dataset.iloc[test_index].copy()
+        save_tmp.append(test_set)
+
+    p = []
+    y = []
+    model = RMSEBinsExploit()
+    for i in range(len(dataset)):
+        row = dataset.iloc[i].copy()
+        bin = get_bin(row)
+        if i >= first_test_index:
+            pred = model.predict(bin)
+            p.append(pred)
+            y.append(row["y"])
+            model.adapt(bin, row["y"])
+
+    save_tmp_df = pd.concat(save_tmp)
+    save_tmp_df["p"] = p
+    stats, raw = evaluate(y, p, save_tmp_df, config.model_name, user_id)
+    return stats, raw
+
+
+>>>>>>> 1348a1ecb58 (Add fsrs-7)
 @catch_exceptions
 def process(user_id: int) -> tuple[dict, Optional[dict]]:
     """Main processing function for all models."""
@@ -211,6 +395,7 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
     if config.model_name == "SM2" or config.model_name.startswith("Ebisu"):
         return process_untrainable(user_id, dataset, config)
     if config.model_name == "AVG":
+<<<<<<< HEAD
         return baseline(user_id, dataset, config)
     if config.model_name == "RMSE-BINS-EXPLOIT":
         return rmse_bins_exploit(user_id, dataset, config)
@@ -220,6 +405,13 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
         return fsrs_one_step(user_id, dataset, config)
     if config.model_name == "FSRS-rs":
         return process_fsrs_rs(user_id, dataset, config)
+=======
+        return baseline(user_id, dataset)
+    if config.model_name == "CONST":
+        return constant(user_id, dataset)
+    if config.model_name == "RMSE-BINS-EXPLOIT":
+        return rmse_bins_exploit(user_id, dataset)
+>>>>>>> 1348a1ecb58 (Add fsrs-7)
 
     # Process trainable models
     w_list = []
@@ -258,12 +450,20 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
                     )
                 if config.use_recency_weighting:
                     x = np.linspace(0, 1, len(train_partition))
-                    train_partition["weights"] = 0.25 + 0.75 * np.power(x, 3)
+                    train_partition["weights"] = 0.1 + 0.9 * np.power(x, 3)
+                    # pow_a = 1.7
+                    # pow_b = 5
+                    # train_partition["weights"] = 0.1 + 0.9 * np.power(1 - np.power(1 - x, pow_a), pow_b)  # sigmoid
+                    # sanity check, check that the largest value is the last one and the smallest value is the first one
+                    assert max(train_partition["weights"]) == list(train_partition["weights"])[-1]
+                    assert min(train_partition["weights"]) == list(train_partition["weights"])[0]
+                    # if config.model_name == "FSRS-7":
+                    #     train_partition["weights"] *= np.where(train_partition["elapsed_days"] > 0, 1, 0)
 
                 model = create_model(config)
-                if config.default_params:
-                    partition_weights[partition] = model.state_dict()
-                    continue
+                # if config.dry_run:
+                #     partition_weights[partition] = model.state_dict()
+                #     continue
 
                 if config.model_name == "LSTM":
                     model = model.to(config.device)
@@ -290,10 +490,7 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
                         test_set=None,
                         batch_size=config.batch_size,
                     )
-                    if config.only_S0:
-                        partition_weights[partition] = trainer.model.state_dict()
-                    else:
-                        partition_weights[partition] = trainer.train()
+                    partition_weights[partition] = trainer.train()
             except Exception as e:
                 if str(e).endswith("inadequate."):
                     if config.verbose_inadequate_data:
@@ -333,7 +530,12 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
 
     save_tmp_df = pd.concat(save_tmp)
     del save_tmp_df["tensor"]
-    save_evaluation_file(user_id, save_tmp_df, config)
+    if config.save_evaluation_file:
+        save_tmp_df.to_csv(
+            f"evaluation/{config.get_evaluation_file_name()}/{user_id}.tsv",
+            sep="\t",
+            index=False,
+        )
 
     stats, raw = evaluate(
         y, p, save_tmp_df, config.get_evaluation_file_name(), user_id, config, w_list
@@ -341,6 +543,71 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
     return stats, raw
 
 
+<<<<<<< HEAD
+=======
+def evaluate(y, p, df, file_name, user_id, w_list=None):
+    if config.generate_plots:
+        fig = plt.figure()
+        plot_brier(p, y, ax=fig.add_subplot(111))
+        fig.savefig(f"evaluation/{file_name}/calibration-retention-{user_id}.png")
+        fig = plt.figure()
+        optimizer = Optimizer()
+        if "s" in df.columns:  # Add this check
+            df["stability"] = df["s"]
+            optimizer.calibration_helper(
+                df[["stability", "p", "y"]].copy(),
+                "stability",
+                lambda x: math.pow(1.2, math.floor(math.log(x, 1.2))),
+                True,
+                fig.add_subplot(111),
+            )
+            fig.savefig(f"evaluation/{file_name}/calibration-stability-{user_id}.png")
+    p_calibrated = lowess(
+        y, p, it=0, delta=0.01 * (max(p) - min(p)), return_sorted=False
+    )
+    ici = np.mean(np.abs(p_calibrated - p))
+    rmse_raw = root_mean_squared_error(y_true=y, y_pred=p)
+    logloss = log_loss(y_true=y, y_pred=p, labels=[0, 1])
+    rmse_bins = rmse_matrix(df)
+    try:
+        auc = round(roc_auc_score(y_true=y, y_score=p), 6)
+    except Exception:
+        auc = None
+    stats = {
+        "metrics": {
+            "RMSE": round(rmse_raw, 6),
+            "LogLoss": round(logloss, 6),
+            "RMSE(bins)": round(rmse_bins, 6),
+            "ICI": round(ici, 6),
+            "AUC": auc,
+        },
+        "user": int(user_id),
+        "size": len(y),
+    }
+    if config.save_weights:
+        Path(f"weights/{file_name}").mkdir(parents=True, exist_ok=True)
+        torch.save(w_list[-1], f"weights/{file_name}/{user_id}.pth")
+    elif (
+        w_list
+        and isinstance(w_list[0], dict)
+        and all(isinstance(w, list) for w in w_list[0].values())
+    ):
+        stats["parameters"] = {
+            int(partition): list(map(lambda x: round(x, 4), w))
+            for partition, w in w_list[-1].items()
+        }
+    if config.save_raw_output:
+        raw = {
+            "user": int(user_id),
+            "p": list(map(lambda x: round(x, 4), p)),
+            "y": list(map(int, y)),
+        }
+    else:
+        raw = None
+    return stats, raw
+
+
+>>>>>>> 1348a1ecb58 (Add fsrs-7)
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     unprocessed_users = []
@@ -362,15 +629,12 @@ if __name__ == "__main__":
         sort_jsonl(raw_file)
 
     for user_id in dataset.partitioning.dictionaries[0]:
-        user_id_value = user_id.as_py()
-        # Add the filter here
-        if config.max_user_id is not None and user_id_value > config.max_user_id:
+        if user_id.as_py() in processed_user:
             continue
-        if user_id_value in processed_user:
-            continue
-        unprocessed_users.append(user_id_value)
+        unprocessed_users.append(user_id.as_py())
 
     unprocessed_users.sort()
+    unprocessed_users = [1]
 
     with ProcessPoolExecutor(max_workers=config.num_processes) as executor:
         futures = [

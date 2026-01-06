@@ -12,6 +12,7 @@ ModelName = Literal[
     "FSRS-4.5",
     "FSRS-5",
     "FSRS-6",
+    "FSRS-7",
     "FSRS-6-one-step",
     "FSRS-rs",
     # Neural networks
