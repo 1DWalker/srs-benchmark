@@ -634,7 +634,7 @@ if __name__ == "__main__":
         unprocessed_users.append(user_id.as_py())
 
     unprocessed_users.sort()
-    unprocessed_users = [1]
+    unprocessed_users = list(filter(lambda x: x <= 1000, unprocessed_users))
 
     with ProcessPoolExecutor(max_workers=config.num_processes) as executor:
         futures = [
