@@ -60,6 +60,9 @@ class FSRS7ParameterClipper(FSRS6ParameterClipper):
             w[33] = w[33].clamp(0.001, 1)  # weight 1
             w[34] = w[34].clamp(0.001, 1)  # weight 2
             w[35] = w[35].clamp(0.001, 1)  # weight 3
+            w[36] = w[36].clamp(-1, 1)
+            w[37] = w[37].clamp(-1, 1)
+            w[38] = w[38].clamp(-1, 1)
             module.w.data = w
 
 
@@ -75,7 +78,7 @@ class FSRS7(FSRS6):
               1.1151, 0.2171, 1.7041, 0.0623, 0.001, 0.985, 0.0, 0.6379, 1.2916,  # Stability (long-term)
               1.4172, 0.3211, 3.7526, 0.001, 0.2414, 0.001, 1.5227, 0.2113, 1.3,  # Stability (short-term)
               2.5, 0.998,  # Long-short term transition function
-              0.12, 0.04, 0.7, 0.9, 0.7, 0.95, 0.5, 0.75, 0.2]
+              0.12, 0.04, 0.7, 0.9, 0.7, 0.95, 0.5, 0.75, 0.2, 0, 0, 0]
 
     def __init__(self, config: Config, w: Optional[List[float]] = None):
         super().__init__(config)
@@ -99,7 +102,8 @@ class FSRS7(FSRS6):
         ].transpose(0, 1)
 
         retentions = self.forgetting_curve(delta_ts, stabilities,
-                                           -self.w[-9], -self.w[-8], -self.w[-7],
+                                           -self.w[-12], -self.w[-11], -self.w[-10],
+                                           self.w[-9], self.w[-8], self.w[-7],
                                            self.w[-6], self.w[-5], self.w[-4],
                                            self.w[-3], self.w[-2], self.w[-1])
         retentions = retentions.clamp(0.0001, 0.9999)
@@ -111,9 +115,10 @@ class FSRS7(FSRS6):
         return output
 
     def forgetting_curve(self, t, s,
-                         decay1=-init_w[-9], decay2=-init_w[-8], decay3=-init_w[-7],
-                         base1=init_w[-6], base2=init_w[-5], base3=init_w[-4],
-                         weight1=init_w[-3], weight2=init_w[-2], weight3=init_w[-1]):
+                         decay1=-init_w[-12], decay2=-init_w[-11], decay3=-init_w[-10],
+                         base1=init_w[-9], base2=init_w[-8], base3=init_w[-7],
+                         base_weight1=init_w[-6], base_weight2=init_w[-5], base_weight3=init_w[-4],
+                         scale1=init_w[-3], scale2=init_w[-2], scale3=init_w[-1]):
         # decays must be passed into forgetting_curve with a minus sign
         factor1 = base1 ** (1 / decay1) - 1
         factor2 = base2 ** (1 / decay2) - 1
@@ -122,6 +127,9 @@ class FSRS7(FSRS6):
         R1 = (1 + factor1 * t_over_s) ** decay1
         R2 = (1 + factor2 * t_over_s) ** decay2
         R3 = (1 + factor3 * t_over_s) ** decay3
+        weight1 = base_weight1 * s ** scale1
+        weight2 = base_weight2 * s ** scale2
+        weight3 = base_weight3 * s ** scale3
         numerator = weight1 * R1 + weight2 * R2 + weight3 * R3
         denominator = weight1 + weight2 + weight3
         return numerator / denominator
@@ -471,10 +479,10 @@ class FSRS7(FSRS6):
             new_d = new_d.clamp(1, 10)
         else:
             success = X[:, 1] > 1
-            r = self.forgetting_curve(X[:, 0], state[:, 0],
-                                           -self.w[-9], -self.w[-8], -self.w[-7],
-                                           self.w[-6], self.w[-5], self.w[-4],
-                                           self.w[-3], self.w[-2], self.w[-1])
+            r = self.forgetting_curve(X[:, 0], state[:, 0])
+                                        #    -self.w[-9], -self.w[-8], -self.w[-7],
+                                        #    self.w[-6], self.w[-5], self.w[-4],
+                                        #    self.w[-3], self.w[-2], self.w[-1])
 
             if not torch.isfinite(r).all():
                 print('R contains NaN/Inf')
