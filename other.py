@@ -24,7 +24,13 @@ from script import sort_jsonl
 import multiprocessing as mp
 import pyarrow.parquet as pq  # type: ignore
 from config import create_parser, Config
-from utils import catch_exceptions, get_bin, rmse_matrix
+from utils import (
+    catch_exceptions,
+    save_evaluation_file,
+    evaluate,
+    batch_process_wrapper,
+    Collection,
+)
 from data_loader import UserDataLoader
 from model_processors import (
     process_untrainable,
@@ -222,31 +228,6 @@ class Trainer:
         ax.set_ylabel("loss")
         ax.legend()
         return fig
-
-
-class Collection:
-    def __init__(self, model: TrainableModel) -> None:
-        self.model = model.to(device=config.device)
-        self.model.eval()
-
-    def batch_predict(self, dataset):
-        batch_dataset = BatchDataset(
-            dataset, batch_size=8192, sort_by_length=False, device=config.device
-        )
-        batch_loader = BatchLoader(batch_dataset, shuffle=False)
-        retentions = []
-        stabilities = []
-        difficulties = []
-        with torch.no_grad():
-            for batch in batch_loader:
-                result = batch_process_wrapper(self.model, batch)
-                retentions.extend(result["retentions"].cpu().tolist())
-                if "stabilities" in result:
-                    stabilities.extend(result["stabilities"].cpu().tolist())
-                if "difficulties" in result:
-                    difficulties.extend(result["difficulties"].cpu().tolist())
-
-        return retentions, stabilities, difficulties
 
 
 def process_untrainable(
@@ -509,68 +490,6 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
     stats, raw = evaluate(
         y, p, save_tmp_df, config.get_evaluation_file_name(), user_id, config, w_list
     )
-    return stats, raw
-
-
-def evaluate(y, p, df, file_name, user_id, w_list=None):
-    if config.generate_plots:
-        fig = plt.figure()
-        plot_brier(p, y, ax=fig.add_subplot(111))
-        fig.savefig(f"evaluation/{file_name}/calibration-retention-{user_id}.png")
-        fig = plt.figure()
-        optimizer = Optimizer()
-        if "s" in df.columns:  # Add this check
-            df["stability"] = df["s"]
-            optimizer.calibration_helper(
-                df[["stability", "p", "y"]].copy(),
-                "stability",
-                lambda x: math.pow(1.2, math.floor(math.log(x, 1.2))),
-                True,
-                fig.add_subplot(111),
-            )
-            fig.savefig(f"evaluation/{file_name}/calibration-stability-{user_id}.png")
-    p_calibrated = lowess(
-        y, p, it=0, delta=0.01 * (max(p) - min(p)), return_sorted=False
-    )
-    ici = np.mean(np.abs(p_calibrated - p))
-    rmse_raw = root_mean_squared_error(y_true=y, y_pred=p)
-    logloss = log_loss(y_true=y, y_pred=p, labels=[0, 1])
-    rmse_bins = rmse_matrix(df)
-    try:
-        auc = round(roc_auc_score(y_true=y, y_score=p), 6)
-    except Exception:
-        auc = None
-    stats = {
-        "metrics": {
-            "RMSE": round(rmse_raw, 6),
-            "LogLoss": round(logloss, 6),
-            "RMSE(bins)": round(rmse_bins, 6),
-            "ICI": round(ici, 6),
-            "AUC": auc,
-        },
-        "user": int(user_id),
-        "size": len(y),
-    }
-    if config.save_weights:
-        Path(f"weights/{file_name}").mkdir(parents=True, exist_ok=True)
-        torch.save(w_list[-1], f"weights/{file_name}/{user_id}.pth")
-    elif (
-        w_list
-        and isinstance(w_list[0], dict)
-        and all(isinstance(w, list) for w in w_list[0].values())
-    ):
-        stats["parameters"] = {
-            int(partition): list(map(lambda x: round(x, 4), w))
-            for partition, w in w_list[-1].items()
-        }
-    if config.save_raw_output:
-        raw = {
-            "user": int(user_id),
-            "p": list(map(lambda x: round(x, 4), p)),
-            "y": list(map(int, y)),
-        }
-    else:
-        raw = None
     return stats, raw
 
 
