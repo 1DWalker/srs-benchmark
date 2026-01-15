@@ -1,9 +1,6 @@
 import copy
-<<<<<<< HEAD
-=======
 import math
 import random
->>>>>>> 1348a1ecb58 (Add fsrs-7)
 import sys
 import os
 import time
@@ -27,17 +24,7 @@ from script import sort_jsonl
 import multiprocessing as mp
 import pyarrow.parquet as pq  # type: ignore
 from config import create_parser, Config
-<<<<<<< HEAD
-from utils import (
-    catch_exceptions,
-    save_evaluation_file,
-    evaluate,
-    batch_process_wrapper,
-    Collection,
-)
-=======
 from utils import catch_exceptions, get_bin, rmse_matrix
->>>>>>> 1348a1ecb58 (Add fsrs-7)
 from data_loader import UserDataLoader
 from model_processors import (
     process_untrainable,
@@ -65,8 +52,6 @@ warnings.filterwarnings("ignore", category=UserWarning)
 torch.manual_seed(config.seed)
 tqdm.pandas()
 
-<<<<<<< HEAD
-=======
 def batch_process_wrapper(
     model: TrainableModel, batch: tuple[Tensor, Tensor, Tensor, Tensor, Tensor]
 ) -> dict[str, Tensor]:
@@ -77,7 +62,6 @@ def batch_process_wrapper(
     result.update(outputs)
     return result
 
->>>>>>> 1348a1ecb58 (Add fsrs-7)
 
 class Trainer:
     optimizer: torch.optim.Optimizer
@@ -240,8 +224,6 @@ class Trainer:
         return fig
 
 
-<<<<<<< HEAD
-=======
 class Collection:
     def __init__(self, model: TrainableModel) -> None:
         self.model = model.to(device=config.device)
@@ -381,7 +363,6 @@ def rmse_bins_exploit(
     return stats, raw
 
 
->>>>>>> 1348a1ecb58 (Add fsrs-7)
 @catch_exceptions
 def process(user_id: int) -> tuple[dict, Optional[dict]]:
     """Main processing function for all models."""
@@ -395,23 +376,11 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
     if config.model_name == "SM2" or config.model_name.startswith("Ebisu"):
         return process_untrainable(user_id, dataset, config)
     if config.model_name == "AVG":
-<<<<<<< HEAD
-        return baseline(user_id, dataset, config)
-    if config.model_name == "RMSE-BINS-EXPLOIT":
-        return rmse_bins_exploit(user_id, dataset, config)
-    if config.model_name == "MOVING-AVG":
-        return moving_avg(user_id, dataset, config)
-    if config.model_name == "FSRS-6-one-step":
-        return fsrs_one_step(user_id, dataset, config)
-    if config.model_name == "FSRS-rs":
-        return process_fsrs_rs(user_id, dataset, config)
-=======
         return baseline(user_id, dataset)
     if config.model_name == "CONST":
         return constant(user_id, dataset)
     if config.model_name == "RMSE-BINS-EXPLOIT":
         return rmse_bins_exploit(user_id, dataset)
->>>>>>> 1348a1ecb58 (Add fsrs-7)
 
     # Process trainable models
     w_list = []
@@ -543,8 +512,6 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
     return stats, raw
 
 
-<<<<<<< HEAD
-=======
 def evaluate(y, p, df, file_name, user_id, w_list=None):
     if config.generate_plots:
         fig = plt.figure()
@@ -607,7 +574,6 @@ def evaluate(y, p, df, file_name, user_id, w_list=None):
     return stats, raw
 
 
->>>>>>> 1348a1ecb58 (Add fsrs-7)
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     unprocessed_users = []
@@ -634,7 +600,7 @@ if __name__ == "__main__":
         unprocessed_users.append(user_id.as_py())
 
     unprocessed_users.sort()
-    unprocessed_users = list(filter(lambda x: x <= 1000, unprocessed_users))
+    unprocessed_users = [3]
 
     with ProcessPoolExecutor(max_workers=config.num_processes) as executor:
         futures = [
