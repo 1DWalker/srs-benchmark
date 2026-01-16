@@ -101,18 +101,23 @@ class FSRS7(FSRS6):
             torch.arange(real_batch_size, device=self.config.device),
         ].transpose(0, 1)
 
-        retentions = self.forgetting_curve(delta_ts, stabilities,
-                                           -self.w[-12], -self.w[-11], -self.w[-10],
-                                           self.w[-9], self.w[-8], self.w[-7],
-                                           self.w[-6], self.w[-5], self.w[-4],
-                                           self.w[-3], self.w[-2], self.w[-1])
-        retentions = retentions.clamp(0.0001, 0.9999)
+        retentions = self.forgetting_curve_current_params(delta_ts, stabilities)
         output = {
             "retentions": retentions,
             "stabilities": stabilities,
             "difficulties": difficulties,
         }
         return output
+
+    def forgetting_curve_current_params(self, t, s):
+        retentions = self.forgetting_curve(t, s,
+                                           -self.w[-12], -self.w[-11], -self.w[-10],
+                                           self.w[-9], self.w[-8], self.w[-7],
+                                           self.w[-6], self.w[-5], self.w[-4],
+                                           self.w[-3], self.w[-2], self.w[-1])
+        retentions = retentions.clamp(0.0001, 0.9999)
+        return retentions
+
 
     def forgetting_curve(self, t, s,
                          decay1=-init_w[-12], decay2=-init_w[-11], decay3=-init_w[-10],

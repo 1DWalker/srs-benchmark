@@ -119,7 +119,7 @@ class LSTM(BaseModel):
         self.d_fc = nn.Linear(self.n_hidden, self.n_curves)
 
         if state_dict is not None:
-            self.load_state_dict(state_dict[0])
+            self.load_state_dict(state_dict)
         else:
             try:
                 self.load_state_dict(
@@ -177,7 +177,7 @@ class LSTM(BaseModel):
         s_nh = s_lnh[seq_lens - 1, torch.arange(n, device=self.config.device)]
         d_nh = d_lnh[seq_lens - 1, torch.arange(n, device=self.config.device)]
         retentions = self.forgetting_curve(delta_nh, w_nh, s_nh, d_nh)
-        return {"retentions": retentions, "stabilities": s_nh}
+        return {"retentions": retentions, "stabilities": s_nh, "curve_params": (w_nh, s_nh, d_nh)}
 
     def forgetting_curve(self, t_nh, w_nh, s_nh, d_nh):
         return (1 - 1e-7) * (

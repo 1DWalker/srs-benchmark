@@ -426,6 +426,10 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
                         model,
                         inner_opt.state_dict(),
                     )
+                    if split_i == 4:
+                        path = f"lstm_weights/lstm_user_{user_id}.pth"
+                        print(f"Saving LSTM: {path}")
+                        torch.save(trained_model.state_dict(), f"{path}")
                     partition_weights[partition] = copy.deepcopy(
                         trained_model.state_dict()
                     )
@@ -490,6 +494,7 @@ def process(user_id: int) -> tuple[dict, Optional[dict]]:
     stats, raw = evaluate(
         y, p, save_tmp_df, config.get_evaluation_file_name(), user_id, config, w_list
     )
+
     return stats, raw
 
 
@@ -519,7 +524,8 @@ if __name__ == "__main__":
         unprocessed_users.append(user_id.as_py())
 
     unprocessed_users.sort()
-    unprocessed_users = [3]
+    unprocessed_users = list(range(1, 201))
+    # unprocessed_users = list(filter(lambda x: x <= 200, unprocessed_users))
 
     with ProcessPoolExecutor(max_workers=config.num_processes) as executor:
         futures = [
