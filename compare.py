@@ -7,6 +7,8 @@ from models.fsrs_v7 import FSRS7
 from models.lstm import LSTM
 
 SECOND = 1 / 86400
+MINUTE = 60 * SECOND
+HOUR = 60 * MINUTE
 
 class CustomConfig:
     def __init__(self):
@@ -28,30 +30,26 @@ def batched_binary_search(l, r, f, iters=60):
         l, r = torch.where(cond, l, mid), torch.where(cond, mid, r)
     return l
 
-def inverse_fsrs(fsrs_params, retentions, history, min_interval=SECOND, max_interval=50 * 365 * 24 * 60 * 60):
+def inverse_lstm(lstm_params, retentions, history, min_interval=SECOND, max_interval=50 * 365 * 24 * 60 * 60):
     """Return intervals to hit near the retentions, or nan if impossible within reasonable interval bounds"""
-    fsrs = FSRS7(CustomConfig(), fsrs_params)
+    lstm = LSTM(CustomConfig(), lstm_params)
     L, B, _ = history.shape
     start_l = torch.full_like(retentions, min_interval)
     start_r = torch.full_like(retentions, max_interval)
-    stabilities = fsrs.batch_process(history, start_l, torch.full((1,), L), B)["stabilities"]
+    w_nh, s_nh, d_nh = lstm.batch_process(history, torch.tensor([1]), torch.full((1,), L), B)["curve_params"]
     def eval_x(x):
-        return fsrs.forgetting_curve_current_params(x, stabilities)
+        return lstm.forgetting_curve(x.unsqueeze(-1), w_nh, s_nh, d_nh)
     def predicate(x):
         return eval_x(x) < retentions
     result = batched_binary_search(start_l, start_r, predicate)
     pred = eval_x(result)
     answer = torch.where(torch.abs(pred - retentions) < 1e-3, result, torch.full_like(result, np.nan))
-
     return answer
 
-def eval_lstm(lstm_params, history, intervals):
-    lstm = LSTM(CustomConfig(), lstm_params)
+def eval_fsrs(fsrs_params, history, intervals):
+    fsrs = FSRS7(CustomConfig(), fsrs_params)
     L, B, _ = history.shape
-    w_nh, s_nh, d_nh = lstm.batch_process(history, torch.tensor([1]), torch.full((1,), L), B)["curve_params"]
-    result = lstm.forgetting_curve(intervals.unsqueeze(-1), w_nh, s_nh, d_nh)
-    return result
-
+    return fsrs.batch_process(history, intervals, torch.full((1,), L), B)["retentions"]
 
 def get_fsrs_params_dict():
     path = "result/FSRS-7-secs-recency.jsonl"
@@ -70,23 +68,27 @@ def get_lstm_params_dict(users):
     user_to_params = {}
     for user in users:
         user_to_params[user] = torch.load(f"lstm_weights/lstm_user_{user}.pth", weights_only=True)
+        assert user_to_params[user] is not None, f"{user} LSTM file not found."
     return user_to_params
 
-def create_plot(x, y_preds, plot_diff=False):
+def create_plot(x, y_preds, title, plot_diff=False,min_val=0.6):
     """
     x: (N,)
     y_preds: (B, N) with NaN prefix/suffix per row
     plot_diff: if True, plot (y - x) and remove identity line
+    min_val: if set, only plot points where x >= min_val AND y >= min_val
     """
 
     B, N = y_preds.shape
-
     all_vals = []  # collect for axis scaling in diff mode
 
     # Plot each batch line (only non-NaN region)
     for b in range(B):
         y = y_preds[b]
         mask = ~np.isnan(y)
+
+        if min_val is not None:
+            mask &= (x >= min_val) & (y >= min_val)
 
         y_plot = y[mask] - x[mask] if plot_diff else y[mask]
         all_vals.append(y_plot)
@@ -95,7 +97,7 @@ def create_plot(x, y_preds, plot_diff=False):
             x[mask],
             y_plot,
             color="black",
-            alpha=0.15,
+            alpha=0.10,
             linewidth=1
         )
 
@@ -107,6 +109,9 @@ def create_plot(x, y_preds, plot_diff=False):
 
     valid = ~np.isnan(mean)
 
+    if min_val is not None:
+        valid &= (x >= min_val) & (mean >= min_val)
+
     mean_plot = mean[valid] - x[valid] if plot_diff else mean[valid]
     median_plot = median[valid] - x[valid] if plot_diff else median[valid]
 
@@ -117,10 +122,10 @@ def create_plot(x, y_preds, plot_diff=False):
     plt.plot(x[valid], median_plot, linewidth=2, label="median")
 
     # Identity line (only if not diff mode)
-    lims = [0, 1]
+    lo = min_val if min_val is not None else 0
+    lims = [lo, 1]
     if not plot_diff:
-        plt.plot(lims, lims, linestyle=":", linewidth=2, label="y = x")
-
+        plt.plot(lims, lims, linewidth=2, label="identity", color="black")
         plt.xlim(lims)
         plt.ylim(lims)
         plt.gca().set_aspect("equal", adjustable="box")
@@ -129,34 +134,55 @@ def create_plot(x, y_preds, plot_diff=False):
         # Center y-axis around 0
         max_abs = np.nanmax(np.abs(np.concatenate(all_vals)))
         plt.ylim(-max_abs, max_abs)
-        plt.axhline(0, linestyle=":", linewidth=1)
+        plt.axhline(0, linewidth=2, color="black")
 
-    plt.xlabel("x (probability)")
-    plt.ylabel("y_pred - x" if plot_diff else "y_pred (probability)")
+    plt.xlabel("LSTM R")
+    plt.ylabel("FSRS-7-dev R - LSTM R" if plot_diff else "FSRS-7-dev R")
     plt.legend()
+    plt.title(title)
     plt.show()
+
+def format_history(history):
+    def fmt_time(t_days):
+        secs = t_days / SECOND  # convert to seconds
+
+        if secs < 60:
+            return f"{round(secs)}s"
+        elif secs < 3600:
+            return f"{round(secs / 60)}m"
+        elif secs < 86400:
+            return f"{round(secs / 3600)}h"
+        else:
+            return f"{round(secs / 86400)}d"
+
+    parts = []
+    for t, r in history:
+        parts.append(f"({fmt_time(t)}, r={r})")
+
+    return " → ".join(parts)
 
 
 @torch.no_grad()
 def main():
-    history = [[0, 1], [600 * SECOND, 3], [1, 1], [600 * SECOND, 3]]
-    r_space = torch.linspace(0.99, 0.01, 199)
+    history = [[0, 1]]
+    # history = [[0, 1], [12 * HOUR, 3], [5, 1], [10 * MINUTE, 1]]
+    # history = [[0, 1], [600 * SECOND, 3], [1, 1], [600 * SECOND, 3]]
+    # history = [[0, 1], [600 * SECOND, 1], [600 * SECOND, 3]]
+    # history = [[0, 1], [600 * SECOND, 1], [600 * SECOND, 1], [600 * SECOND, 1], [600 * SECOND, 3]]
+    r_space = torch.linspace(0.999, 0.001, 399)
     sequences = torch.tensor(history).unsqueeze(1)
     user_to_fsrs_params = get_fsrs_params_dict()
 
-    users = list(range(1, 101))
-    # for user in range(1, 101):
-    lstm_params = get_lstm_params_dict(users)
-    lstm_preds = []
+    users = list(range(1, 201))
+    user_to_lstm_params = get_lstm_params_dict(users)
+    fsrs_preds = []
     for user in users:
-        intervals = inverse_fsrs(user_to_fsrs_params[user], r_space, sequences)
-        # print("int days", intervals)
-        # print("int secs", intervals / SECOND)
-        lstm_pred = eval_lstm(lstm_params[user], sequences, intervals)
-        lstm_preds.append(lstm_pred)
-        # print("pred", lstm_pred)
+        intervals = inverse_lstm(user_to_lstm_params[user], r_space, sequences)
+        lstm_pred = eval_fsrs(user_to_fsrs_params[user], sequences, intervals)
+        fsrs_preds.append(lstm_pred)
 
-    create_plot(x=r_space.numpy(), y_preds=torch.stack(lstm_preds).numpy())
+    title = format_history(history) + f"; {len(users)} users"
+    create_plot(x=r_space.numpy(), y_preds=torch.stack(fsrs_preds).numpy(), title=title)
 
 
 
