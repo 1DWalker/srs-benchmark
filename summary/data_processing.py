@@ -13,7 +13,6 @@ from tqdm import tqdm
 
 import random
 
-from other import get_bin
 from utils import load_tensor, parse_toml, save_tensor
 
 random.seed(1234)
@@ -31,6 +30,7 @@ def process_df(df, dtype, device):
     df["has_label"] = (df.groupby("card_id").cumcount(ascending=False) != 0).astype(int)
 
     def process_group(group):
+        feature_review_th = torch.tensor(group["review_th"].to_numpy(), dtype=torch.int, device=device)
         feature_elapsed_days_int = torch.tensor(group["elapsed_days_int"].to_numpy(), dtype=torch.int, device=device)
         feature_elapsed_days_real = torch.tensor(group["elapsed_days_real"].to_numpy(), dtype=dtype, device=device)
         feature_rating = torch.tensor(group["rating"].to_numpy(), dtype=dtype, device=device)
@@ -53,9 +53,8 @@ def process_df(df, dtype, device):
             group["y"].shift(-1).fillna(0).to_numpy(), dtype=dtype, device=device
         )
         label_is_same_day = torch.tensor(group["is_same_day"].shift(-1).fillna(0).to_numpy(), dtype=torch.bool, device=device)
-        label_is_equalize = torch.tensor(group["is_equalize_review"].shift(-1).fillna(0).to_numpy(), dtype=torch.bool, device=device)
         has_label = torch.tensor(group["has_label"].to_numpy(), device=device)
-        return feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label
+        return feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, has_label
 
     card_id_to_group = {
         card_id: group.reset_index(drop=True)
@@ -100,12 +99,6 @@ def process(user_id, config):
     )
     df_revlogs["review_th"] = range(1, df_revlogs.shape[0] + 1)
     df_revlogs.drop(columns=["user_id"], inplace=True)
-    equalize_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
-    with equalize_env.begin(write=False) as txn:
-        equalize_review_ths = load_tensor(txn, f"{user_id}_review_ths", device="cpu")
-        rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device="cpu")
-    equalize_review_ths_set = set(equalize_review_ths.tolist())
-    df_revlogs["is_equalize_review"] = df_revlogs["review_th"].isin(equalize_review_ths_set).astype(int)
     card_id_to_tensors = process_df(df_revlogs, config.DTYPE, torch.device("cpu"))
     
     sizes_freq_dict = {}
@@ -135,7 +128,8 @@ def process(user_id, config):
         if len(group_lists) == 0:
             continue
 
-        feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label = list(zip(*group_lists))
+        feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, has_label = list(zip(*group_lists))
+        feature_review_th = pad_sequence(feature_review_th, batch_first=True, padding_value=0)
         feature_elapsed_days_int = pad_sequence(feature_elapsed_days_int, batch_first=True, padding_value=0)
         feature_elapsed_days_real = pad_sequence(feature_elapsed_days_real, batch_first=True, padding_value=0)
         feature_rating = pad_sequence(feature_rating, batch_first=True, padding_value=0)
@@ -146,16 +140,15 @@ def process(user_id, config):
             label_review_th, batch_first=True, padding_value=-1
         )
         label_is_same_day = pad_sequence(label_is_same_day, batch_first=True, padding_value=0)
-        label_is_equalize = pad_sequence(label_is_equalize, batch_first=True, padding_value=0)
         has_label = pad_sequence(has_label, batch_first=True, padding_value=0)
         total_size += feature_rating.size(0) * feature_rating.size(1)
-        result.append((feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label))
+        result.append((feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, has_label))
     
     print("Total size:", total_size, len(df_revlogs), total_size / len(df_revlogs))
     assert total_size / len(df_revlogs) <= 1.01 * config.MAX_FACTOR
     assert total_size <= 1.01 * config.MAX_TOTAL_SIZE
 
-    return (result, equalize_review_ths, rmse_bins)
+    return result
 
 
 def job(user_id, config, writer_queue, progress_queue):
@@ -171,12 +164,13 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
         sample = writer_queue.get()
         if sample is None:
             break
-        user_id, (tensors, equalize_review_ths, rmse_bins) = sample
+        user_id, tensors = sample
 
         with env.begin(write=True) as txn:
-            for i, (feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, label_is_equalize, has_label) in enumerate(
+            for i, (feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, has_label) in enumerate(
                 tensors
             ):
+                save_tensor(txn, f"{user_id}_feature_review_th_{i}", feature_review_th)
                 save_tensor(txn, f"{user_id}_feature_elapsed_days_int_{i}", feature_elapsed_days_int)
                 save_tensor(txn, f"{user_id}_feature_elapsed_days_real_{i}", feature_elapsed_days_real)
                 save_tensor(txn, f"{user_id}_feature_rating_{i}", feature_rating)
@@ -185,11 +179,8 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
                 save_tensor(txn, f"{user_id}_label_y_{i}", label_y)
                 save_tensor(txn, f"{user_id}_label_review_th_{i}", label_review_th)
                 save_tensor(txn, f"{user_id}_label_is_same_day_{i}", label_is_same_day)
-                save_tensor(txn, f"{user_id}_label_is_equalize_{i}", label_is_equalize)
                 save_tensor(txn, f"{user_id}_has_label_{i}", has_label)
 
-            save_tensor(txn, f"{user_id}_equalize_review_ths", torch.tensor(equalize_review_ths))
-            save_tensor(txn, f"{user_id}_rmse_bins", torch.tensor(rmse_bins))
             save_tensor(txn, f"{user_id}_batches", torch.tensor(len(tensors)))
             txn.put(f"{user_id}_done".encode(), "true".encode())
             print("Done", user_id)
@@ -204,9 +195,6 @@ def progress_tracker(total_items, progress_queue):
 
 def main(config):
     USER_IDS = list(range(config.USER_START, config.USER_END + 1))
-    if 4371 in USER_IDS:
-        USER_IDS.remove(4371)
-        print("Removed user 4371.")
 
     done_set = set()
     unprocessed_users = []

@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, root_mean_squared_error
 import torch
-from fsrs.fsrs import FSRS6
 from utils import load_tensor
 
 
@@ -26,7 +25,7 @@ def get_data(txn, user_id, device):
     indices = list(range(num_batches))
     return [load_batch(txn, user_id, i, device) for i in indices]
 
-def evaluate_batched_parameters(txn, model, parameters_hp, user_id, min_review_th_h, max_review_th_h, device, equalize_test_reviews=False, skip_same_day_reviews=True):
+def evaluate_batched_parameters(txn, model, parameters_hp, user_id, min_review_th_h, max_review_th_h, device, equalize_test_reviews=False):
     H = min_review_th_h.size(0)
     batches = get_data(txn, user_id, device)
     loss_tot_h = 0
@@ -38,12 +37,9 @@ def evaluate_batched_parameters(txn, model, parameters_hp, user_id, min_review_t
         label_review_th_hbl = label_review_th_bl.unsqueeze(0).expand(H, -1, -1)
         has_label_hbl = has_label_bl.unsqueeze(0).expand(H, -1, -1)
         label_is_equalize_hbl = label_is_equalize_bl.unsqueeze(0).expand(H, -1, -1)
-        label_is_same_day_hbl = label_is_same_day_bl.unsqueeze(0).expand(H, -1, -1)
         label_mask_hbl = has_label_hbl * (min_review_th_h.view(H, 1, 1) <= label_review_th_hbl) * (label_review_th_hbl <= max_review_th_h.view(H, 1, 1))
         if equalize_test_reviews:
             label_mask_hbl = label_mask_hbl * label_is_equalize_hbl
-        if skip_same_day_reviews:
-            label_mask_hbl = label_mask_hbl * ~label_is_same_day_hbl
 
         loss_fn = torch.nn.BCELoss(reduction="none")
         loss_hbl = loss_fn(out_hbl, label_y_hbl)
@@ -52,8 +48,7 @@ def evaluate_batched_parameters(txn, model, parameters_hp, user_id, min_review_t
     
     return loss_tot_h / (1e-7 + loss_n_h), loss_tot_h, loss_n_h
 
-def evaluate_full(txn, model, parameter_list, splits_list, user_id, device=torch.device("cpu"), equalize_test_reviews=False, skip_same_day_reviews=True):
-    assert skip_same_day_reviews, "not supported otherwise. bins might not be precomputed properly?"
+def evaluate_full(txn, model, parameter_list, splits_list, user_id, device=torch.device("cpu"), equalize_test_reviews=False):
     assert len(splits_list) == len(parameter_list) + 1
     H = len(parameter_list)
     batches = get_data(txn, user_id, device)
@@ -85,12 +80,9 @@ def evaluate_full(txn, model, parameter_list, splits_list, user_id, device=torch
         label_review_th_hbl = label_review_th_bl.unsqueeze(0).expand(H, -1, -1)
         has_label_hbl = has_label_bl.unsqueeze(0).expand(H, -1, -1)
         label_is_equalize_hbl = label_is_equalize_bl.unsqueeze(0).expand(H, -1, -1)
-        label_is_same_day_hbl = label_is_same_day_bl.unsqueeze(0).expand(H, -1, -1)
         label_mask_hbl = has_label_hbl * (min_review_th_h.view(H, 1, 1) <= label_review_th_hbl) * (label_review_th_hbl <= max_review_th_h.view(H, 1, 1))
         if equalize_test_reviews:
             label_mask_hbl = label_mask_hbl * label_is_equalize_hbl
-        if skip_same_day_reviews:
-            label_mask_hbl = label_mask_hbl * ~label_is_same_day_hbl
         
         loss_fn = torch.nn.BCELoss(reduction="none")
         loss_hbl = loss_fn(out_hbl, label_y_hbl)

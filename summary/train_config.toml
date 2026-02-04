@@ -1,11 +1,10 @@
 SUMMARY_DB_PATH = "summary_db"
-LABEL_FILTER_DB_PATH = "label_filter_db"
 FSRS_EVALUATE_DB_PATH = "fsrs_evaluate_db"
 
 SEED = 111
 
 TRAIN_USER_START = 5000
-TRAIN_USER_END = 10000
+TRAIN_USER_END = 5000
 
 # Include some users from the train set to gauge for overfitting
 VALIDATE_OVERFIT_USER_START = 5001
@@ -14,8 +13,8 @@ VALIDATE_OVERFIT_USER_END = 5100
 VALIDATE_USER_START = 1
 VALIDATE_USER_END = 100
 
-DEVICE = "cuda"
-DTYPE = "bfloat16"
+DEVICE = "cpu"
+DTYPE = "float"
 
 # If we use a warmup, set the lr to start at for the warmup. Useful for continuing a run that was in the middle of a warmup
 WARMUP_START_LR = 0

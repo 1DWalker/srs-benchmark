@@ -5,13 +5,10 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, root_mean_squared_error
 import torch
 import wandb
-from fsrs.fsrs import FSRS6
-from rwkv.summary.summary_model import FSRSSummaryModel
 from rwkv.utils import get_number_of_trainable_parameters, transfer_child_grad_to_master
 import random
 
 from utils import compact_lmdb, load_tensor, parse_toml
-from fsrs.evaluate_fsrs import evaluate_batched_parameters, evaluate_full
 
 WEIGHT_DECAY = 1e-2
 ADAMW_EPS = 1e-18
@@ -193,11 +190,9 @@ def generate_subsplits(l, r, T):
 def main(config):
     random.seed(config.SEED)
     fsrs_model = FSRS6().to(config.DEVICE)
-
-    master_model = FSRSSummaryModel().to(config.DEVICE)
-    model = FSRSSummaryModel().selective_cast(config.DTYPE).to(config.DEVICE)
-    optimizer = get_optimizer(config, master_model)
-    print("Number of trainable parameters:", get_number_of_trainable_parameters(model))
+    summary_model = SummaryModel().to(config.DEVICE)
+    optimizer = get_optimizer(config, summary_model)
+    print("Number of trainable parameters:", get_number_of_trainable_parameters(summary_model))
 
     if config.TRAIN_MODE == "WS":
         start_factor = max(1e-4, config.WARMUP_START_LR / config.PEAK_LR)
@@ -214,7 +209,6 @@ def main(config):
             milestones=[warmup_steps],
         )
     elif config.TRAIN_MODE == "D":
-
         def cosine_down(step, total_steps):
             return 1 + np.cos(0.5 * np.pi * (1 + step / total_steps))
 
@@ -246,12 +240,6 @@ def main(config):
     validate_users = list(range(config.VALIDATE_USER_START, config.VALIDATE_USER_END + 1))
     for user in validate_users:
         assert user not in train_users
-    if 4371 in train_users:
-        train_users.remove(4371)
-        print("Removed user 4371 from train_users.")
-    if 4371 in validate_users:
-        validate_users.remove(4371)
-        print("Removed user 4371 from validate_users.")
 
     summary_env = lmdb.open(config.SUMMARY_DB_PATH, readonly=True, lock=False)
     fsrs_evaluate_env = lmdb.open(config.FSRS_EVALUATE_DB_PATH, readonly=True, lock=False)
@@ -266,7 +254,7 @@ def main(config):
             "clip": CLIP,
             "user_start": config.TRAIN_USER_START,
             "user_end": config.TRAIN_USER_END,
-            "parameters": get_number_of_trainable_parameters(model),
+            "parameters": get_number_of_trainable_parameters(summary_model),
             "seed": config.SEED,
         }
         if config.WANDB_RESUME:
@@ -295,8 +283,8 @@ def main(config):
                         current_lr = optimizer.param_groups[0]["lr"]
                         log["lr"] = current_lr
 
-                        model.copy_downcast_(master_model, dtype=config.DTYPE)
-                        model.train()
+                        summary_model.copy_downcast_(master_model, dtype=config.DTYPE)
+                        summary_model.train()
                         training_sample = get_data(summary_txn, user, config.DEVICE)
                         T = training_sample[0].size(0)
                         if T > config.SKIP_LENGTH:
@@ -308,7 +296,7 @@ def main(config):
                                 print()
                                 print(f"Indices:", train_l, train_r, train_r - train_l + 1, T, "User:", user)
                                 print(f"Number of subsplits:", len(subsplits))
-                                summarizer_out_TP = model(*training_sample, timeshift_select_T, skip_T)
+                                summarizer_out_TP = summary_model(*training_sample, timeshift_select_T, skip_T)
 
                                 params_list = []
                                 min_review_ths_list = []
@@ -339,7 +327,7 @@ def main(config):
                                     log["train_loss"] = loss
                                     log["train_loss_fsrs"] = loss_fsrs
                                     loss.backward()
-                                    transfer_child_grad_to_master(master=master_model, child=model)
+                                    transfer_child_grad_to_master(master=master_model, child=summary_model)
                                     grad_norm = torch.nn.utils.clip_grad_norm_(master_model.parameters(), CLIP)
                                     log["grad_norm"] = grad_norm
                                     if grad_norm > 100:
@@ -375,12 +363,12 @@ def main(config):
                             torch.save(optimizer.state_dict(), save_optim_path)
                             print("MODEL SAVED.")
 
-                            model.copy_downcast_(master_model, dtype=config.DTYPE)
-                            validation_overfit_out = validate(model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
+                            summary_model.copy_downcast_(master_model, dtype=config.DTYPE)
+                            validation_overfit_out = validate(summary_model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
                             if validation_overfit_out is not None:
                                 validation_overfit_fsrs = validation_overfit_out
                                 log["validation_overfit_loss"] = validation_overfit_fsrs
-                            validation_out = validate(model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_users, config.DEVICE)
+                            validation_out = validate(summary_model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_users, config.DEVICE)
                             if validation_out is not None:
                                 validation_fsrs = validation_out
                                 log["validation_loss"] = validation_fsrs

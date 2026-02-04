@@ -1,4 +1,9 @@
+import argparse
+from io import BytesIO
 import json
+import os
+from pathlib import Path
+import lmdb
 import numpy as np
 import matplotlib.pyplot as plt
 import traceback
@@ -9,6 +14,7 @@ from functools import wraps
 from itertools import accumulate
 from typing import TYPE_CHECKING
 from config import Config
+import tomli
 
 if TYPE_CHECKING:
     from models.trainable import TrainableModel
@@ -374,3 +380,46 @@ def sort_jsonl(file):
         for json_data in data:
             jsonl_file.write(json.dumps(json_data, ensure_ascii=False) + "\n")
     return data
+
+def compact_lmdb(source_path, compacted_path):
+    env = lmdb.open(source_path, readonly=True, lock=False)
+
+    # Make sure the target path is empty
+    if not os.path.exists(compacted_path):
+        os.makedirs(compacted_path)
+
+    # Copy data to a new environment, which will be compact
+    env.copy(compacted_path, compact=True)
+    env.close()
+
+def load_tensor(txn, key, device):
+    tensor_bytes = txn.get(key.encode())
+    buffer = BytesIO(tensor_bytes)
+    return torch.load(buffer, weights_only=True, map_location=device)
+
+
+def save_tensor(txn, key, tensor):
+    tensor = tensor.clone().contiguous()
+    buffer = BytesIO()
+    torch.save(tensor, buffer)
+    txn.put(key.encode(), buffer.getvalue())
+
+
+def parse_toml():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, help="Location of the toml file")
+    args, _ = parser.parse_known_args()
+    with open(args.config, "rb") as f:
+        args = tomli.load(f)
+        if "DTYPE" in args:
+            if args["DTYPE"] == "bfloat16":
+                args["DTYPE"] = torch.bfloat16
+            elif args["DTYPE"] in ("float", "float32"):
+                args["DTYPE"] = torch.float32
+            else:
+                raise ValueError("Not currently supported:", args["DTYPE"])
+        if "DEVICE" in args:
+            args["DEVICE"] = torch.device(args["DEVICE"])
+        if "DATA_PATH" in args:
+            args["DATA_PATH"] = Path(args["DATA_PATH"])
+        return argparse.Namespace(**args)
