@@ -153,10 +153,10 @@ class CardModel(torch.nn.Module):
                 end_index = len(param.data) // 2
                 param.data[start_index:end_index].fill_(1.0)
 
-    def forward(self, encoding_h, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl, label_is_new_anki_day):
+    def forward(self, encoding_bh, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl, label_is_new_anki_day):
         B, L = feature_elapsed_days_real_bl.shape
-        H = encoding_h.size(0)
-        x = torch.cat((feature_elapsed_days_real_bl.unsqueeze(-1), feature_rating_bl.unsqueeze(-1), encoding_h.view(1, 1, H).expand(B, L, H)), dim=-1)
+        H = encoding_bh.size(1)
+        x = torch.cat((feature_elapsed_days_real_bl.unsqueeze(-1), feature_rating_bl.unsqueeze(-1), encoding_bh.view(B, 1, H).expand(B, L, H)), dim=-1)
         x = self.encoder(x)
         for block in self.rnn_blocks:
             x = block(x)

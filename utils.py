@@ -185,7 +185,7 @@ def get_bin(row):
         else 0
     )
     delta_t = round(
-        2.48 * np.power(3.62, np.floor(np.log(row["delta_t"]) / np.log(3.62))), 2
+        2.48 * np.power(3.62, np.floor(np.log(max(row["elapsed_days"], 1e-6)) / np.log(3.62))), 2
     )
     i = round(1.99 * np.power(1.89, np.floor(np.log(row["i"]) / np.log(1.89))), 0)
     return (lapse, delta_t, i)

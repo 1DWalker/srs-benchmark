@@ -51,8 +51,10 @@ def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
     loss_n = 0
     for batch in batches:
         feature_review_th_bl, feature_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_rating_bl, label_review_th_bl, label_is_same_day_bl, has_label_bl = batch
+        B, L = feature_review_th_bl.shape
+        H = encoding_h.size(0)
         logits_bl4 = decoder_model(
-            encoding_h=encoding_h,
+            encoding_bh=encoding_h.unsqueeze(0).expand(B, H),
             feature_elapsed_days_real_bl=feature_elapsed_days_real_bl, 
             feature_rating_bl=feature_rating_bl, 
             label_elapsed_days_real_bl=label_elapsed_days_real_bl,
@@ -67,11 +69,8 @@ def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
     
     return loss_tot / (1e-7 + loss_n), loss_tot, loss_n
 
-def decode_full(batches, model, parameter_list, splits_list, user_id, device=torch.device("cpu"), equalize_test_reviews=False):
-    assert len(splits_list) == len(parameter_list) + 1
-    H = len(parameter_list)
-    equalize_review_ths = load_tensor(txn, f"{user_id}_equalize_review_ths", device).tolist()
-    rmse_bins = load_tensor(txn, f"{user_id}_rmse_bins", device).tolist()
+def decode_full(batches, decoder_model, encoding_list, splits_list, equalize_review_ths, rmse_bins, device, equalize_test_reviews):
+    assert len(splits_list) == len(encoding_list) + 1
 
     rmse_bins_dict = dict(zip(equalize_review_ths, rmse_bins))
     bin_y_pred = {bin: [] for bin in set(rmse_bins)}
@@ -81,46 +80,62 @@ def decode_full(batches, model, parameter_list, splits_list, user_id, device=tor
     y_pred = []
     y = []
 
-    parameters_hp = torch.stack(parameter_list, dim=0)
+    encoding_hp = torch.stack(encoding_list, dim=0)
+    H, P = encoding_hp.shape
     min_review_th_list = []
     max_review_th_list = []
-    for split_i in range(len(parameter_list)):
+    for split_i in range(len(encoding_list)):
         min_review_th_list.append(splits_list[split_i])
         max_review_th_list.append(splits_list[split_i + 1] - 1)
     min_review_th_h = torch.tensor(min_review_th_list, device=device)
     max_review_th_h = torch.tensor(max_review_th_list, device=device)
 
+
     for batch in batches:
-        feature_review_th_bl, feature_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_rating_hbl, label_review_th_bl, label_is_same_day_bl, has_label_bl = batch
-        out_hbl = model(parameters_hp, feature_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl=label_elapsed_days_int_bl)
-        assert not out_hbl.isnan().any()
-        label_rating_hbl = label_rating_hbl.unsqueeze(0).expand(H, -1, -1).float()
+        feature_review_th_bl, feature_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_rating_bl, label_review_th_bl, label_is_same_day_bl, has_label_bl = batch
+        B, L = feature_elapsed_days_int_bl.shape
+        logits_hbl4 = decoder_model(
+            encoding_bh=encoding_hp.view(H, 1, -1).expand(H, B, P).reshape(-1, P),
+            feature_elapsed_days_real_bl=feature_elapsed_days_real_bl.expand(H, B, L).reshape(-1, L),
+            feature_rating_bl=feature_rating_bl.expand(H, B, L).reshape(-1, L), 
+            label_elapsed_days_real_bl=label_elapsed_days_real_bl.expand(H, B, L).reshape(-1, L),
+            label_is_new_anki_day=(label_elapsed_days_int_bl > 0).float().expand(H, B, L).reshape(-1, L),
+        ).view(H, B, L, 4)
+        assert not logits_hbl4.isnan().any()
+        probs_hbl4 = torch.softmax(logits_hbl4, dim=-1)
+        p_success_hbl = probs_hbl4[..., 1:].sum(dim=-1)
+
+        p_success_hbl = torch.full_like(p_success_hbl, 0.9)
+
+        label_pass_bl = (label_rating_bl >= 2).float()
+        label_pass_hbl = label_pass_bl.unsqueeze(0).expand(H, -1, -1).float()
         label_review_th_hbl = label_review_th_bl.unsqueeze(0).expand(H, -1, -1)
         has_label_hbl = has_label_bl.unsqueeze(0).expand(H, -1, -1)
+        label_is_equalize_bl = torch.isin(label_review_th_bl.int(), torch.tensor(equalize_review_ths, device=label_review_th_bl.device))
         label_is_equalize_hbl = label_is_equalize_bl.unsqueeze(0).expand(H, -1, -1)
         label_mask_hbl = has_label_hbl * (min_review_th_h.view(H, 1, 1) <= label_review_th_hbl) * (label_review_th_hbl <= max_review_th_h.view(H, 1, 1))
         if equalize_test_reviews:
             label_mask_hbl = label_mask_hbl * label_is_equalize_hbl
         
         loss_fn = torch.nn.BCELoss(reduction="none")
-        loss_hbl = loss_fn(out_hbl, label_rating_hbl)
+        loss_hbl = loss_fn(p_success_hbl, label_pass_hbl)
         loss_tot += (loss_hbl * label_mask_hbl).sum()
         loss_n += label_mask_hbl.sum()
 
-        _, B, L = label_rating_hbl.shape
+        _, B, L = label_pass_hbl.shape
         mask_np = label_mask_hbl.cpu().numpy()
-        out_np = out_hbl.detach().cpu().numpy()
+        p_success_np = p_success_hbl.detach().cpu().numpy()
         label_review_th_np = label_review_th_hbl.cpu().numpy()
-        label_y_np = label_rating_hbl.cpu().numpy()
+        label_y_np = label_pass_hbl.cpu().numpy()
         for h in range(H):
             for b in range(B):
                 for l in range(L):
                     if mask_np[h, b, l]:
                         y.append(label_y_np[h, b, l])
-                        y_pred.append(out_np[h, b, l])
+                        y_pred.append(p_success_np[h, b, l])
                         bin = rmse_bins_dict[label_review_th_np[h, b, l]]
                         bin_y[bin].append(label_y_np[h, b, l])
-                        bin_y_pred[bin].append(out_np[h, b, l])
+                        bin_y_pred[bin].append(p_success_np[h, b, l])
         assert len(y) == loss_n.item()
 
     if loss_n == 0:

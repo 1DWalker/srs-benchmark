@@ -4,13 +4,13 @@ LABEL_FILTER_DB_PATH = "label_filter_db"
 SEED = 111
 
 TRAIN_USER_START = 1
-TRAIN_USER_END = 1
+TRAIN_USER_END = 5
 
 # Include some users from the train set to gauge for overfitting
 VALIDATE_OVERFIT_USER_START = 1
 VALIDATE_OVERFIT_USER_END = 1
 
-VALIDATE_USER_START = 5
+VALIDATE_USER_START = 50
 VALIDATE_USER_END = 100
 
 DEVICE = "cpu"
@@ -30,7 +30,7 @@ VALIDATE_STEPS = 2
 LOAD_MODEL = false
 LOAD_MODEL_FOLDER = ""
 LOAD_MODEL_NAME = ""
-SAVE_MODEL_FOLDER = "pretrain/nn_optimizer"
+SAVE_MODEL_FOLDER = "pretrain/lstm_encoder"
 SAVE_MODEL_PREFIX = "lstm_encoder"
 
 USE_WANDB = false

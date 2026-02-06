@@ -13,7 +13,6 @@ from summary.model import Model
 from utils import compact_lmdb, load_tensor, parse_toml
 
 WEIGHT_DECAY = 1e-2
-ADAMW_EPS = 1e-18
 ADAMW_BETAS = (0.90, 0.999)
 CLIP = 0.5
 
@@ -38,9 +37,9 @@ def log_model(log, model):
             log[f"{name}.grad.75th"] = torch.quantile(param.grad, 0.75).item()
 
 def get_optimizer(config, model):
-    return torch.optim.AdamW(model.parameters(), lr=config.PEAK_LR, weight_decay=WEIGHT_DECAY, betas=ADAMW_BETAS, eps=ADAMW_EPS)
+    return torch.optim.AdamW(model.parameters(), lr=config.PEAK_LR, weight_decay=WEIGHT_DECAY, betas=ADAMW_BETAS)
 
-def validate(model, summary_txn, fsrs_txn, label_filter_txn, validate_users, device):
+def validate(model, summary_txn, label_filter_txn, validate_users, device):
     torch.cuda.empty_cache()
     try:
         tot_loss = 0
@@ -50,17 +49,18 @@ def validate(model, summary_txn, fsrs_txn, label_filter_txn, validate_users, dev
             batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
             T = decoder_ops.extract_num_reviews(batches)
             splits = load_tensor(label_filter_txn, f"{user}_split", device=device).tolist()
+            equalize_review_ths = load_tensor(label_filter_txn, f"{user}_review_ths", device).tolist()
+            rmse_bins = load_tensor(label_filter_txn, f"{user}_rmse_bins", device).tolist()
             assert len(splits) == 6
             with torch.inference_mode():
-                # summarizer_out_TP = summarizer_model(*summarizer_in, timeshift_select_T, skip_T)
                 encoding_list = []
                 for split_i in range(len(splits) - 1):
                     test_min_review_th = splits[split_i]
                     encoding, sum_encoding = decoder_ops.encode(batches, model.encoder_model, min_review_th=0, max_review_th=test_min_review_th - 1)
                     encoding_list.append(encoding)
-                loss, loss_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(fsrs_txn, model.card_model, encoding_list, splits, user, device=device, equalize_test_reviews=True)
+                loss, loss_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_list, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
                 print()
-                print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {auc:.6f}, size: {loss_n}")
+                print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {(-1 if auc is None else auc):.6f}, size: {loss_n}")
                 for split_i, parameters in enumerate(encoding_list):
                     print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
 
@@ -243,11 +243,11 @@ def main(config):
                         torch.save(optimizer.state_dict(), save_optim_path)
                         print("MODEL SAVED.")
 
-                        validation_overfit_out = validate(model, model.card_model, summary_txn, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
+                        validation_overfit_out = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
                         if validation_overfit_out is not None:
                             validation_overfit_fsrs = validation_overfit_out
                             log["validation_overfit_loss"] = validation_overfit_fsrs
-                        validation_out = validate(model, model.card_model, summary_txn, summary_txn, label_filter_txn, validate_users, config.DEVICE)
+                        validation_out = validate(model, summary_txn, label_filter_txn, validate_users, config.DEVICE)
                         if validation_out is not None:
                             validation_fsrs = validation_out
                             log["validation_loss"] = validation_fsrs
