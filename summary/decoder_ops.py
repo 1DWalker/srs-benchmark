@@ -79,6 +79,7 @@ def decode_full(batches, decoder_model, encoding_list, splits_list, equalize_rev
     loss_n = 0
     y_pred = []
     y = []
+    bin_unique = np.unique(rmse_bins)
 
     encoding_hp = torch.stack(encoding_list, dim=0)
     H, P = encoding_hp.shape
@@ -127,12 +128,13 @@ def decode_full(batches, decoder_model, encoding_list, splits_list, equalize_rev
         p_success_np = p_success_hbl.detach().cpu().numpy()
         label_review_th_np = label_review_th_hbl.cpu().numpy()
         label_y_np = label_pass_hbl.cpu().numpy()
+        mask_np = mask_np.astype(bool)
+        y.extend(label_y_np[mask_np])
+        y_pred.extend(p_success_np[mask_np])
         for h in range(H):
             for b in range(B):
                 for l in range(L):
                     if mask_np[h, b, l]:
-                        y.append(label_y_np[h, b, l])
-                        y_pred.append(p_success_np[h, b, l])
                         bin = rmse_bins_dict[label_review_th_np[h, b, l]]
                         bin_y[bin].append(label_y_np[h, b, l])
                         bin_y_pred[bin].append(p_success_np[h, b, l])
