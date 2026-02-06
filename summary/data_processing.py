@@ -49,12 +49,12 @@ def process_df(df, dtype, device):
             dtype=dtype,
             device=device,
         )
-        label_y = torch.tensor(
-            group["y"].shift(-1).fillna(0).to_numpy(), dtype=dtype, device=device
+        label_rating = torch.tensor(
+            group["rating"].shift(-1).fillna(0).to_numpy(), dtype=dtype, device=device
         )
         label_is_same_day = torch.tensor(group["is_same_day"].shift(-1).fillna(0).to_numpy(), dtype=torch.bool, device=device)
         has_label = torch.tensor(group["has_label"].to_numpy(), device=device)
-        return feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, has_label
+        return feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_rating, label_review_th, label_is_same_day, has_label
 
     card_id_to_group = {
         card_id: group.reset_index(drop=True)
@@ -128,21 +128,21 @@ def process(user_id, config):
         if len(group_lists) == 0:
             continue
 
-        feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, has_label = list(zip(*group_lists))
+        feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_rating, label_review_th, label_is_same_day, has_label = list(zip(*group_lists))
         feature_review_th = pad_sequence(feature_review_th, batch_first=True, padding_value=0)
         feature_elapsed_days_int = pad_sequence(feature_elapsed_days_int, batch_first=True, padding_value=0)
         feature_elapsed_days_real = pad_sequence(feature_elapsed_days_real, batch_first=True, padding_value=0)
         feature_rating = pad_sequence(feature_rating, batch_first=True, padding_value=0)
         label_elapsed_days_int = pad_sequence(label_elapsed_days_int, batch_first=True, padding_value=0)
         label_elapsed_days_real = pad_sequence(label_elapsed_days_real, batch_first=True, padding_value=0)
-        label_y = pad_sequence(label_y, batch_first=True, padding_value=0)
+        label_rating = pad_sequence(label_rating, batch_first=True, padding_value=0)
         label_review_th = pad_sequence(
             label_review_th, batch_first=True, padding_value=-1
         )
         label_is_same_day = pad_sequence(label_is_same_day, batch_first=True, padding_value=0)
         has_label = pad_sequence(has_label, batch_first=True, padding_value=0)
         total_size += feature_rating.size(0) * feature_rating.size(1)
-        result.append((feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, has_label))
+        result.append((feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_rating, label_review_th, label_is_same_day, has_label))
     
     print("Total size:", total_size, len(df_revlogs), total_size / len(df_revlogs))
     assert total_size / len(df_revlogs) <= 1.01 * config.MAX_FACTOR
@@ -167,7 +167,7 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
         user_id, tensors = sample
 
         with env.begin(write=True) as txn:
-            for i, (feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_y, label_review_th, label_is_same_day, has_label) in enumerate(
+            for i, (feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_rating, label_review_th, label_is_same_day, has_label) in enumerate(
                 tensors
             ):
                 save_tensor(txn, f"{user_id}_feature_review_th_{i}", feature_review_th)
@@ -176,7 +176,7 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
                 save_tensor(txn, f"{user_id}_feature_rating_{i}", feature_rating)
                 save_tensor(txn, f"{user_id}_label_elapsed_days_int_{i}", label_elapsed_days_int)
                 save_tensor(txn, f"{user_id}_label_elapsed_days_real_{i}", label_elapsed_days_real)
-                save_tensor(txn, f"{user_id}_label_y_{i}", label_y)
+                save_tensor(txn, f"{user_id}_label_rating_{i}", label_rating)
                 save_tensor(txn, f"{user_id}_label_review_th_{i}", label_review_th)
                 save_tensor(txn, f"{user_id}_label_is_same_day_{i}", label_is_same_day)
                 save_tensor(txn, f"{user_id}_has_label_{i}", has_label)

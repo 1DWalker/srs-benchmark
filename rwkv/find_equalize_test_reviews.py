@@ -1,3 +1,4 @@
+import numpy as np
 import psutil
 from multiprocessing import Pool
 import torch
@@ -62,30 +63,27 @@ def process(user_id):
     if len(df) == 0:  # that one user
         return
 
-    # Get RMSE (bins) indices
-    bins = []
-    for i in range(len(df)):
-        row = df.iloc[i].copy()
-        bin = get_bin(row)
-        bins.append(bin)
+    bins = df.apply(get_bin, axis=1)
 
-    bins_set = set(bins)
-    bins_ind = {}
-    for i, x in enumerate(bins_set):
-        bins_ind[x] = i
+    # map bins to contiguous integer indices
+    bin_codes = bins.astype("category").cat.codes.to_numpy()
 
-    # Get review_th that are included in the benchmark
+    # extract column once
+    review_th_values = df["review_th"].to_numpy()
+
     tscv = TimeSeriesSplit(n_splits=5)
+
     test_label_review_th = []
     test_label_rmse_bins = []
-    for _, (_, test_index) in enumerate(tscv.split(df)):
-        for i in test_index:
-            row = df.iloc[i]
-            review_th = row["review_th"]
-            test_label_review_th.append(review_th)
-            test_label_rmse_bins.append(bins_ind[bins[i]])
 
-    assert sorted(test_label_review_th) == test_label_review_th
+    for _, test_index in tscv.split(df):
+        test_label_review_th.append(review_th_values[test_index])
+        test_label_rmse_bins.append(bin_codes[test_index])
+
+    test_label_review_th = np.concatenate(test_label_review_th)
+    test_label_rmse_bins = np.concatenate(test_label_rmse_bins)
+
+    assert (sorted(test_label_review_th) == test_label_review_th).all()
     review_ths_tensor = torch.tensor(test_label_review_th, dtype=torch.int32)
     rmse_bins_tensor = torch.tensor(test_label_rmse_bins, dtype=torch.int32)
 

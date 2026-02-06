@@ -1,16 +1,16 @@
-SUMMARY_DB_PATH = "summary_db"
-FSRS_EVALUATE_DB_PATH = "fsrs_evaluate_db"
+SUMMARY_DB_PATH = "compact_db"
+LABEL_FILTER_DB_PATH = "label_filter_db"
 
 SEED = 111
 
-TRAIN_USER_START = 5000
-TRAIN_USER_END = 5000
+TRAIN_USER_START = 1
+TRAIN_USER_END = 1
 
 # Include some users from the train set to gauge for overfitting
-VALIDATE_OVERFIT_USER_START = 5001
-VALIDATE_OVERFIT_USER_END = 5100
+VALIDATE_OVERFIT_USER_START = 1
+VALIDATE_OVERFIT_USER_END = 1
 
-VALIDATE_USER_START = 1
+VALIDATE_USER_START = 5
 VALIDATE_USER_END = 100
 
 DEVICE = "cpu"
@@ -25,17 +25,17 @@ TRAIN_MODE = "WS"
 START_STEP = 0
 WARMUP_STEPS = 20000
 TOTAL_STEPS = 1000000000
-VALIDATE_STEPS = 1000
+VALIDATE_STEPS = 2
 
 LOAD_MODEL = false
 LOAD_MODEL_FOLDER = ""
 LOAD_MODEL_NAME = ""
 SAVE_MODEL_FOLDER = "pretrain/nn_optimizer"
-SAVE_MODEL_PREFIX = "fsrs_nn_optimizer"
+SAVE_MODEL_PREFIX = "lstm_encoder"
 
 USE_WANDB = false
 # Only relevant if USE_WANDB is set to true
-WANDB_PROJECT_NAME = "FSRS-nn-optimizer"
+WANDB_PROJECT_NAME = "LSTM encoder"
 WANDB_RESUME = false
 # Only relevant if WANDB_RESUME is set to true
 WANDB_RESUME_ID = ""

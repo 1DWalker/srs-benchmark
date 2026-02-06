@@ -5,9 +5,11 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, root_mean_squared_error
 import torch
 import wandb
-from rwkv.utils import get_number_of_trainable_parameters, transfer_child_grad_to_master
+from rwkv.utils import get_number_of_trainable_parameters
 import random
 
+from summary import decoder_ops
+from summary.model import Model
 from utils import compact_lmdb, load_tensor, parse_toml
 
 WEIGHT_DECAY = 1e-2
@@ -36,136 +38,37 @@ def log_model(log, model):
             log[f"{name}.grad.75th"] = torch.quantile(param.grad, 0.75).item()
 
 def get_optimizer(config, model):
-    encode_params = []
-    decay_params = []
-    channel_mixer_params = []
-    decay_head_params = []
-    other_params = []
-    head_targets = [
-        "fsrs_linear",
-    ]
-    for name, param in model.named_parameters():
-        # Param constraint is to exclude layer/group norm weights
-        if (
-            "weight" in name
-            and "lora" not in name
-            and "scale" not in name
-            and len(param.squeeze().shape) >= 2
-        ):
-            is_head_param = False
-            for head_target in head_targets:
-                if head_target in name:
-                    is_head_param = True
-            if is_head_param:
-                decay_head_params.append(param)
-            elif "features2card" in name:
-                encode_params.append(param)
-            elif "channel_mixer" in name:
-                channel_mixer_params.append(param)
-            else:
-                decay_params.append(param)
-        else:
-            other_params.append(param)
+    return torch.optim.AdamW(model.parameters(), lr=config.PEAK_LR, weight_decay=WEIGHT_DECAY, betas=ADAMW_BETAS, eps=ADAMW_EPS)
 
-    return torch.optim.AdamW(
-        [
-            {
-                "params": decay_params,
-                "weight_decay": WEIGHT_DECAY,
-                "lr": config.PEAK_LR,
-            },
-            {
-                "params": channel_mixer_params,
-                "weight_decay": WEIGHT_DECAY,
-                "lr": config.PEAK_LR,
-            },
-            {
-                "params": decay_head_params,
-                "weight_decay": 0.001,
-                "lr": config.PEAK_LR,
-            },
-            {"params": encode_params, "weight_decay": 1e-2, "lr": config.PEAK_LR},
-            {"params": other_params, "weight_decay": 0.0, "lr": config.PEAK_LR},
-        ],
-        eps=ADAMW_EPS,
-        betas=ADAMW_BETAS,
-    )
-
-def get_data(txn, user_id, device, dtype=None):
-    scaled_seconds_T1 = load_tensor(txn, f"{user_id}_scaled_seconds_T1", device)
-    rating_onehot_T4 = load_tensor(txn, f"{user_id}_rating_onehot_T4", device).to(scaled_seconds_T1.dtype)
-    scaled_elapsed_days_T1 = load_tensor(txn, f"{user_id}_scaled_elapsed_days_T1", device)
-    scaled_state_T1 = load_tensor(txn, f"{user_id}_scaled_state_T1", device)
-    scaled_duration_T1 = load_tensor(txn, f"{user_id}_scaled_duration_T1", device)
-    scaled_day_offset_diff_T1 = load_tensor(txn, f"{user_id}_scaled_day_offset_diff_T1", device)
-    perm_T_tensor = load_tensor(txn, f"{user_id}_perm_T_tensor", device).long()
-    perm_inv_T_tensor = load_tensor(txn, f"{user_id}_perm_inv_T_tensor", device).long()
-    indices_I = load_tensor(txn, f"{user_id}_indices_I", device).long()
-    features_TC = torch.cat((rating_onehot_T4, scaled_seconds_T1, scaled_elapsed_days_T1, scaled_duration_T1, scaled_state_T1, scaled_day_offset_diff_T1), dim=-1)
-    label_elapsed_seconds_T = load_tensor(txn, f"{user_id}_label_elapsed_seconds_T", device)
-    if dtype is not None:
-        features_TC = features_TC.to(dtype)
-        label_elapsed_seconds_T = label_elapsed_seconds_T.to(dtype)
-    return features_TC, indices_I, perm_T_tensor, perm_inv_T_tensor, label_elapsed_seconds_T
-
-def decorate_training_sample(T, device):
-    l, r = get_split(T)
-    global_dropout = random.uniform(0.0, 0.5)
-    skip_T_np = np.random.rand(T) < global_dropout  # Skip randomly
-    skip_T_np[:l] = 1  # Skip all < l
-    timeshift_select_list = []
-    last = 0
-    found = False
-    for i, skip in enumerate(skip_T_np):
-        if not found:
-            timeshift_select_list.append(i)
-        else:
-            timeshift_select_list.append(last)
-        if not skip:
-            last = i
-            found = True
-
-    skip_T = torch.tensor(skip_T_np, dtype=torch.bool, device=device)
-    timeshift_select_T = torch.tensor(timeshift_select_list, dtype=torch.long, device=device)
-
-    assert timeshift_select_T.size(0) == T
-    assert skip_T.size(0) == T
-    return l, r, timeshift_select_T, skip_T
-
-def validate(summarizer_model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_users, device):
+def validate(model, summary_txn, fsrs_txn, label_filter_txn, validate_users, device):
     torch.cuda.empty_cache()
     try:
         tot_loss = 0
         tot_loss_n = 0
         for user in validate_users:
-            summarizer_model.eval()
-            summarizer_in = get_data(summary_txn, user, device)
-            T = summarizer_in[0].size(0)
-            timeshift_select_T = torch.cat((torch.zeros(1, dtype=torch.long, device=device), torch.arange(start=0, end=T - 1, dtype=torch.long, device=device)))
-            skip_T = torch.full((T,), fill_value=0, dtype=torch.bool, device=device)
+            model.eval()
+            batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
+            T = decoder_ops.extract_num_reviews(batches)
             splits = load_tensor(label_filter_txn, f"{user}_split", device=device).tolist()
             assert len(splits) == 6
-            with torch.no_grad():
-                summarizer_out_TP = summarizer_model(*summarizer_in, timeshift_select_T, skip_T)
-                parameter_list = []
+            with torch.inference_mode():
+                # summarizer_out_TP = summarizer_model(*summarizer_in, timeshift_select_T, skip_T)
+                encoding_list = []
                 for split_i in range(len(splits) - 1):
                     test_min_review_th = splits[split_i]
-                    fsrs_param_index = test_min_review_th - 2
-                    assert fsrs_param_index >= 0
-                    fsrs_params_P = summarizer_out_TP[fsrs_param_index]
-                    parameter_list.append(fsrs_params_P)
-                loss, loss_n, rmse_raw, rmse_bins, auc = evaluate_full(fsrs_txn, fsrs_model, parameter_list, splits, user, device=device, equalize_test_reviews=True)
+                    encoding, sum_encoding = decoder_ops.encode(batches, model.encoder_model, min_review_th=0, max_review_th=test_min_review_th - 1)
+                    encoding_list.append(encoding)
+                loss, loss_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(fsrs_txn, model.card_model, encoding_list, splits, user, device=device, equalize_test_reviews=True)
                 print()
-                print(f"FSRS - User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {auc:.6f}, size: {loss_n}")
-                for split_i, parameters in enumerate(parameter_list):
+                print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {auc:.6f}, size: {loss_n}")
+                for split_i, parameters in enumerate(encoding_list):
                     print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
 
                 tot_loss += loss * loss_n
                 tot_loss_n += loss_n
     except Exception as e:
-        print("Exception in validate. RWKV-7 nan?")
         print(e)
-        return None
+        raise e
     print(f"Mean validation loss: {tot_loss / tot_loss_n:.4f}")
     return tot_loss / tot_loss_n
 
@@ -177,22 +80,22 @@ def get_split(n):
     return l, l + k - 1
 
 def generate_subsplits(l, r, T):
-    M = 200000
-    p = 0.30  # Estimate of the proportion of memory that is used for RWKV evaluation at T = M and 32 subsplits
-    v = int(M * 32 * 1 / p)
-
-    subsplit_values = min(r - l + 1, max(32, int((v - (1 - p) * v / M * T) / T)))
     g = (r - l + 1) // 6
-    linspace = np.linspace((l + r) // 2, r - g, num=subsplit_values)
+    linspace = np.linspace((l + r) // 2, r - g)
     floored_linspace = np.floor(linspace).astype(int)
-    return np.unique(floored_linspace).tolist()
+    return np.random.choice(floored_linspace)
 
 def main(config):
     random.seed(config.SEED)
-    fsrs_model = FSRS6().to(config.DEVICE)
-    summary_model = SummaryModel().to(config.DEVICE)
-    optimizer = get_optimizer(config, summary_model)
-    print("Number of trainable parameters:", get_number_of_trainable_parameters(summary_model))
+    torch.manual_seed(config.SEED)
+    np.random.seed(config.SEED)
+    # fsrs_model = FSRS6().to(config.DEVICE)
+    model = Model().to(config.DEVICE)
+    optimizer = get_optimizer(config, model)
+    encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
+    card_model_params = get_number_of_trainable_parameters(model.card_model)
+    curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
+    print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
 
     if config.TRAIN_MODE == "WS":
         start_factor = max(1e-4, config.WARMUP_START_LR / config.PEAK_LR)
@@ -222,7 +125,7 @@ def main(config):
         model_path = f"{config.LOAD_MODEL_FOLDER}/{config.LOAD_MODEL_NAME}.pth"
         optim_path = f"{config.LOAD_MODEL_FOLDER}/{config.LOAD_MODEL_NAME}_optim.pth"
         print("Loading model:", model_path)
-        master_model.load_state_dict(torch.load(model_path, weights_only=True))
+        model.load_state_dict(torch.load(model_path, weights_only=True))
         optimizer_state = torch.load(optim_path, weights_only=True)
         if config.TRAIN_MODE == "WS":
             for group in optimizer_state["param_groups"]:
@@ -241,8 +144,7 @@ def main(config):
     for user in validate_users:
         assert user not in train_users
 
-    summary_env = lmdb.open(config.SUMMARY_DB_PATH, readonly=True, lock=False)
-    fsrs_evaluate_env = lmdb.open(config.FSRS_EVALUATE_DB_PATH, readonly=True, lock=False)
+    compressed_db_env = lmdb.open(config.SUMMARY_DB_PATH, readonly=True, lock=False)
     label_filter_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
 
     if config.USE_WANDB:
@@ -254,7 +156,7 @@ def main(config):
             "clip": CLIP,
             "user_start": config.TRAIN_USER_START,
             "user_end": config.TRAIN_USER_END,
-            "parameters": get_number_of_trainable_parameters(summary_model),
+            "parameters": get_number_of_trainable_parameters(model),
             "seed": config.SEED,
         }
         if config.WANDB_RESUME:
@@ -267,122 +169,99 @@ def main(config):
         else:
             wandb.init(project=config.WANDB_PROJECT_NAME, config=wandb_config)
 
-    with summary_env.begin(write=False) as summary_txn:
-        with fsrs_evaluate_env.begin(write=False) as fsrs_txn:
-            with label_filter_env.begin(write=False) as label_filter_txn:
-                step = config.START_STEP - 1
-                for epoch in range(int(1e9)):
-                    random.shuffle(train_users)
-                    for user_i, user in enumerate(train_users):
-                        log = {}
-                        log["epoch"] = epoch
-                        step += 1
-                        validate_iter = (step + 1) % config.VALIDATE_STEPS == 0
-                        # validate_iter = True
-                        log["step"] = step
-                        current_lr = optimizer.param_groups[0]["lr"]
-                        log["lr"] = current_lr
+    with compressed_db_env.begin(write=False) as summary_txn:
+        with label_filter_env.begin(write=False) as label_filter_txn:
+            step = config.START_STEP - 1
+            for epoch in range(int(1e9)):
+                random.shuffle(train_users)
+                for user_i, user in enumerate(train_users):
+                    log = {}
+                    log["epoch"] = epoch
+                    step += 1
+                    validate_iter = (step + 1) % config.VALIDATE_STEPS == 0
+                    # validate_iter = True
+                    log["step"] = step
+                    current_lr = optimizer.param_groups[0]["lr"]
+                    log["lr"] = current_lr
 
-                        summary_model.copy_downcast_(master_model, dtype=config.DTYPE)
-                        summary_model.train()
-                        training_sample = get_data(summary_txn, user, config.DEVICE)
-                        T = training_sample[0].size(0)
-                        if T > config.SKIP_LENGTH:
-                            print(f"Skipping: {user}")
+                    model.train()
+                    batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
+                    T = decoder_ops.extract_num_reviews(batches)
+                    try:
+                        train_l, test_r = get_split(T)
+                        test_l = generate_subsplits(train_l, test_r, T)
+                        train_r = test_l - 1
+                        print()
+                        print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
+                        # summarizer_out_TP = summary_model(*training_sample)
+                        encoding, sum_encoding = decoder_ops.encode(batches, model.encoder_model, train_l, train_r)
+                        print("encoding", encoding)
+
+                        loss_avg, loss_tot, loss_n = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
+                        loss = loss_tot.sum() / (1e-7 + loss_n)
+
+                        print(f"loss: {loss_avg} ({loss_n}), sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
+
+                        log["unstable_gradient"] = 0
+                        if loss_n < 100:
+                            print("Skipping: label sizes are too small.", loss_n)
+                        elif loss.requires_grad:
+                            log["train_loss"] = loss
+                            log["train_loss_fsrs"] = loss
+                            loss.backward()
+                            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+                            log["grad_norm"] = grad_norm
+                            if grad_norm > 100:
+                                log["unstable_gradient"] = 1
+                            print(f"{step} {epoch}, user: {user}, loss: {loss.item():.3f}, loss_fsrs: {loss.item():.3f} ({loss_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
+                            optimizer.step()
+                            optimizer.zero_grad()
+
+                            reserved = torch.cuda.memory_reserved()
+                            if reserved >= config.THRESHOLD_RESERVED_GB * 1024 ** 3:
+                                print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. Emptying cache.")
+                                torch.cuda.empty_cache()
                         else:
-                            try:
-                                train_l, train_r, timeshift_select_T, skip_T = decorate_training_sample(training_sample[0].size(0), device=config.DEVICE)
-                                subsplits = generate_subsplits(train_l, train_r, T)
-                                print()
-                                print(f"Indices:", train_l, train_r, train_r - train_l + 1, T, "User:", user)
-                                print(f"Number of subsplits:", len(subsplits))
-                                summarizer_out_TP = summary_model(*training_sample, timeshift_select_T, skip_T)
+                            print("No grad required.")
+                        log["train_nan"] = 0
+                    except Exception as e:
+                        print(e)
+                        log["train_nan"] = 1
+                        raise e
+                
+                    scheduler.step()
+                    if step % 50 == 0:
+                        log_model(log, model)
 
-                                params_list = []
-                                min_review_ths_list = []
-                                for subsplit in subsplits:
-                                    fsrs_params_P = summarizer_out_TP[subsplit - 1]
-                                    params_list.append(fsrs_params_P)
-                                    min_review_ths_list.append(subsplit + 1)
+                    if validate_iter:
+                        save_model_path = (
+                            f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_{step}.pth"
+                        )
+                        save_optim_path = f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_{step}_optim.pth"
+                        Path(config.SAVE_MODEL_FOLDER).mkdir(parents=True, exist_ok=True)               
+                        torch.save(model.state_dict(), save_model_path)
+                        torch.save(optimizer.state_dict(), save_optim_path)
+                        print("MODEL SAVED.")
 
-                                params_hp = torch.stack(params_list, dim=0)
-                                min_review_ths_h = torch.tensor(min_review_ths_list, device=config.DEVICE)
-                                max_review_ths_h = torch.full_like(min_review_ths_h, fill_value=train_r + 1)
-                                loss_avg_h, loss_tot_h, loss_n_h = evaluate_batched_parameters(fsrs_txn, fsrs_model, params_hp, user, min_review_th_h=min_review_ths_h, max_review_th_h=max_review_ths_h, device=config.DEVICE, equalize_test_reviews=True, skip_same_day_reviews=True)
-                                loss_n = loss_n_h.sum()
-                                loss_fsrs = loss_tot_h.sum() / (1e-7 + loss_n)
+                        validation_overfit_out = validate(model, model.card_model, summary_txn, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
+                        if validation_overfit_out is not None:
+                            validation_overfit_fsrs = validation_overfit_out
+                            log["validation_overfit_loss"] = validation_overfit_fsrs
+                        validation_out = validate(model, model.card_model, summary_txn, summary_txn, label_filter_txn, validate_users, config.DEVICE)
+                        if validation_out is not None:
+                            validation_fsrs = validation_out
+                            log["validation_loss"] = validation_fsrs
+                        if validation_overfit_out is None or validation_out is None:
+                            log["validation_nan"] = 1
+                        else:
+                            log["validation_nan"] = 0
 
-                                for h in np.floor(np.linspace(0, len(subsplits) - 1, num=3)).astype(int):
-                                    subsplit = subsplits[h]
-                                    print(f"Subsplit: {subsplit}, loss: {loss_avg_h[h].item():.3f} ({loss_n_h[h]}), params: {list(map(lambda x: round(float(x), 4), params_hp[h].tolist()))}")
-
-                                for param_i, param in enumerate(fsrs_params_P.tolist()):
-                                    log[f"fsrs_param_{param_i}"] = param
-
-                                loss = loss_fsrs
-                                log["unstable_gradient"] = 0
-                                if loss_n < 100:
-                                    print("Skipping: label sizes are too small.", loss_n)
-                                elif loss.requires_grad:
-                                    log["train_loss"] = loss
-                                    log["train_loss_fsrs"] = loss_fsrs
-                                    loss.backward()
-                                    transfer_child_grad_to_master(master=master_model, child=summary_model)
-                                    grad_norm = torch.nn.utils.clip_grad_norm_(master_model.parameters(), CLIP)
-                                    log["grad_norm"] = grad_norm
-                                    if grad_norm > 100:
-                                        log["unstable_gradient"] = 1
-                                    print(f"{step} {epoch}, user: {user}, loss: {loss.item():.3f}, loss_fsrs: {loss_fsrs.item():.3f} ({loss_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
-                                    optimizer.step()
-                                    optimizer.zero_grad()
-
-                                    reserved = torch.cuda.memory_reserved()
-                                    if reserved >= config.THRESHOLD_RESERVED_GB * 1024 ** 3:
-                                        print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. Emptying cache.")
-                                        torch.cuda.empty_cache()
-                                else:
-                                    print("No grad required.")
-                                log["train_nan"] = 0
-                            except Exception as e:
-                                print("Exception caught. Nan from RWKV-7? Skipping batch.")
-                                print(e)
-                                log["train_nan"] = 1
-                                # raise e
-                        
-                        scheduler.step()
-                        if step % 50 == 0:
-                            log_model(log, master_model)
-
-                        if validate_iter:
-                            save_model_path = (
-                                f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_{step}.pth"
-                            )
-                            save_optim_path = f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_{step}_optim.pth"
-                            Path(config.SAVE_MODEL_FOLDER).mkdir(parents=True, exist_ok=True)               
-                            torch.save(master_model.state_dict(), save_model_path)
-                            torch.save(optimizer.state_dict(), save_optim_path)
-                            print("MODEL SAVED.")
-
-                            summary_model.copy_downcast_(master_model, dtype=config.DTYPE)
-                            validation_overfit_out = validate(summary_model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
-                            if validation_overfit_out is not None:
-                                validation_overfit_fsrs = validation_overfit_out
-                                log["validation_overfit_loss"] = validation_overfit_fsrs
-                            validation_out = validate(summary_model, fsrs_model, summary_txn, fsrs_txn, label_filter_txn, validate_users, config.DEVICE)
-                            if validation_out is not None:
-                                validation_fsrs = validation_out
-                                log["validation_loss"] = validation_fsrs
-                            if validation_overfit_out is None or validation_out is None:
-                                log["validation_nan"] = 1
-                            else:
-                                log["validation_nan"] = 0
-
-                        if config.USE_WANDB:
-                            wandb.log(log, step=step)
-                        if step == config.TOTAL_STEPS - 1:
-                            break
+                    if config.USE_WANDB:
+                        wandb.log(log, step=step)
                     if step == config.TOTAL_STEPS - 1:
                         break
+                if step == config.TOTAL_STEPS - 1:
+                    break
 
 
 if __name__ == '__main__':
