@@ -19,8 +19,14 @@ CLIP = 3
 
 def log_model(log, model):
     with torch.no_grad():
-        log["recency/recency_const"] = torch.exp(model.encoder_model.recency_const_log).item()
-        log["recency/recency_degree"] = torch.exp(model.encoder_model.recency_degree_log).item()
+        sizes = [300, 1000, 3000, 10000, 30000, 100000]
+        model.eval()
+        recency_const_s, recency_degree_s = model.encoder_model.train_size_to_recency_poly(torch.tensor(sizes))
+
+        for size, recency_const, recency_degree in zip(sizes, recency_const_s.cpu().tolist(), recency_degree_s.cpu().tolist()):
+            log[f"recency_const/recency_const_{size}"] = recency_const
+            log[f"recency_degree/recency_degree_{size}"] = recency_degree
+
         for name, param in model.named_parameters():
             log[f"model/{name}.data.mean"] = param.mean().item()
             if param.numel() > 1:
@@ -44,8 +50,7 @@ def get_optimizer(config, model):
     decay_params = []
     other_params = []
     for name, param in model.named_parameters():
-        print(name)
-        if "recency" in name:
+        if "recency_nn_last_linear" in name:
             other_params.append(param)
             print("Skip decay:", name)
         else:

@@ -33,7 +33,7 @@ LOAD_MODEL_NAME = ""
 SAVE_MODEL_FOLDER = "pretrain/lstm_encoder"
 SAVE_MODEL_PREFIX = "lstm_encoder"
 
-USE_WANDB = false
+USE_WANDB = true
 # Only relevant if USE_WANDB is set to true
 WANDB_PROJECT_NAME = "LSTM encoder"
 WANDB_RESUME = false

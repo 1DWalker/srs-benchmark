@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 
 class ResBlock(nn.Module):
@@ -24,8 +25,8 @@ class RNNBlock(nn.Module):
         super().__init__()
 
         zero_init_linear = nn.Linear(n_hidden, n_hidden)
-        nn.init.zeros_(zero_init_linear.weight)
-        nn.init.zeros_(zero_init_linear.bias)
+        # nn.init.zeros_(zero_init_linear.weight)
+        # nn.init.zeros_(zero_init_linear.bias)
 
         self.seq = ResBlock(nn.Sequential(
             nn.LayerNorm(n_hidden),
@@ -52,8 +53,8 @@ class FFBlock(nn.Module):
         self.n_hidden = n_hidden
 
         zero_init_linear = nn.Linear(n_hidden, n_hidden)
-        nn.init.zeros_(zero_init_linear.weight)
-        nn.init.zeros_(zero_init_linear.bias)
+        # nn.init.zeros_(zero_init_linear.weight)
+        # nn.init.zeros_(zero_init_linear.bias)
 
         self.seq = ResBlock(nn.Sequential(
             nn.LayerNorm(n_hidden),
@@ -90,15 +91,24 @@ class EncoderModel(torch.nn.Module):
         self.encoder = nn.Linear(self.n_features, self.n_hidden)
         self.blocks = nn.ModuleList([Block(self.n_hidden, dropout=self.dropout) for _ in range(self.n_layers)])
         self.out_norm = nn.LayerNorm(self.n_hidden)
-        self.value_linear = nn.Linear(self.n_hidden, self.n_encoding + 2, bias=False)
-        self.weight_linear = nn.Linear(self.n_hidden, self.n_encoding + 2, bias=False)
+        self.value_linear = nn.Linear(self.n_hidden, self.n_encoding, bias=False)
+        self.weight_linear = nn.Linear(self.n_hidden, self.n_encoding, bias=False)
         self.encode_transform_nn = nn.Sequential(
-            *[FFBlock(self.n_encoding + 2, dropout=self.dropout) for _ in range(2)],
-            nn.LayerNorm(self.n_encoding + 2),
-            nn.Linear(self.n_encoding + 2, self.n_encoding),
+            nn.Linear(self.n_encoding + 1, self.n_encoding),
+            *[FFBlock(self.n_encoding, dropout=self.dropout) for _ in range(2)],
+            nn.LayerNorm(self.n_encoding),
+            nn.Linear(self.n_encoding, self.n_encoding),
         )
-        self.recency_const_log = torch.nn.parameter.Parameter(torch.tensor(0.0))
-        self.recency_degree_log = torch.nn.parameter.Parameter(torch.tensor(0.0))
+        self.recency_nn_hidden = 8
+        self.recency_nn_last_linear = nn.Linear(self.recency_nn_hidden, 2)
+        nn.init.zeros_(self.recency_nn_last_linear.weight)
+        with torch.no_grad():
+            self.recency_nn_last_linear.bias.copy_(torch.tensor([np.log(0.2), np.log(4)]))
+        self.recency_nn = nn.Sequential(
+            nn.Linear(1, self.recency_nn_hidden),
+            *[FFBlock(self.recency_nn_hidden, dropout=0.5) for _ in range(2)],
+            nn.LayerNorm(self.recency_nn_hidden),
+        )
 
     def forward(self, feature_elapsed_days_real_bl, feature_rating_bl):
         feature_rating_onehot_bl4 = torch.nn.functional.one_hot((feature_rating_bl.long() - 1).clamp(min=0), num_classes=4).float()
@@ -112,20 +122,23 @@ class EncoderModel(torch.nn.Module):
         return weight_blh, value_blh
 
     def transform(self, encoding_sh, review_range_s1):
-        return self.encode_transform_nn(torch.cat((encoding_sh, review_range_s1.clamp(max=1e5).log()), dim=-1))
+        return self.encode_transform_nn(torch.cat((encoding_sh, review_range_s1.clamp(min=1, max=1e5).log()), dim=-1))
+
+    def train_size_to_recency_poly(self, train_s):
+        x = self.recency_nn_last_linear(self.recency_nn(train_s.unsqueeze(-1).clamp(min=1, max=1e5).log()))
+        return x.exp().unbind(dim=-1)
 
     def get_recency_weights(self, ord_sbl, mask_sbl, n_sbl):
         # ord_bl contains values from 0 to n-1
-        # print("TODO recency")
         x_sbl = ord_sbl / n_sbl
-        recency_const = torch.exp(self.recency_const_log)
-        recency_degree = torch.exp(self.recency_degree_log)
-        x_sbl = recency_const + torch.pow(x_sbl, recency_degree)
+        weight_s = mask_sbl.sum(dim=(1, 2))
+
+        recency_const_s, recency_degree_s = self.train_size_to_recency_poly(weight_s)
+        S = weight_s.size(0)
+        x_sbl = recency_const_s.view(S, 1, 1) + torch.pow(x_sbl, recency_degree_s.view(S, 1, 1))
 
         # normalize the weights
         sum_s = (x_sbl * mask_sbl).sum(dim=(1, 2))
-        weight_s = mask_sbl.sum(dim=(1, 2))
-        S = sum_s.size(0)
         return x_sbl * weight_s.view(S, 1, 1) / (1e-5 + sum_s.view(S, 1, 1))
 
 
@@ -137,8 +150,8 @@ class ForgettingCurveNN(torch.nn.Module):
         self.blocks = nn.ModuleList([FFBlock(self.n_hidden) for _ in range(self.n_layers)])
 
         zero_init_linear = nn.Linear(self.n_hidden, 4)
-        nn.init.zeros_(zero_init_linear.weight)
-        nn.init.zeros_(zero_init_linear.bias)
+        # nn.init.zeros_(zero_init_linear.weight)
+        # nn.init.zeros_(zero_init_linear.bias)
 
         self.out_head = nn.Sequential(
             nn.LayerNorm(self.n_hidden),
@@ -193,6 +206,6 @@ class CardModel(torch.nn.Module):
 class Model(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.n_encoding = 14
+        self.n_encoding = 16
         self.encoder_model = EncoderModel(n_encoding=self.n_encoding)
         self.card_model = CardModel(n_encoding=self.n_encoding)
