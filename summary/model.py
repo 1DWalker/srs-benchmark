@@ -103,7 +103,7 @@ class EncoderModel(torch.nn.Module):
 
     def get_recency_weights(self, ord_bl, n):
         # ord_bl contains values from 0 to n-1
-        print("TODO recency")
+        # print("TODO recency")
         return torch.ones_like(ord_bl).float()
 
 

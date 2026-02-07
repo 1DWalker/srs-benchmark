@@ -28,23 +28,34 @@ def get_data(txn, user_id, device):
 def extract_num_reviews(batches):
     return max(map(lambda batch: batch[0].max().item(), batches))
 
-def encode(batches, encoder_model, min_review_th, max_review_th):
-    review_range = max_review_th - min_review_th + 1
-    accum_weighted_value_h = 0
-    accum_weight_h = 0
+def encode(batches, encoder_model, min_review_th_s, max_review_th_s):
+    review_range_s = max_review_th_s - min_review_th_s + 1
+    S = min_review_th_s.size(0)
+    accum_weighted_value_sh = 0
+    accum_weight_sh = 0
     for batch in batches:
         feature_review_th_bl, feature_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_rating_bl, label_review_th_bl, label_is_same_day_bl, has_label_bl = batch
+        B, L = feature_review_th_bl.shape
         weight_blh, value_blh = encoder_model(feature_elapsed_days_real_bl=feature_elapsed_days_real_bl, feature_rating_bl=feature_rating_bl)
-        mask_bl = (min_review_th <= feature_review_th_bl) * (feature_review_th_bl <= max_review_th)
-        clamped_ord_bl = (feature_review_th_bl - min_review_th).clamp(min=0, max=review_range - 1)
-        recency_weights_bl = encoder_model.get_recency_weights(clamped_ord_bl, review_range)
-        eff_weight_blh = mask_bl.unsqueeze(-1).float() * recency_weights_bl.unsqueeze(-1) * weight_blh
-        accum_weighted_value_h += (eff_weight_blh * value_blh).sum(dim=(0, 1))
-        accum_weight_h += eff_weight_blh.sum(dim=(0, 1))
-        assert accum_weighted_value_h.size(0) == weight_blh.size(2)
+        min_review_sbl = min_review_th_s.view(S, 1, 1).expand(S, B, L)
+        max_review_sbl = max_review_th_s.view(S, 1, 1).expand(S, B, L)
+        review_range_sbl = review_range_s.view(S, 1, 1).expand(S, B, L)
+        feature_review_th_sbl = feature_review_th_bl.unsqueeze(0).expand(S, B, L)
+        mask_sbl = (min_review_sbl <= feature_review_th_sbl) * (feature_review_th_sbl <= max_review_sbl)
+        clamped_ord_sbl = (feature_review_th_sbl - min_review_sbl).clamp(min=torch.zeros_like(review_range_sbl), max=review_range_sbl - 1)
+        recency_weights_sbl = encoder_model.get_recency_weights(clamped_ord_sbl, review_range_sbl)
+        eff_weight_sblh = mask_sbl.unsqueeze(-1).float() * recency_weights_sbl.unsqueeze(-1) * weight_blh.unsqueeze(0)
+        accum_weighted_value_sh += (eff_weight_sblh * value_blh.unsqueeze(0)).sum(dim=(1, 2))
+        accum_weight_sh += eff_weight_sblh.sum(dim=(1, 2))
+        assert accum_weighted_value_sh.size(1) == weight_blh.size(2)
 
-    base_h = accum_weighted_value_h / (accum_weight_h + 1)
-    return encoder_model.transform(base_h), base_h
+    base_sh = accum_weighted_value_sh / (accum_weight_sh + 1)
+    return encoder_model.transform(base_sh), base_sh
+
+def encode_single(batches, encoder_model, min_review_th, max_review_th):
+    device = batches[0][0].device
+    encoding, sum_encoding = encode(batches, encoder_model, torch.tensor([min_review_th], device=device), torch.tensor([max_review_th], device=device))
+    return encoding[0], sum_encoding[0]
 
 def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
     loss_tot = 0
@@ -69,8 +80,8 @@ def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
     
     return loss_tot / (1e-7 + loss_n), loss_tot, loss_n
 
-def decode_full(batches, decoder_model, encoding_list, splits_list, equalize_review_ths, rmse_bins, device, equalize_test_reviews):
-    assert len(splits_list) == len(encoding_list) + 1
+def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_review_ths, rmse_bins, device, equalize_test_reviews):
+    assert len(splits_list) == encoding_hp.size(0) + 1
 
     rmse_bins_dict = dict(zip(equalize_review_ths, rmse_bins))
     bin_y_pred = {bin: [] for bin in set(rmse_bins)}
@@ -81,11 +92,10 @@ def decode_full(batches, decoder_model, encoding_list, splits_list, equalize_rev
     y = []
     bin_unique = np.unique(rmse_bins)
 
-    encoding_hp = torch.stack(encoding_list, dim=0)
     H, P = encoding_hp.shape
     min_review_th_list = []
     max_review_th_list = []
-    for split_i in range(len(encoding_list)):
+    for split_i in range(len(splits_list) - 1):
         min_review_th_list.append(splits_list[split_i])
         max_review_th_list.append(splits_list[split_i + 1] - 1)
     min_review_th_h = torch.tensor(min_review_th_list, device=device)
@@ -105,9 +115,6 @@ def decode_full(batches, decoder_model, encoding_list, splits_list, equalize_rev
         assert not logits_hbl4.isnan().any()
         probs_hbl4 = torch.softmax(logits_hbl4, dim=-1)
         p_success_hbl = probs_hbl4[..., 1:].sum(dim=-1)
-
-        p_success_hbl = torch.full_like(p_success_hbl, 0.9)
-
         label_pass_bl = (label_rating_bl >= 2).float()
         label_pass_hbl = label_pass_bl.unsqueeze(0).expand(H, -1, -1).float()
         label_review_th_hbl = label_review_th_bl.unsqueeze(0).expand(H, -1, -1)

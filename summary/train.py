@@ -53,15 +53,17 @@ def validate(model, summary_txn, label_filter_txn, validate_users, device):
             rmse_bins = load_tensor(label_filter_txn, f"{user}_rmse_bins", device).tolist()
             assert len(splits) == 6
             with torch.inference_mode():
-                encoding_list = []
+                max_review_th = []
                 for split_i in range(len(splits) - 1):
-                    test_min_review_th = splits[split_i]
-                    encoding, sum_encoding = decoder_ops.encode(batches, model.encoder_model, min_review_th=0, max_review_th=test_min_review_th - 1)
-                    encoding_list.append(encoding)
-                loss, loss_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_list, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
+                    max_review_th.append(splits[split_i] - 1)
+
+                max_review_th_s = torch.tensor(max_review_th, device=device)
+                min_review_th_s = torch.zeros_like(max_review_th_s)
+                encoding_s, sum_encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s)
+                loss, loss_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_s, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
                 print()
                 print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {(-1 if auc is None else auc):.6f}, size: {loss_n}")
-                for split_i, parameters in enumerate(encoding_list):
+                for split_i, parameters in enumerate(encoding_s.numpy()):
                     print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
 
                 tot_loss += loss * loss_n
@@ -194,8 +196,7 @@ def main(config):
                         print()
                         print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
                         # summarizer_out_TP = summary_model(*training_sample)
-                        encoding, sum_encoding = decoder_ops.encode(batches, model.encoder_model, train_l, train_r)
-                        print("encoding", encoding)
+                        encoding, sum_encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l, train_r)
 
                         loss_avg, loss_tot, loss_n = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
                         loss = loss_tot.sum() / (1e-7 + loss_n)
@@ -208,6 +209,7 @@ def main(config):
                         elif loss.requires_grad:
                             log["train_loss"] = loss
                             log["train_loss_fsrs"] = loss
+                            log["sum_encoding_std"] = sum_encoding.std()
                             loss.backward()
                             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                             log["grad_norm"] = grad_norm
@@ -257,7 +259,7 @@ def main(config):
                             log["validation_nan"] = 0
 
                     if config.USE_WANDB:
-                        wandb.log(log, step=step)
+                        wandb.log(log, step=step, commit=True)
                     if step == config.TOTAL_STEPS - 1:
                         break
                 if step == config.TOTAL_STEPS - 1:

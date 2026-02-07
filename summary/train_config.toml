@@ -4,14 +4,14 @@ LABEL_FILTER_DB_PATH = "label_filter_db"
 SEED = 111
 
 TRAIN_USER_START = 1
-TRAIN_USER_END = 5
+TRAIN_USER_END = 1
 
 # Include some users from the train set to gauge for overfitting
 VALIDATE_OVERFIT_USER_START = 1
 VALIDATE_OVERFIT_USER_END = 1
 
-VALIDATE_USER_START = 50
-VALIDATE_USER_END = 100
+VALIDATE_USER_START = 2
+VALIDATE_USER_END = 2
 
 DEVICE = "cpu"
 DTYPE = "float"
@@ -23,7 +23,7 @@ PEAK_LR = 1.0e-3
 # Available modes are "WS" and "D" for the corresponding phases of the WSD learning rate scheduler.
 TRAIN_MODE = "WS"
 START_STEP = 0
-WARMUP_STEPS = 20000
+WARMUP_STEPS = 200
 TOTAL_STEPS = 1000000000
 VALIDATE_STEPS = 2
 
