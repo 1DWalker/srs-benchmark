@@ -11,21 +11,21 @@ VALIDATE_OVERFIT_USER_START = 5001
 VALIDATE_OVERFIT_USER_END = 5010
 
 VALIDATE_USER_START = 1
-VALIDATE_USER_END = 10
+VALIDATE_USER_END = 100
 
 DEVICE = "cpu"
 DTYPE = "float"
 
 # If we use a warmup, set the lr to start at for the warmup. Useful for continuing a run that was in the middle of a warmup
 WARMUP_START_LR = 0
-PEAK_LR = 1.0e-3
+PEAK_LR = 3.0e-3
 
 # Available modes are "WS" and "D" for the corresponding phases of the WSD learning rate scheduler.
 TRAIN_MODE = "WS"
 START_STEP = 0
-WARMUP_STEPS = 200
+WARMUP_STEPS = 20000
 TOTAL_STEPS = 1000000000
-VALIDATE_STEPS = 50
+VALIDATE_STEPS = 1000
 
 LOAD_MODEL = false
 LOAD_MODEL_FOLDER = ""

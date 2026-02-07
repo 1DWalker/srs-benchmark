@@ -50,7 +50,7 @@ def encode(batches, encoder_model, min_review_th_s, max_review_th_s):
         assert accum_weighted_value_sh.size(1) == weight_blh.size(2)
 
     base_sh = accum_weighted_value_sh / (accum_weight_sh + 1)
-    return encoder_model.transform(base_sh), base_sh
+    return encoder_model.transform(base_sh, review_range_s.unsqueeze(-1)), base_sh
 
 def encode_single(batches, encoder_model, min_review_th, max_review_th):
     device = batches[0][0].device

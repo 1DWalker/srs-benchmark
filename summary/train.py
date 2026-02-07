@@ -15,7 +15,7 @@ from utils import compact_lmdb, load_tensor, parse_toml
 WEIGHT_DECAY = 1e-2
 ADAMW_BETAS = (0.90, 0.999)
 ADAMW_EPS = 1e-8
-CLIP = 0.5
+CLIP = 3
 
 def log_model(log, model):
     with torch.no_grad():
@@ -44,6 +44,7 @@ def get_optimizer(config, model):
     decay_params = []
     other_params = []
     for name, param in model.named_parameters():
+        print(name)
         if "recency" in name:
             other_params.append(param)
             print("Skip decay:", name)
@@ -117,7 +118,6 @@ def main(config):
     random.seed(config.SEED)
     torch.manual_seed(config.SEED)
     np.random.seed(config.SEED)
-    # fsrs_model = FSRS6().to(config.DEVICE)
     model = Model().to(config.DEVICE)
     optimizer = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
@@ -215,6 +215,7 @@ def main(config):
                     model.train()
                     batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
                     T = decoder_ops.extract_num_reviews(batches)
+                    print()
                     if T > config.SKIP_LENGTH:
                         print(f"Skipping: {user}")
                     else:
@@ -222,30 +223,33 @@ def main(config):
                             train_l, test_r = get_split(T)
                             test_l = generate_subsplits(train_l, test_r, T)
                             train_r = test_l - 1
-                            print()
                             print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
                             # summarizer_out_TP = summary_model(*training_sample)
                             encoding, sum_encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l, train_r)
 
                             loss_avg, loss_tot, loss_n = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
-                            loss = loss_tot.sum() / (1e-7 + loss_n)
+                            loss_sum_encoding_reg = torch.linalg.vector_norm(sum_encoding)
+                            loss_pred = loss_tot.sum() / (1e-7 + loss_n)
 
-                            print(f"loss: {loss_avg} ({loss_n}), sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
+                            print(f"loss: {loss_avg} ({loss_n})")
+                            print(f"sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
+                            print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
 
                             log["unstable_gradient"] = 0
                             if loss_n < 100:
                                 print("Skipping: label sizes are too small.", loss_n)
-                            elif loss.requires_grad:
-                                log["train_loss"] = loss
-                                log["train_loss_fsrs"] = loss
+                            elif loss_pred.requires_grad:
+                                log["train_loss"] = loss_pred
+                                log["sum_encoding_loss"] = loss_sum_encoding_reg
                                 log["encoding/sum_encoding_std"] = sum_encoding.std()
                                 log["encoding/encoding_std"] = encoding.std()
-                                loss.backward()
+                                tot_loss = loss_pred + 1e-3 * loss_sum_encoding_reg
+                                tot_loss.backward()
                                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                                 log["grad_norm"] = grad_norm
                                 if grad_norm > 100:
                                     log["unstable_gradient"] = 1
-                                print(f"{step} {epoch}, user: {user}, loss: {loss.item():.3f}, loss_fsrs: {loss.item():.3f} ({loss_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
+                                print(f"{step} {epoch}, user: {user}, loss: {loss_pred.item():.3f}, ({loss_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                 optimizer.step()
                                 optimizer.zero_grad()
 
@@ -275,14 +279,12 @@ def main(config):
                         torch.save(optimizer.state_dict(), save_optim_path)
                         print("MODEL SAVED.")
 
-                        validation_overfit_out = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
-                        if validation_overfit_out is not None:
-                            validation_overfit_fsrs = validation_overfit_out
-                            log["validation/validation_overfit_loss"] = validation_overfit_fsrs
                         validation_out = validate(model, summary_txn, label_filter_txn, validate_users, config.DEVICE)
                         if validation_out is not None:
-                            validation_fsrs = validation_out
-                            log["validation/validation_loss"] = validation_fsrs
+                            log["validation/validation_loss"] = validation_out
+                        validation_overfit_out = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
+                        if validation_overfit_out is not None:
+                            log["validation/validation_overfit_loss"] = validation_overfit_out
                         if validation_overfit_out is None or validation_out is None:
                             log["validation/validation_nan"] = 1
                         else:
