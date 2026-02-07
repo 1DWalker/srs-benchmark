@@ -87,6 +87,8 @@ class EncoderModel(torch.nn.Module):
             nn.LayerNorm(self.n_encoding + 2),
             nn.Linear(self.n_encoding + 2, self.n_encoding),
         )
+        self.recency_const_log = torch.nn.parameter.Parameter(torch.tensor(0.0))
+        self.recency_degree_log = torch.nn.parameter.Parameter(torch.tensor(0.0))
 
     def forward(self, feature_elapsed_days_real_bl, feature_rating_bl):
         x = torch.stack((feature_elapsed_days_real_bl, feature_rating_bl), dim=-1)
@@ -101,10 +103,19 @@ class EncoderModel(torch.nn.Module):
     def transform(self, encoding_h):
         return self.encode_transform_nn(encoding_h)
 
-    def get_recency_weights(self, ord_bl, n):
+    def get_recency_weights(self, ord_sbl, mask_sbl, n_sbl):
         # ord_bl contains values from 0 to n-1
         # print("TODO recency")
-        return torch.ones_like(ord_bl).float()
+        x_sbl = ord_sbl / n_sbl
+        recency_const = torch.exp(self.recency_const_log)
+        recency_degree = torch.exp(self.recency_degree_log)
+        x_sbl = recency_const + torch.pow(x_sbl, recency_degree)
+
+        # normalize the weights
+        sum_s = (x_sbl * mask_sbl).sum(dim=(1, 2))
+        weight_s = mask_sbl.sum(dim=(1, 2))
+        S = sum_s.size(0)
+        return x_sbl * weight_s.view(S, 1, 1) / (1e-5 + sum_s.view(S, 1, 1))
 
 
 class ForgettingCurveNN(torch.nn.Module):

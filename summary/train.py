@@ -14,30 +14,56 @@ from utils import compact_lmdb, load_tensor, parse_toml
 
 WEIGHT_DECAY = 1e-2
 ADAMW_BETAS = (0.90, 0.999)
+ADAMW_EPS = 1e-8
 CLIP = 0.5
 
 def log_model(log, model):
-    for name, param in model.named_parameters():
-        log[f"{name}.data.mean"] = param.mean().item()
-        if param.numel() > 1:
-            log[f"{name}.data.std"] = param.std().item()
-        log[f"{name}.data.min"] = param.min().item()
-        log[f"{name}.data.max"] = param.max().item()
-        log[f"{name}.data.25th"] = torch.quantile(param, 0.25).item()
-        log[f"{name}.data.50th"] = torch.quantile(param, 0.50).item()
-        log[f"{name}.data.75th"] = torch.quantile(param, 0.75).item()
-        if param.grad is not None:
-            log[f"{name}.grad.mean"] = param.grad.mean().item()
+    with torch.no_grad():
+        log["recency/recency_const"] = torch.exp(model.encoder_model.recency_const_log).item()
+        log["recency/recency_degree"] = torch.exp(model.encoder_model.recency_degree_log).item()
+        for name, param in model.named_parameters():
+            log[f"model/{name}.data.mean"] = param.mean().item()
             if param.numel() > 1:
-                log[f"{name}.grad.std"] = param.grad.std().item()
-            log[f"{name}.grad.min"] = param.grad.min().item()
-            log[f"{name}.grad.max"] = param.grad.max().item()
-            log[f"{name}.grad.25th"] = torch.quantile(param.grad, 0.25).item()
-            log[f"{name}.grad.50th"] = torch.quantile(param.grad, 0.50).item()
-            log[f"{name}.grad.75th"] = torch.quantile(param.grad, 0.75).item()
+                log[f"model/{name}.data.std"] = param.std().item()
+            log[f"model/{name}.data.min"] = param.min().item()
+            log[f"model/{name}.data.max"] = param.max().item()
+            log[f"model/{name}.data.25th"] = torch.quantile(param, 0.25).item()
+            log[f"model/{name}.data.50th"] = torch.quantile(param, 0.50).item()
+            log[f"model/{name}.data.75th"] = torch.quantile(param, 0.75).item()
+            if param.grad is not None:
+                log[f"model/{name}.grad.mean"] = param.grad.mean().item()
+                if param.numel() > 1:
+                    log[f"model/{name}.grad.std"] = param.grad.std().item()
+                log[f"model/{name}.grad.min"] = param.grad.min().item()
+                log[f"model/{name}.grad.max"] = param.grad.max().item()
+                log[f"model/{name}.grad.25th"] = torch.quantile(param.grad, 0.25).item()
+                log[f"model/{name}.grad.50th"] = torch.quantile(param.grad, 0.50).item()
+                log[f"model/{name}.grad.75th"] = torch.quantile(param.grad, 0.75).item()
 
 def get_optimizer(config, model):
-    return torch.optim.AdamW(model.parameters(), lr=config.PEAK_LR, weight_decay=WEIGHT_DECAY, betas=ADAMW_BETAS)
+    decay_params = []
+    other_params = []
+    for name, param in model.named_parameters():
+        if "recency" in name:
+            other_params.append(param)
+            print("Skip decay:", name)
+        else:
+            decay_params.append(param)
+
+    assert len(decay_params) > 0
+    assert len(other_params) > 0
+    return torch.optim.AdamW(
+        [
+            {
+                "params": decay_params,
+                "weight_decay": WEIGHT_DECAY,
+                "lr": config.PEAK_LR,
+            },
+            {"params": other_params, "weight_decay": 0.0, "lr": config.PEAK_LR},
+        ],
+        eps=ADAMW_EPS,
+        betas=ADAMW_BETAS,
+    )
 
 def validate(model, summary_txn, label_filter_txn, validate_users, device):
     torch.cuda.empty_cache()
@@ -189,47 +215,51 @@ def main(config):
                     model.train()
                     batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
                     T = decoder_ops.extract_num_reviews(batches)
-                    try:
-                        train_l, test_r = get_split(T)
-                        test_l = generate_subsplits(train_l, test_r, T)
-                        train_r = test_l - 1
-                        print()
-                        print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
-                        # summarizer_out_TP = summary_model(*training_sample)
-                        encoding, sum_encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l, train_r)
+                    if T > config.SKIP_LENGTH:
+                        print(f"Skipping: {user}")
+                    else:
+                        try:
+                            train_l, test_r = get_split(T)
+                            test_l = generate_subsplits(train_l, test_r, T)
+                            train_r = test_l - 1
+                            print()
+                            print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
+                            # summarizer_out_TP = summary_model(*training_sample)
+                            encoding, sum_encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l, train_r)
 
-                        loss_avg, loss_tot, loss_n = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
-                        loss = loss_tot.sum() / (1e-7 + loss_n)
+                            loss_avg, loss_tot, loss_n = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
+                            loss = loss_tot.sum() / (1e-7 + loss_n)
 
-                        print(f"loss: {loss_avg} ({loss_n}), sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
+                            print(f"loss: {loss_avg} ({loss_n}), sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
 
-                        log["unstable_gradient"] = 0
-                        if loss_n < 100:
-                            print("Skipping: label sizes are too small.", loss_n)
-                        elif loss.requires_grad:
-                            log["train_loss"] = loss
-                            log["train_loss_fsrs"] = loss
-                            log["sum_encoding_std"] = sum_encoding.std()
-                            loss.backward()
-                            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
-                            log["grad_norm"] = grad_norm
-                            if grad_norm > 100:
-                                log["unstable_gradient"] = 1
-                            print(f"{step} {epoch}, user: {user}, loss: {loss.item():.3f}, loss_fsrs: {loss.item():.3f} ({loss_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
-                            optimizer.step()
-                            optimizer.zero_grad()
+                            log["unstable_gradient"] = 0
+                            if loss_n < 100:
+                                print("Skipping: label sizes are too small.", loss_n)
+                            elif loss.requires_grad:
+                                log["train_loss"] = loss
+                                log["train_loss_fsrs"] = loss
+                                log["encoding/sum_encoding_std"] = sum_encoding.std()
+                                log["encoding/encoding_std"] = encoding.std()
+                                loss.backward()
+                                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+                                log["grad_norm"] = grad_norm
+                                if grad_norm > 100:
+                                    log["unstable_gradient"] = 1
+                                print(f"{step} {epoch}, user: {user}, loss: {loss.item():.3f}, loss_fsrs: {loss.item():.3f} ({loss_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
+                                optimizer.step()
+                                optimizer.zero_grad()
 
-                            reserved = torch.cuda.memory_reserved()
-                            if reserved >= config.THRESHOLD_RESERVED_GB * 1024 ** 3:
-                                print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. Emptying cache.")
-                                torch.cuda.empty_cache()
-                        else:
-                            print("No grad required.")
-                        log["train_nan"] = 0
-                    except Exception as e:
-                        print(e)
-                        log["train_nan"] = 1
-                        raise e
+                                reserved = torch.cuda.memory_reserved()
+                                if reserved >= config.THRESHOLD_RESERVED_GB * 1024 ** 3:
+                                    print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. Emptying cache.")
+                                    torch.cuda.empty_cache()
+                            else:
+                                print("No grad required.")
+                            log["nan/train_nan"] = 0
+                        except Exception as e:
+                            print(e)
+                            log["nan/train_nan"] = 1
+                            raise e
                 
                     scheduler.step()
                     if step % 50 == 0:
@@ -248,15 +278,15 @@ def main(config):
                         validation_overfit_out = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
                         if validation_overfit_out is not None:
                             validation_overfit_fsrs = validation_overfit_out
-                            log["validation_overfit_loss"] = validation_overfit_fsrs
+                            log["validation/validation_overfit_loss"] = validation_overfit_fsrs
                         validation_out = validate(model, summary_txn, label_filter_txn, validate_users, config.DEVICE)
                         if validation_out is not None:
                             validation_fsrs = validation_out
-                            log["validation_loss"] = validation_fsrs
+                            log["validation/validation_loss"] = validation_fsrs
                         if validation_overfit_out is None or validation_out is None:
-                            log["validation_nan"] = 1
+                            log["validation/validation_nan"] = 1
                         else:
-                            log["validation_nan"] = 0
+                            log["validation/validation_nan"] = 0
 
                     if config.USE_WANDB:
                         wandb.log(log, step=step, commit=True)

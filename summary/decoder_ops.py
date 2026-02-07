@@ -43,7 +43,7 @@ def encode(batches, encoder_model, min_review_th_s, max_review_th_s):
         feature_review_th_sbl = feature_review_th_bl.unsqueeze(0).expand(S, B, L)
         mask_sbl = (min_review_sbl <= feature_review_th_sbl) * (feature_review_th_sbl <= max_review_sbl)
         clamped_ord_sbl = (feature_review_th_sbl - min_review_sbl).clamp(min=torch.zeros_like(review_range_sbl), max=review_range_sbl - 1)
-        recency_weights_sbl = encoder_model.get_recency_weights(clamped_ord_sbl, review_range_sbl)
+        recency_weights_sbl = encoder_model.get_recency_weights(clamped_ord_sbl, mask_sbl, review_range_sbl)
         eff_weight_sblh = mask_sbl.unsqueeze(-1).float() * recency_weights_sbl.unsqueeze(-1) * weight_blh.unsqueeze(0)
         accum_weighted_value_sh += (eff_weight_sblh * value_blh.unsqueeze(0)).sum(dim=(1, 2))
         accum_weight_sh += eff_weight_sblh.sum(dim=(1, 2))
