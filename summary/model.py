@@ -5,6 +5,15 @@ import numpy as np
 def transform_elapsed_days_real(x):
     return (x.clamp(min=1e-5).log() + 1.3) / 5
 
+# class TimeShiftLerp(nn.Module):
+#     def __init__(self, n_hidden):
+#         super().__init__()
+#         self.time_shift = torch.nn.ZeroPad2d((0, 0, 1, -1))
+#         self.lerp = torch.nn.
+    
+#     def forward(x_blh):
+#         x_shift = self.time_shift(x_blh)
+
 class ResBlock(nn.Module):
     def __init__(self, module):
         super().__init__()
@@ -26,14 +35,13 @@ class RNNBlock(nn.Module):
     def __init__(self, n_hidden, dropout=0):
         super().__init__()
 
-        zero_init_linear = nn.Linear(n_hidden, n_hidden)
         # nn.init.zeros_(zero_init_linear.weight)
         # nn.init.zeros_(zero_init_linear.bias)
 
         self.seq = ResBlock(nn.Sequential(
             nn.LayerNorm(n_hidden),
             RNNWrapper(nn.LSTM(input_size=n_hidden, hidden_size=n_hidden, batch_first=True)),
-            zero_init_linear,
+            nn.Linear(n_hidden, n_hidden),
             nn.Dropout(p=dropout),
         ))
         for name, param in self.named_parameters():
@@ -53,16 +61,11 @@ class FFBlock(nn.Module):
     def __init__(self, n_hidden, dropout=0):
         super().__init__()
         self.n_hidden = n_hidden
-
-        zero_init_linear = nn.Linear(n_hidden, n_hidden)
-        # nn.init.zeros_(zero_init_linear.weight)
-        # nn.init.zeros_(zero_init_linear.bias)
-
         self.seq = ResBlock(nn.Sequential(
             nn.LayerNorm(n_hidden),
             nn.Linear(self.n_hidden, self.n_hidden),
             nn.Mish(),
-            zero_init_linear,
+            nn.Linear(n_hidden, n_hidden),
             nn.Dropout(p=dropout),
         ))
 
