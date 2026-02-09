@@ -17,7 +17,7 @@ DEVICE = "cpu"
 DTYPE = "float"
 
 # If we use a warmup, set the lr to start at for the warmup. Useful for continuing a run that was in the middle of a warmup
-WARMUP_START_LR = 0
+WARMUP_START_LR = 1e-8
 PEAK_LR = 3.0e-3
 
 # Available modes are "WS" and "D" for the corresponding phases of the WSD learning rate scheduler.
@@ -28,8 +28,8 @@ TOTAL_STEPS = 1000000000
 VALIDATE_STEPS = 1000
 
 LOAD_MODEL = false
-LOAD_MODEL_FOLDER = ""
-LOAD_MODEL_NAME = ""
+LOAD_MODEL_FOLDER = "pretrain/lstm_encoder"
+LOAD_MODEL_NAME = "lstm_encoder_"
 SAVE_MODEL_FOLDER = "pretrain/lstm_encoder"
 SAVE_MODEL_PREFIX = "lstm_encoder"
 

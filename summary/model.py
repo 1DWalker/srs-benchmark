@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+def transform_elapsed_days_real(x):
+    return (x.clamp(min=1e-5).log() + 1.3) / 5
 
 class ResBlock(nn.Module):
     def __init__(self, module):
@@ -103,7 +105,7 @@ class EncoderModel(torch.nn.Module):
         self.recency_nn_last_linear = nn.Linear(self.recency_nn_hidden, 2)
         nn.init.zeros_(self.recency_nn_last_linear.weight)
         with torch.no_grad():
-            self.recency_nn_last_linear.bias.copy_(torch.tensor([np.log(0.2), np.log(4)]))
+            self.recency_nn_last_linear.bias.copy_(torch.tensor([np.log(0.05), np.log(15)]))
         self.recency_nn = nn.Sequential(
             nn.Linear(1, self.recency_nn_hidden),
             *[FFBlock(self.recency_nn_hidden, dropout=0.5) for _ in range(2)],
@@ -112,7 +114,7 @@ class EncoderModel(torch.nn.Module):
 
     def forward(self, feature_elapsed_days_real_bl, feature_rating_bl):
         feature_rating_onehot_bl4 = torch.nn.functional.one_hot((feature_rating_bl.long() - 1).clamp(min=0), num_classes=4).float()
-        x = torch.cat((feature_elapsed_days_real_bl.clamp(min=1e-5).log().unsqueeze(-1), feature_rating_onehot_bl4), dim=-1)
+        x = torch.cat((transform_elapsed_days_real(feature_elapsed_days_real_bl).unsqueeze(-1), feature_rating_onehot_bl4), dim=-1)
         x = self.encoder(x)
         for block in self.blocks:
             x = block(x)
@@ -121,49 +123,44 @@ class EncoderModel(torch.nn.Module):
         weight_blh = torch.sigmoid(self.weight_linear(x))
         return weight_blh, value_blh
 
-    def transform(self, encoding_sh, review_range_s1):
-        return self.encode_transform_nn(torch.cat((encoding_sh, review_range_s1.clamp(min=1, max=1e5).log()), dim=-1))
+    def train_n_transform(self, train_n_s):
+        return (train_n_s.clamp(min=1, max=1e5).log() - 9) / 2
 
-    def train_size_to_recency_poly(self, train_s):
-        x = self.recency_nn_last_linear(self.recency_nn(train_s.unsqueeze(-1).clamp(min=1, max=1e5).log()))
+    def transform(self, encoding_sh, review_range_s):
+        return self.encode_transform_nn(torch.cat((encoding_sh, self.train_n_transform(review_range_s).unsqueeze(-1)), dim=-1))
+
+    def train_size_to_recency_poly(self, train_n_s):
+        x = self.recency_nn_last_linear(self.recency_nn(self.train_n_transform(train_n_s).unsqueeze(-1)))
         return x.exp().unbind(dim=-1)
 
-    def get_recency_weights(self, ord_sbl, mask_sbl, n_sbl):
+    def get_non_norm_recency_weights(self, ord_sbl, n_s):
         # ord_bl contains values from 0 to n-1
-        x_sbl = ord_sbl / n_sbl
-        weight_s = mask_sbl.sum(dim=(1, 2))
+        S = n_s.size(0)
+        x_sbl = ord_sbl / n_s.view(S, 1, 1)
 
-        recency_const_s, recency_degree_s = self.train_size_to_recency_poly(weight_s)
-        S = weight_s.size(0)
+        recency_const_s, recency_degree_s = self.train_size_to_recency_poly(n_s)
         x_sbl = recency_const_s.view(S, 1, 1) + torch.pow(x_sbl, recency_degree_s.view(S, 1, 1))
-
-        # normalize the weights
-        sum_s = (x_sbl * mask_sbl).sum(dim=(1, 2))
-        return x_sbl * weight_s.view(S, 1, 1) / (1e-5 + sum_s.view(S, 1, 1))
+        return x_sbl
 
 
 class ForgettingCurveNN(torch.nn.Module):
-    def __init__(self, n_input):
+    def __init__(self, n_input, dropout):
         super().__init__()
         self.n_hidden = n_input        
         self.n_layers = 4
-        self.blocks = nn.ModuleList([FFBlock(self.n_hidden) for _ in range(self.n_layers)])
-
-        zero_init_linear = nn.Linear(self.n_hidden, 4)
-        # nn.init.zeros_(zero_init_linear.weight)
-        # nn.init.zeros_(zero_init_linear.bias)
-
-        self.out_head = nn.Sequential(
+        self.core = nn.Sequential(
+            *[FFBlock(self.n_hidden, dropout=dropout) for _ in range(self.n_layers)],
             nn.LayerNorm(self.n_hidden),
-            zero_init_linear,
         )
 
+        self.forgetting_curve_last_linear = nn.Linear(self.n_hidden, 4)
+        with torch.no_grad():
+            self.forgetting_curve_last_linear.bias.data.copy_(torch.tensor([-0.1645, -0.0393,  0.3989, -0.2395]))
+
     def forward(self, x, label_elapsed_days_real_bl, label_is_new_anki_day_bl):
-        log_label_elapsed_days_real_bl = label_elapsed_days_real_bl.clamp(min=1e-5).log()
-        x = torch.cat([x, log_label_elapsed_days_real_bl.unsqueeze(-1), label_is_new_anki_day_bl.float().unsqueeze(-1)], dim=-1)
-        for block in self.blocks:
-            x = block(x)
-        x = self.out_head(x)
+        x = torch.cat([x, transform_elapsed_days_real(label_elapsed_days_real_bl).unsqueeze(-1), label_is_new_anki_day_bl.float().unsqueeze(-1)], dim=-1)
+        x = self.core(x)
+        x = self.forgetting_curve_last_linear(x)
         return x
 
 
@@ -182,7 +179,7 @@ class CardModel(torch.nn.Module):
             nn.LayerNorm(self.n_hidden),
             nn.Linear(self.n_hidden, self.n_hidden - 2),
         )
-        self.forgetting_curve_nn = ForgettingCurveNN(self.n_hidden)
+        self.forgetting_curve_nn = ForgettingCurveNN(self.n_hidden, self.dropout)
 
     def forward(self, encoding_bh, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl, label_is_new_anki_day):
         B, L = feature_elapsed_days_real_bl.shape
@@ -190,7 +187,7 @@ class CardModel(torch.nn.Module):
         feature_rating_onehot_bl4 = torch.nn.functional.one_hot((feature_rating_bl.long() - 1).clamp(min=0), num_classes=4).float()
         x = torch.cat(
             (
-                feature_elapsed_days_real_bl.clamp(min=1e-5).log().unsqueeze(-1),  # [B, L, 1]
+                transform_elapsed_days_real(feature_elapsed_days_real_bl).unsqueeze(-1),  # [B, L, 1]
                 feature_rating_onehot_bl4,                                                        # [B, L, 4]
                 encoding_bh.view(B, 1, H).expand(B, L, H),                         # [B, L, H]
             ),

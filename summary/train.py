@@ -12,7 +12,7 @@ from summary import decoder_ops
 from summary.model import Model
 from utils import compact_lmdb, load_tensor, parse_toml
 
-WEIGHT_DECAY = 1e-2
+WEIGHT_DECAY = 1e-3
 ADAMW_BETAS = (0.90, 0.999)
 ADAMW_EPS = 1e-8
 CLIP = 3
@@ -50,7 +50,7 @@ def get_optimizer(config, model):
     decay_params = []
     other_params = []
     for name, param in model.named_parameters():
-        if "recency_nn_last_linear" in name:
+        if "recency_nn_last_linear" in name or "forgetting_curve_last_linear" in name:
             other_params.append(param)
             print("Skip decay:", name)
         else:
@@ -71,11 +71,12 @@ def get_optimizer(config, model):
         betas=ADAMW_BETAS,
     )
 
-def validate(model, summary_txn, label_filter_txn, validate_users, device):
+def validate(model, summary_txn, label_filter_txn, validate_users, device, log=None):
     torch.cuda.empty_cache()
     try:
         tot_loss = 0
         tot_loss_n = 0
+        losses = []
         for user in validate_users:
             model.eval()
             batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
@@ -93,6 +94,8 @@ def validate(model, summary_txn, label_filter_txn, validate_users, device):
                 min_review_th_s = torch.zeros_like(max_review_th_s)
                 encoding_s, sum_encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s)
                 loss, loss_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_s, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
+                if log is not None:
+                    log[f"validate_user_loss/user_{user}"] = loss
                 print()
                 print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {(-1 if auc is None else auc):.6f}, size: {loss_n}")
                 for split_i, parameters in enumerate(encoding_s.numpy()):
@@ -100,11 +103,13 @@ def validate(model, summary_txn, label_filter_txn, validate_users, device):
 
                 tot_loss += loss * loss_n
                 tot_loss_n += loss_n
+                losses.append(loss)
     except Exception as e:
         print(e)
         raise e
-    print(f"Mean validation loss: {tot_loss / tot_loss_n:.4f}")
-    return tot_loss / tot_loss_n
+    user_avg_loss = np.array(losses).mean()
+    print(f"Mean validation loss: by review: {tot_loss / tot_loss_n:.4f}, by user: {user_avg_loss}")
+    return tot_loss / tot_loss_n, user_avg_loss
 
 def get_split(n):
     assert n >= 12
@@ -168,7 +173,6 @@ def main(config):
     else:
         print("No model loaded.")
 
-
     train_users = list(range(config.TRAIN_USER_START, config.TRAIN_USER_END + 1))
     validate_overfit_users = list(range(config.VALIDATE_OVERFIT_USER_START, config.VALIDATE_OVERFIT_USER_END + 1))
     for user in validate_overfit_users:
@@ -222,7 +226,7 @@ def main(config):
                     T = decoder_ops.extract_num_reviews(batches)
                     print()
                     if T > config.SKIP_LENGTH:
-                        print(f"Skipping: {user}")
+                        print(f"Skipping: {user}, size: {T}")
                     else:
                         try:
                             train_l, test_r = get_split(T)
@@ -242,7 +246,7 @@ def main(config):
 
                             log["unstable_gradient"] = 0
                             if loss_n < 100:
-                                print("Skipping: label sizes are too small.", loss_n)
+                                print("Skipping: label sizes are too small:", loss_n.item())
                             elif loss_pred.requires_grad:
                                 log["train_loss"] = loss_pred
                                 log["sum_encoding_loss"] = loss_sum_encoding_reg
@@ -284,13 +288,15 @@ def main(config):
                         torch.save(optimizer.state_dict(), save_optim_path)
                         print("MODEL SAVED.")
 
-                        validation_out = validate(model, summary_txn, label_filter_txn, validate_users, config.DEVICE)
-                        if validation_out is not None:
-                            log["validation/validation_loss"] = validation_out
-                        validation_overfit_out = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE)
-                        if validation_overfit_out is not None:
-                            log["validation/validation_overfit_loss"] = validation_overfit_out
-                        if validation_overfit_out is None or validation_out is None:
+                        validation_review, validation_user = validate(model, summary_txn, label_filter_txn, validate_users, config.DEVICE, log)
+                        if validation_review is not None:
+                            log["validation/validation_loss"] = validation_review
+                            log["validation/validation_loss_user"] = validation_user
+                        validation_overfit_review, validation_overfit_user = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE, log)
+                        if validation_overfit_review is not None:
+                            log["validation/validation_overfit_loss"] = validation_overfit_review
+                            log["validation/validation_overfit_loss_user"] = validation_overfit_user
+                        if validation_overfit_review is None or validation_review is None:
                             log["validation/validation_nan"] = 1
                         else:
                             log["validation/validation_nan"] = 0

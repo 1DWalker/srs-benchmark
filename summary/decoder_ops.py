@@ -33,6 +33,8 @@ def encode(batches, encoder_model, min_review_th_s, max_review_th_s):
     S = min_review_th_s.size(0)
     accum_weighted_value_sh = 0
     accum_weight_sh = 0
+    # mask_sum_s = 0
+    # non_norm_recency_weights_sum_s = 0
     for batch in batches:
         feature_review_th_bl, feature_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_rating_bl, label_review_th_bl, label_is_same_day_bl, has_label_bl = batch
         B, L = feature_review_th_bl.shape
@@ -42,15 +44,17 @@ def encode(batches, encoder_model, min_review_th_s, max_review_th_s):
         review_range_sbl = review_range_s.view(S, 1, 1).expand(S, B, L)
         feature_review_th_sbl = feature_review_th_bl.unsqueeze(0).expand(S, B, L)
         mask_sbl = (min_review_sbl <= feature_review_th_sbl) * (feature_review_th_sbl <= max_review_sbl)
+        # mask_sum_s += mask_sbl.sum(dim=(1, 2))
         clamped_ord_sbl = (feature_review_th_sbl - min_review_sbl).clamp(min=torch.zeros_like(review_range_sbl), max=review_range_sbl - 1)
-        recency_weights_sbl = encoder_model.get_recency_weights(clamped_ord_sbl, mask_sbl, review_range_sbl)
-        eff_weight_sblh = mask_sbl.unsqueeze(-1).float() * recency_weights_sbl.unsqueeze(-1) * weight_blh.unsqueeze(0)
+        non_norm_recency_weights_sbl = encoder_model.get_non_norm_recency_weights(clamped_ord_sbl, review_range_s)
+        # non_norm_recency_weights_sum_s += non_norm_recency_weights_sbl.sum(dim=(1, 2))
+        eff_weight_sblh = mask_sbl.unsqueeze(-1).float() * non_norm_recency_weights_sbl.unsqueeze(-1) * weight_blh.unsqueeze(0)
         accum_weighted_value_sh += (eff_weight_sblh * value_blh.unsqueeze(0)).sum(dim=(1, 2))
         accum_weight_sh += eff_weight_sblh.sum(dim=(1, 2))
         assert accum_weighted_value_sh.size(1) == weight_blh.size(2)
 
-    base_sh = accum_weighted_value_sh / (accum_weight_sh + 1)
-    return encoder_model.transform(base_sh, review_range_s.unsqueeze(-1)), base_sh
+    base_sh = accum_weighted_value_sh / (accum_weight_sh + 1e-6)
+    return encoder_model.transform(base_sh, review_range_s), base_sh
 
 def encode_single(batches, encoder_model, min_review_th, max_review_th):
     device = batches[0][0].device
