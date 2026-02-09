@@ -49,15 +49,19 @@ def log_model(log, model):
 def get_optimizer(config, model):
     decay_params = []
     other_params = []
+    exclude_names = ["recency_nn_last_linear", "forgetting_curve_last_linear", "forgetting_curve_initial_linear", "transform_review_range_linear"] 
+    found_exclude = set()
     for name, param in model.named_parameters():
-        if "recency_nn_last_linear" in name or "forgetting_curve_last_linear" in name:
+        if np.array([name in x for x in exclude_names]).any():
             other_params.append(param)
+            found_exclude.add(name)
             print("Skip decay:", name)
         else:
             decay_params.append(param)
 
     assert len(decay_params) > 0
     assert len(other_params) > 0
+    assert len(found_exclude) == len(exclude_names)
     return torch.optim.AdamW(
         [
             {
@@ -206,6 +210,7 @@ def main(config):
         else:
             wandb.init(project=config.WANDB_PROJECT_NAME, config=wandb_config)
 
+    train_loss_dict = {}
     with compressed_db_env.begin(write=False) as summary_txn:
         with label_filter_env.begin(write=False) as label_filter_txn:
             step = config.START_STEP - 1
@@ -239,16 +244,17 @@ def main(config):
                             loss_avg, loss_tot, loss_n = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
                             loss_sum_encoding_reg = torch.linalg.vector_norm(sum_encoding)
                             loss_pred = loss_tot.sum() / (1e-7 + loss_n)
+                            train_loss_dict[user] = loss_avg.item()
 
                             print(f"loss: {loss_avg} ({loss_n})")
                             print(f"sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
                             print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
 
-                            log["unstable_gradient"] = 0
                             if loss_n < 100:
                                 print("Skipping: label sizes are too small:", loss_n.item())
                             elif loss_pred.requires_grad:
                                 log["train_loss"] = loss_pred
+                                log["train_loss_avg"] = np.mean(np.array(list(train_loss_dict.values())))
                                 log["sum_encoding_loss"] = loss_sum_encoding_reg
                                 log["encoding/sum_encoding_std"] = sum_encoding.std()
                                 log["encoding/encoding_std"] = encoding.std()
@@ -256,8 +262,6 @@ def main(config):
                                 tot_loss.backward()
                                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                                 log["grad_norm"] = grad_norm
-                                if grad_norm > 100:
-                                    log["unstable_gradient"] = 1
                                 print(f"{step} {epoch}, user: {user}, loss: {loss_pred.item():.3f}, ({loss_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                 optimizer.step()
                                 optimizer.zero_grad()
