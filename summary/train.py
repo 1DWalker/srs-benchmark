@@ -49,10 +49,14 @@ def log_model(log, model):
 def get_optimizer(config, model):
     decay_params = []
     other_params = []
-    exclude_names = ["recency_nn_last_linear", "forgetting_curve_last_linear", "forgetting_curve_initial_linear", "transform_review_range_linear"] 
+    # exclude_names = ["recency_nn_last_linear", "forgetting_curve_last_linear", "forgetting_curve_initial_linear", "transform_review_range_linear"] 
+    exclude_names = ["recency_nn_last_linear", "forgetting_curve_last_linear"] 
     found_exclude = set()
     for name, param in model.named_parameters():
-        if np.array([name in x for x in exclude_names]).any():
+        if "weight" not in name:
+            print("Skip decay:", name)
+            other_params.append(param)
+        elif np.array([x in name for x in exclude_names]).any():
             other_params.append(param)
             found_exclude.add(name)
             print("Skip decay:", name)
@@ -61,7 +65,6 @@ def get_optimizer(config, model):
 
     assert len(decay_params) > 0
     assert len(other_params) > 0
-    assert len(found_exclude) == len(exclude_names)
     return torch.optim.AdamW(
         [
             {
@@ -112,7 +115,7 @@ def validate(model, summary_txn, label_filter_txn, validate_users, device, log=N
         print(e)
         raise e
     user_avg_loss = np.array(losses).mean()
-    print(f"Mean validation loss: by review: {tot_loss / tot_loss_n:.4f}, by user: {user_avg_loss}")
+    print(f"Mean validation loss: by review: {tot_loss / tot_loss_n:.4f}, by user: {user_avg_loss:.4f}")
     return tot_loss / tot_loss_n, user_avg_loss
 
 def get_split(n):
@@ -129,8 +132,9 @@ def generate_subsplits(l, r, T):
     return np.random.choice(floored_linspace)
 
 def main(config):
-    random.seed(config.SEED)
-    torch.manual_seed(config.SEED)
+    seed = config.SEED + config.START_STEP
+    random.seed(seed)
+    torch.manual_seed(seed)
     np.random.seed(config.SEED)
     model = Model().to(config.DEVICE)
     optimizer = get_optimizer(config, model)

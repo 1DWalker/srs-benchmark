@@ -5,14 +5,15 @@ import numpy as np
 def transform_elapsed_days_real(x):
     return (x.clamp(min=1e-5).log() + 1.3) / 5
 
-# class TimeShiftLerp(nn.Module):
-#     def __init__(self, n_hidden):
-#         super().__init__()
-#         self.time_shift = torch.nn.ZeroPad2d((0, 0, 1, -1))
-#         self.lerp = torch.nn.
+class TimeShiftLerp(nn.Module):
+    def __init__(self, n_hidden):
+        super().__init__()
+        self.time_shift = torch.nn.ZeroPad2d((0, 0, 1, -1))
+        self.lerp = torch.nn.Parameter(torch.ones((1, 1, n_hidden)))
     
-#     def forward(x_blh):
-#         x_shift = self.time_shift(x_blh)
+    def forward(self, x_blh):
+        x_shift = self.time_shift(x_blh)
+        return torch.lerp(x_shift, x_blh, self.lerp)
 
 class ResBlock(nn.Module):
     def __init__(self, module):
@@ -40,6 +41,7 @@ class RNNBlock(nn.Module):
 
         self.seq = ResBlock(nn.Sequential(
             nn.LayerNorm(n_hidden),
+            TimeShiftLerp(n_hidden=n_hidden),
             RNNWrapper(nn.LSTM(input_size=n_hidden, hidden_size=n_hidden, batch_first=True)),
             nn.Linear(n_hidden, n_hidden),
             nn.Dropout(p=dropout),
@@ -58,11 +60,12 @@ class RNNBlock(nn.Module):
         return self.seq(x)
 
 class FFBlock(nn.Module):
-    def __init__(self, n_hidden, dropout=0):
+    def __init__(self, n_hidden, use_timeshift, dropout=0):
         super().__init__()
         self.n_hidden = n_hidden
         self.seq = ResBlock(nn.Sequential(
             nn.LayerNorm(n_hidden),
+            *[TimeShiftLerp(n_hidden=n_hidden) for _ in range(1 if use_timeshift else 0)],
             nn.Linear(self.n_hidden, self.n_hidden),
             nn.Mish(),
             nn.Linear(n_hidden, n_hidden),
@@ -77,7 +80,7 @@ class Block(nn.Module):
         super().__init__()
         self.seq = nn.Sequential(
             RNNBlock(n_hidden=n_hidden, dropout=dropout),
-            FFBlock(n_hidden=n_hidden, dropout=dropout),
+            FFBlock(n_hidden=n_hidden, use_timeshift=True, dropout=dropout),
         )
 
     def forward(self, x):
@@ -97,10 +100,10 @@ class EncoderModel(torch.nn.Module):
         self.blocks = nn.ModuleList([Block(self.n_hidden, dropout=self.dropout) for _ in range(self.n_layers)])
         self.out_norm = nn.LayerNorm(self.n_hidden)
         self.value_linear = nn.Linear(self.n_hidden, self.n_encoding, bias=False)
-        self.weight_linear = nn.Linear(self.n_hidden, self.n_encoding, bias=False)
+        self.weight_linear = nn.Linear(self.n_hidden, self.n_encoding)
         self.encode_transform_nn = nn.Sequential(
             nn.Linear(self.n_encoding + 1, self.n_encoding),
-            *[FFBlock(self.n_encoding, dropout=self.dropout) for _ in range(2)],
+            *[FFBlock(self.n_encoding, use_timeshift=False, dropout=self.dropout) for _ in range(2)],
             nn.LayerNorm(self.n_encoding),
             nn.Linear(self.n_encoding, self.n_encoding),
         )
@@ -111,7 +114,7 @@ class EncoderModel(torch.nn.Module):
             self.recency_nn_last_linear.bias.copy_(torch.tensor([np.log(0.05), np.log(15)]))
         self.recency_nn = nn.Sequential(
             nn.Linear(1, self.recency_nn_hidden),
-            *[FFBlock(self.recency_nn_hidden, dropout=0.5) for _ in range(2)],
+            *[FFBlock(self.recency_nn_hidden, use_timeshift=False, dropout=0.5) for _ in range(2)],
             nn.LayerNorm(self.recency_nn_hidden),
         )
 
@@ -152,7 +155,7 @@ class ForgettingCurveNN(torch.nn.Module):
         self.n_hidden = n_input        
         self.n_layers = 4
         self.core = nn.Sequential(
-            *[FFBlock(self.n_hidden, dropout=dropout) for _ in range(self.n_layers)],
+            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=dropout) for _ in range(self.n_layers)],
             nn.LayerNorm(self.n_hidden),
         )
 

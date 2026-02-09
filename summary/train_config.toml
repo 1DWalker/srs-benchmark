@@ -29,9 +29,9 @@ VALIDATE_STEPS = 1000
 
 LOAD_MODEL = false
 LOAD_MODEL_FOLDER = "pretrain/lstm_encoder"
-LOAD_MODEL_NAME = "lstm_encoder_"
+LOAD_MODEL_NAME = "lstm_encoder_norm_22999"
 SAVE_MODEL_FOLDER = "pretrain/lstm_encoder"
-SAVE_MODEL_PREFIX = "lstm_encoder"
+SAVE_MODEL_PREFIX = "lstm_encoder_lerp"
 
 USE_WANDB = true
 # Only relevant if USE_WANDB is set to true
