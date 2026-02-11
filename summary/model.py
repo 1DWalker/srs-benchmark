@@ -36,9 +36,6 @@ class RNNBlock(nn.Module):
     def __init__(self, n_hidden, dropout=0):
         super().__init__()
 
-        # nn.init.zeros_(zero_init_linear.weight)
-        # nn.init.zeros_(zero_init_linear.bias)
-
         self.seq = ResBlock(nn.Sequential(
             nn.LayerNorm(n_hidden),
             TimeShiftLerp(n_hidden=n_hidden),
@@ -62,11 +59,10 @@ class RNNBlock(nn.Module):
 class FFBlock(nn.Module):
     def __init__(self, n_hidden, use_timeshift, dropout=0):
         super().__init__()
-        self.n_hidden = n_hidden
         self.seq = ResBlock(nn.Sequential(
             nn.LayerNorm(n_hidden),
             *[TimeShiftLerp(n_hidden=n_hidden) for _ in range(1 if use_timeshift else 0)],
-            nn.Linear(self.n_hidden, self.n_hidden),
+            nn.Linear(n_hidden, n_hidden),
             nn.Mish(),
             nn.Linear(n_hidden, n_hidden),
             nn.Dropout(p=dropout),
@@ -103,7 +99,7 @@ class EncoderModel(torch.nn.Module):
         self.weight_linear = nn.Linear(self.n_hidden, self.n_encoding)
         self.encode_transform_nn = nn.Sequential(
             nn.Linear(self.n_encoding + 1, self.n_encoding),
-            *[FFBlock(self.n_encoding, use_timeshift=False, dropout=self.dropout) for _ in range(2)],
+            *[FFBlock(self.n_encoding, use_timeshift=False, dropout=0.5) for _ in range(6)],
             nn.LayerNorm(self.n_encoding),
             nn.Linear(self.n_encoding, self.n_encoding),
         )
@@ -206,9 +202,24 @@ class CardModel(torch.nn.Module):
         x = self.transition(x)
         return self.forgetting_curve_nn(x, label_elapsed_days_real_bl, label_is_new_anki_day)
 
+class FirstReviewModel(torch.nn.Module):
+    def __init__(self, n_encoding):
+        super().__init__()
+        self.n_layers = 3
+        self.n_hidden = n_encoding
+        self.core = nn.Sequential(
+            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=0.5) for _ in range(self.n_layers)],
+            nn.LayerNorm(self.n_hidden),
+            nn.Linear(self.n_hidden, 4),
+        )
+
+    def forward(self, encoding_bh):
+        return self.core(encoding_bh)
+
 class Model(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.n_encoding = 16
         self.encoder_model = EncoderModel(n_encoding=self.n_encoding)
         self.card_model = CardModel(n_encoding=self.n_encoding)
+        self.first_review_model = FirstReviewModel(n_encoding=self.n_encoding)

@@ -63,6 +63,7 @@ def encode_single(batches, encoder_model, min_review_th, max_review_th):
 
 def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
     loss_tot = 0
+    loss_binary_tot = 0
     loss_n = 0
     for batch in batches:
         feature_review_th_bl, feature_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_rating_bl, label_review_th_bl, label_is_same_day_bl, has_label_bl = batch
@@ -77,12 +78,23 @@ def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
         )
         label_mask_bl = has_label_bl * (min_review_th <= label_review_th_bl) * (label_review_th_bl <= max_review_th)
 
+        # CE loss
         loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
         loss_bl = loss_fn(logits_bl4.transpose(1, 2), (label_rating_bl - 1).clamp(0).long())
         loss_tot += (loss_bl * label_mask_bl).sum()
         loss_n += label_mask_bl.sum()
+
+        # BCE loss
+        label_pass_bl = (label_rating_bl > 1).float()
+        logit_pass_bl = (
+            torch.logsumexp(logits_bl4[..., 1:], dim=-1)
+            - logits_bl4[..., 0]
+        )
+        loss_binary_fn = torch.nn.BCEWithLogitsLoss(reduction="none")
+        loss_binary_bl = loss_binary_fn(logit_pass_bl, label_pass_bl)
+        loss_binary_tot += (loss_binary_bl * label_mask_bl).sum()
     
-    return loss_tot / (1e-7 + loss_n), loss_tot, loss_n
+    return loss_tot / (1e-7 + loss_n), loss_binary_tot / (1e-7 + loss_n), loss_tot, loss_binary_tot, loss_n
 
 def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_review_ths, rmse_bins, device, equalize_test_reviews):
     assert len(splits_list) == encoding_hp.size(0) + 1
@@ -119,7 +131,10 @@ def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_revie
         assert not logits_hbl4.isnan().any()
         probs_hbl4 = torch.softmax(logits_hbl4, dim=-1)
         p_success_hbl = probs_hbl4[..., 1:].sum(dim=-1)
-        label_pass_bl = (label_rating_bl >= 2).float()
+
+        p_success_hbl = torch.full_like(p_success_hbl, 0.9)
+
+        label_pass_bl = (label_rating_bl > 1).float()
         label_pass_hbl = label_pass_bl.unsqueeze(0).expand(H, -1, -1).float()
         label_review_th_hbl = label_review_th_bl.unsqueeze(0).expand(H, -1, -1)
         has_label_hbl = has_label_bl.unsqueeze(0).expand(H, -1, -1)

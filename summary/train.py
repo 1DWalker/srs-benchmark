@@ -17,11 +17,11 @@ ADAMW_BETAS = (0.90, 0.999)
 ADAMW_EPS = 1e-8
 CLIP = 3
 
-def log_model(log, model):
+def log_model(log, model, device):
     with torch.no_grad():
         sizes = [300, 1000, 3000, 10000, 30000, 100000]
         model.eval()
-        recency_const_s, recency_degree_s = model.encoder_model.train_size_to_recency_poly(torch.tensor(sizes))
+        recency_const_s, recency_degree_s = model.encoder_model.train_size_to_recency_poly(torch.tensor(sizes, device=device))
 
         for size, recency_const, recency_degree in zip(sizes, recency_const_s.cpu().tolist(), recency_degree_s.cpu().tolist()):
             log[f"recency_const/recency_const_{size}"] = recency_const
@@ -105,12 +105,12 @@ def validate(model, summary_txn, label_filter_txn, validate_users, device, log=N
                     log[f"validate_user_loss/user_{user}"] = loss
                 print()
                 print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {(-1 if auc is None else auc):.6f}, size: {loss_n}")
-                for split_i, parameters in enumerate(encoding_s.numpy()):
+                for split_i, parameters in enumerate(encoding_s.cpu().numpy()):
                     print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
 
                 tot_loss += loss * loss_n
                 tot_loss_n += loss_n
-                losses.append(loss)
+                losses.append(loss.item())
     except Exception as e:
         print(e)
         raise e
@@ -230,7 +230,9 @@ def main(config):
     step = 0
     with compressed_db_env.begin(write=False) as summary_txn:
         with label_filter_env.begin(write=False) as label_filter_txn:
+            from time import time
             for epoch in range(int(1e9)):
+                ts = time()
                 random.shuffle(train_users)
                 for user_i, user in enumerate(train_users):
                     log = {}
@@ -256,7 +258,6 @@ def main(config):
                             test_l = generate_subsplits(train_l, test_r, T)
                             train_r = test_l - 1
                             print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
-                            # summarizer_out_TP = summary_model(*training_sample)
                             encoding, sum_encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l, train_r)
 
                             loss_ce_avg, loss_bce_avg, _, _, loss_n = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
@@ -275,11 +276,12 @@ def main(config):
                             if loss_n < 100:
                                 print("Skipping: label sizes are too small:", loss_n.item())
                             elif loss_ce_avg.requires_grad:
-                                log["train_loss_bce_avg"] = np.mean(np.array(list(train_loss_bce_dict.values())))
-                                log["train_loss_avg"] = np.mean(np.array(list(train_loss_dict.values())))
-                                if len(lagging_train_loss_bce_dict) > 100:
-                                    log["bce_epoch_superiority"] = get_superiority(lagging_train_loss_bce_dict, train_loss_bce_dict)
-                                    log["epoch_superiority"] = get_superiority(lagging_train_loss_dict, train_loss_dict)
+                                if step % 10 == 0:
+                                    log["train_loss_bce_avg"] = np.mean(np.array(list(train_loss_bce_dict.values())))
+                                    log["train_loss_avg"] = np.mean(np.array(list(train_loss_dict.values())))
+                                    if len(lagging_train_loss_bce_dict) > 100:
+                                        log["bce_epoch_superiority"] = get_superiority(lagging_train_loss_bce_dict, train_loss_bce_dict)
+                                        log["epoch_superiority"] = get_superiority(lagging_train_loss_dict, train_loss_dict)
                                 log["sum_encoding_loss"] = loss_sum_encoding_reg
                                 log["encoding/sum_encoding_std"] = sum_encoding.std()
                                 log["encoding/encoding_std"] = encoding.std()
@@ -305,7 +307,7 @@ def main(config):
                 
                     scheduler.step()
                     if step % 50 == 0:
-                        log_model(log, model)
+                        log_model(log, model, device=config.DEVICE)
 
                     if validate_iter:
                         save_model_path = (
@@ -334,6 +336,8 @@ def main(config):
                         wandb.log(log, step=step, commit=True)
                     if step == config.TOTAL_STEPS - 1:
                         break
+                print("Epoch done. Time:", time() - ts)
+                exit()
                 if step == config.TOTAL_STEPS - 1:
                     break
 
