@@ -131,6 +131,15 @@ def generate_subsplits(l, r, T):
     floored_linspace = np.floor(linspace).astype(int)
     return np.random.choice(floored_linspace)
 
+def get_superiority(lagging_dict, now_dict):
+    n = 0
+    w = 0
+    for user in lagging_dict.keys():
+        n += 1
+        if lagging_dict[user] > now_dict[user]:
+            w += 1
+    return w / max(1, n)
+
 def main(config):
     seed = config.SEED + config.START_STEP
     random.seed(seed)
@@ -215,17 +224,22 @@ def main(config):
             wandb.init(project=config.WANDB_PROJECT_NAME, config=wandb_config)
 
     train_loss_dict = {}
+    train_loss_bce_dict = {}
+    lagging_train_loss_dict = {}
+    lagging_train_loss_bce_dict = {}
+    step = 0
     with compressed_db_env.begin(write=False) as summary_txn:
         with label_filter_env.begin(write=False) as label_filter_txn:
-            step = config.START_STEP - 1
             for epoch in range(int(1e9)):
                 random.shuffle(train_users)
                 for user_i, user in enumerate(train_users):
                     log = {}
                     log["epoch"] = epoch
                     step += 1
+                    if step < config.START_STEP:
+                        scheduler.step()
+                        continue
                     validate_iter = (step + 1) % config.VALIDATE_STEPS == 0
-                    # validate_iter = True
                     log["step"] = step
                     current_lr = optimizer.param_groups[0]["lr"]
                     log["lr"] = current_lr
@@ -245,28 +259,35 @@ def main(config):
                             # summarizer_out_TP = summary_model(*training_sample)
                             encoding, sum_encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l, train_r)
 
-                            loss_avg, loss_tot, loss_n = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
+                            loss_ce_avg, loss_bce_avg, _, _, loss_n = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
                             loss_sum_encoding_reg = torch.linalg.vector_norm(sum_encoding)
-                            loss_pred = loss_tot.sum() / (1e-7 + loss_n)
-                            train_loss_dict[user] = loss_avg.item()
+                            if user in train_loss_dict:
+                                lagging_train_loss_dict[user] = train_loss_dict[user]
+                            train_loss_dict[user] = loss_ce_avg.item()
+                            if user in train_loss_bce_dict:
+                                lagging_train_loss_bce_dict[user] = train_loss_bce_dict[user]
+                            train_loss_bce_dict[user] = loss_bce_avg.item()
 
-                            print(f"loss: {loss_avg} ({loss_n})")
+                            print(f"loss: ce: {loss_ce_avg}, bce: {loss_bce_avg}, n: {loss_n}")
                             print(f"sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
                             print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
 
                             if loss_n < 100:
                                 print("Skipping: label sizes are too small:", loss_n.item())
-                            elif loss_pred.requires_grad:
-                                log["train_loss"] = loss_pred
+                            elif loss_ce_avg.requires_grad:
+                                log["train_loss_bce_avg"] = np.mean(np.array(list(train_loss_bce_dict.values())))
                                 log["train_loss_avg"] = np.mean(np.array(list(train_loss_dict.values())))
+                                if len(lagging_train_loss_bce_dict) > 100:
+                                    log["bce_epoch_superiority"] = get_superiority(lagging_train_loss_bce_dict, train_loss_bce_dict)
+                                    log["epoch_superiority"] = get_superiority(lagging_train_loss_dict, train_loss_dict)
                                 log["sum_encoding_loss"] = loss_sum_encoding_reg
                                 log["encoding/sum_encoding_std"] = sum_encoding.std()
                                 log["encoding/encoding_std"] = encoding.std()
-                                tot_loss = loss_pred + 1e-3 * loss_sum_encoding_reg
+                                tot_loss = loss_bce_avg + 1e-1 * loss_ce_avg + 1e-3 * loss_sum_encoding_reg
                                 tot_loss.backward()
                                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                                 log["grad_norm"] = grad_norm
-                                print(f"{step} {epoch}, user: {user}, loss: {loss_pred.item():.3f}, ({loss_n}), grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
+                                print(f"{step} {epoch}, user: {user}, loss_ce: {loss_ce_avg.item():.3f}, loss_bce: {loss_bce_avg.item():.3f}, n: {loss_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                 optimizer.step()
                                 optimizer.zero_grad()
 
