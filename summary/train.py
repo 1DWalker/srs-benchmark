@@ -1,8 +1,10 @@
 from pathlib import Path
+from typing import Dict, NamedTuple
 import lmdb
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, root_mean_squared_error
+from summary.simple_button_model import SimpleButtonModel
 import torch
 import wandb
 from rwkv.utils import get_number_of_trainable_parameters
@@ -78,12 +80,23 @@ def get_optimizer(config, model):
         betas=ADAMW_BETAS,
     )
 
-def validate(model, summary_txn, label_filter_txn, validate_users, device, log=None):
+class ValidateResult(NamedTuple):
+    loss_weighted_review: float
+    loss_weighted_user: float
+    first_bce_diff_mean: float
+    first_bce_superiority: float
+    first_ce_diff_mean: float
+    first_ce_superiority: float
+
+def validate(model, summary_txn, label_filter_txn, validate_users, device, first_learn_baseline_scores: Dict[int, decoder_ops.DecodeResult], log=None):
     torch.cuda.empty_cache()
     try:
         tot_loss = 0
         tot_loss_n = 0
         losses = []
+
+        first_bce_baseline_diff = []
+        first_ce_baseline_diff = []
         for user in validate_users:
             model.eval()
             batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
@@ -101,22 +114,61 @@ def validate(model, summary_txn, label_filter_txn, validate_users, device, log=N
                 min_review_th_s = torch.zeros_like(max_review_th_s)
                 encoding_s, sum_encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s)
                 loss, loss_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_s, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
-                if log is not None:
-                    log[f"validate_user_loss/user_{user}"] = loss
-                print()
-                print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {(-1 if auc is None else auc):.6f}, size: {loss_n}")
-                for split_i, parameters in enumerate(encoding_s.cpu().numpy()):
-                    print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
-
                 tot_loss += loss * loss_n
                 tot_loss_n += loss_n
                 losses.append(loss.item())
+
+                first_stats_accum = None
+                for i in range(encoding_s.size(0)):
+                    encoding = encoding_s[i]
+                    first_stats = decoder_ops.first_decode(batches, model.first_review_model, encoding, splits[i], splits[i + 1] - 1)
+                    if first_stats_accum is None:
+                        first_stats_accum = first_stats
+                    else:
+                        first_stats_accum = decoder_ops.combine_decode_results(first_stats_accum, first_stats)
+
+                if log is not None:
+                    log[f"validate_user_loss/user_{user}"] = loss
+
+                first_bce_loss = first_stats_accum.bce_loss_sum.item() / (1e-7 + first_stats_accum.loss_n.item())
+                first_ce_loss = first_stats_accum.ce_loss_sum.item() / (1e-7 + first_stats_accum.loss_n.item())
+                baseline_bce = first_learn_baseline_scores[user].bce_loss_sum.item() / (1e-7 + first_learn_baseline_scores[user].loss_n.item())
+                baseline_ce = first_learn_baseline_scores[user].ce_loss_sum.item() / (1e-7 + first_learn_baseline_scores[user].loss_n.item())
+                first_bce_baseline_diff.append(first_bce_loss - baseline_bce)
+                first_ce_baseline_diff.append(first_ce_loss - baseline_ce)
+                assert(abs(first_stats_accum.loss_n - first_learn_baseline_scores[user].loss_n) < 1e-5)
+
+                print()
+                print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {(-1 if auc is None else auc):.6f}, size: {loss_n}")
+                print(f"First learn: LogLoss: {first_bce_loss:.3f}, {first_bce_loss - baseline_bce:.3f} CE: {first_ce_loss:.3f}, {first_ce_loss - baseline_ce:.3f}")
+                for split_i, parameters in enumerate(encoding_s.cpu().numpy()):
+                    print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
     except Exception as e:
         print(e)
         raise e
+
     user_avg_loss = np.array(losses).mean()
     print(f"Mean validation loss: by review: {tot_loss / tot_loss_n:.4f}, by user: {user_avg_loss:.4f}")
-    return tot_loss / tot_loss_n, user_avg_loss
+    first_bce_diff_mean = np.mean(first_bce_baseline_diff)
+    first_bce_superiority = np.sum([x < 0 for x in first_bce_baseline_diff]) / len(first_bce_baseline_diff)
+    first_ce_diff_mean = np.mean(first_ce_baseline_diff)
+    first_ce_superiority = np.sum([x < 0 for x in first_ce_baseline_diff]) / len(first_ce_baseline_diff)
+    print(f"First BCE diff: {first_bce_diff_mean:.4f}, superiority: {first_bce_superiority:.2f}")
+    print(f"First CE diff: {first_ce_diff_mean:.4f}, superiority: {first_ce_superiority:.2f}")
+    return ValidateResult(
+        loss_weighted_review = tot_loss / tot_loss_n,
+        loss_weighted_user = user_avg_loss,
+        first_bce_diff_mean = first_bce_diff_mean,
+        first_bce_superiority = first_bce_superiority,
+        first_ce_diff_mean = first_ce_diff_mean,
+        first_ce_superiority = first_ce_superiority,
+    )
+
+def get_first_learn_score(user, button_model: SimpleButtonModel, summary_txn, label_filter_txn, config):
+    device = config.DEVICE
+    batches = decoder_ops.get_data(summary_txn, user, device)
+    splits = load_tensor(label_filter_txn, f"{user}_split", device=device).tolist()
+    return decoder_ops.first_logits(batches, torch.log(button_model.get_first_dist(user, device=device)), splits[0], int(1e9))
 
 def get_split(n):
     assert n >= 12
@@ -139,6 +191,7 @@ def get_superiority(lagging_dict, now_dict):
         if lagging_dict[user] > now_dict[user]:
             w += 1
     return w / max(1, n)
+
 
 def main(config):
     seed = config.SEED + config.START_STEP
@@ -223,16 +276,19 @@ def main(config):
         else:
             wandb.init(project=config.WANDB_PROJECT_NAME, config=wandb_config)
 
-    train_loss_dict = {}
-    train_loss_bce_dict = {}
-    lagging_train_loss_dict = {}
-    lagging_train_loss_bce_dict = {}
+    train_review_loss_dict = {}
+    train_review_loss_bce_dict = {}
+    lagging_train_review_loss_dict = {}
+    lagging_train_review_loss_bce_dict = {}
+    train_first_loss_dict = {}
+    train_first_loss_bce_dict = {}
     step = 0
     with compressed_db_env.begin(write=False) as summary_txn:
         with label_filter_env.begin(write=False) as label_filter_txn:
-            from time import time
+            simple_button_model = SimpleButtonModel(config.ANKI_BUTTON_USAGE_REPOSITORY_PATH)
+            first_learn_baseline_scores = { user: get_first_learn_score(user, simple_button_model, summary_txn, label_filter_txn, config) for user in set(validate_users).union(validate_overfit_users)}
+
             for epoch in range(int(1e9)):
-                ts = time()
                 random.shuffle(train_users)
                 for user_i, user in enumerate(train_users):
                     log = {}
@@ -259,37 +315,53 @@ def main(config):
                             train_r = test_l - 1
                             print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
                             encoding, sum_encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l, train_r)
-
-                            loss_ce_avg, loss_bce_avg, _, _, loss_n = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
                             loss_sum_encoding_reg = torch.linalg.vector_norm(sum_encoding)
-                            if user in train_loss_dict:
-                                lagging_train_loss_dict[user] = train_loss_dict[user]
-                            train_loss_dict[user] = loss_ce_avg.item()
-                            if user in train_loss_bce_dict:
-                                lagging_train_loss_bce_dict[user] = train_loss_bce_dict[user]
-                            train_loss_bce_dict[user] = loss_bce_avg.item()
 
-                            print(f"loss: ce: {loss_ce_avg}, bce: {loss_bce_avg}, n: {loss_n}")
+                            review_stats: decoder_ops.DecodeResult = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
+                            first_stats: decoder_ops.DecodeResult = decoder_ops.first_decode(batches, model.first_review_model, encoding, min_review_th=test_l, max_review_th=test_r)
+                            review_loss_ce_avg = review_stats.ce_loss_sum / (1e-7 + review_stats.loss_n)
+                            review_loss_bce_avg = review_stats.bce_loss_sum / (1e-7 + review_stats.loss_n)
+                            review_n = review_stats.loss_n
+                            first_loss_ce_avg = first_stats.ce_loss_sum / (1e-7 + first_stats.loss_n)
+                            first_loss_bce_avg = first_stats.bce_loss_sum / (1e-7 + first_stats.loss_n)
+                            first_n = first_stats.loss_n
+
+                            ce_avg = (review_stats.ce_loss_sum + first_stats.ce_loss_sum) / (1e-7 + review_n + first_n)
+                            bce_avg = (review_stats.bce_loss_sum + first_stats.bce_loss_sum) / (1e-7 + review_n + first_n)
+                            tot_loss = bce_avg + 1e-1 * ce_avg + 1e-3 * loss_sum_encoding_reg
+
+                            if user in train_review_loss_dict:
+                                lagging_train_review_loss_dict[user] = train_review_loss_dict[user]
+                            train_review_loss_dict[user] = review_loss_ce_avg.item()
+                            if user in train_review_loss_bce_dict:
+                                lagging_train_review_loss_bce_dict[user] = train_review_loss_bce_dict[user]
+                            train_review_loss_bce_dict[user] = review_loss_bce_avg.item()
+                            train_first_loss_dict[user] = first_loss_ce_avg.item()
+                            train_first_loss_bce_dict[user] = first_loss_bce_avg.item()
+
+                            print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n}")
+                            print(f"First -- loss: ce: {first_loss_ce_avg:.3f}, bce: {first_loss_bce_avg:.3f}, n: {first_n}")
                             print(f"sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
                             print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
 
-                            if loss_n < 100:
-                                print("Skipping: label sizes are too small:", loss_n.item())
-                            elif loss_ce_avg.requires_grad:
+                            if review_n < 100:
+                                print("Skipping: label sizes are too small:", review_n.item())
+                            elif review_loss_ce_avg.requires_grad:
                                 if step % 10 == 0:
-                                    log["train_loss_bce_avg"] = np.mean(np.array(list(train_loss_bce_dict.values())))
-                                    log["train_loss_avg"] = np.mean(np.array(list(train_loss_dict.values())))
-                                    if len(lagging_train_loss_bce_dict) > 100:
-                                        log["bce_epoch_superiority"] = get_superiority(lagging_train_loss_bce_dict, train_loss_bce_dict)
-                                        log["epoch_superiority"] = get_superiority(lagging_train_loss_dict, train_loss_dict)
+                                    log["train_loss_bce_avg"] = np.mean(np.array(list(train_review_loss_bce_dict.values())))
+                                    log["train_loss_avg"] = np.mean(np.array(list(train_review_loss_dict.values())))
+                                    log["train_first_loss_bce_avg"] = np.mean(np.array(list(train_first_loss_bce_dict.values())))
+                                    log["train_first_loss_avg"] = np.mean(np.array(list(train_first_loss_dict.values())))
+                                    if len(lagging_train_review_loss_bce_dict) > 100:
+                                        log["bce_epoch_superiority"] = get_superiority(lagging_train_review_loss_bce_dict, train_review_loss_bce_dict)
+                                        log["epoch_superiority"] = get_superiority(lagging_train_review_loss_dict, train_review_loss_dict)
                                 log["sum_encoding_loss"] = loss_sum_encoding_reg
                                 log["encoding/sum_encoding_std"] = sum_encoding.std()
                                 log["encoding/encoding_std"] = encoding.std()
-                                tot_loss = loss_bce_avg + 1e-1 * loss_ce_avg + 1e-3 * loss_sum_encoding_reg
                                 tot_loss.backward()
                                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                                 log["grad_norm"] = grad_norm
-                                print(f"{step} {epoch}, user: {user}, loss_ce: {loss_ce_avg.item():.3f}, loss_bce: {loss_bce_avg.item():.3f}, n: {loss_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
+                                print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                 optimizer.step()
                                 optimizer.zero_grad()
 
@@ -319,25 +391,25 @@ def main(config):
                         torch.save(optimizer.state_dict(), save_optim_path)
                         print("MODEL SAVED.")
 
-                        validation_review, validation_user = validate(model, summary_txn, label_filter_txn, validate_users, config.DEVICE, log)
-                        if validation_review is not None:
-                            log["validation/validation_loss"] = validation_review
-                            log["validation/validation_loss_user"] = validation_user
-                        validation_overfit_review, validation_overfit_user = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE, log)
-                        if validation_overfit_review is not None:
-                            log["validation/validation_overfit_loss"] = validation_overfit_review
-                            log["validation/validation_overfit_loss_user"] = validation_overfit_user
-                        if validation_overfit_review is None or validation_review is None:
-                            log["validation/validation_nan"] = 1
-                        else:
-                            log["validation/validation_nan"] = 0
+                        validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config.DEVICE, first_learn_baseline_scores, log)
+                        log["validation/validation_loss"] = validate_result.loss_weighted_review
+                        log["validation/validation_loss_user"] = validate_result.loss_weighted_user
+                        log["validation/first_bce_diff"] = validate_result.first_bce_diff_mean
+                        log["validation/first_ce_diff"] = validate_result.first_ce_diff_mean
+                        log["validation/first_bce_superiority"] = validate_result.first_bce_superiority
+                        log["validation/first_ce_superiority"] = validate_result.first_ce_superiority
+                        validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE, first_learn_baseline_scores, log)
+                        log["validation_overfit/validation_overfit_loss"] = validate_overfit_result.loss_weighted_review
+                        log["validation_overfit/validation_overfit_loss_user"] = validate_overfit_result.loss_weighted_user
+                        log["validation_overfit/first_bce_diff"] = validate_overfit_result.first_bce_diff_mean
+                        log["validation_overfit/first_ce_diff"] = validate_overfit_result.first_ce_diff_mean
+                        log["validation_overfit/first_bce_superiority"] = validate_overfit_result.first_bce_superiority
+                        log["validation_overfit/first_ce_superiority"] = validate_overfit_result.first_ce_superiority
 
                     if config.USE_WANDB:
                         wandb.log(log, step=step, commit=True)
                     if step == config.TOTAL_STEPS - 1:
                         break
-                print("Epoch done. Time:", time() - ts)
-                exit()
                 if step == config.TOTAL_STEPS - 1:
                     break
 
