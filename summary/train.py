@@ -50,7 +50,6 @@ def log_model(log, model, device):
 def get_optimizer(config, model):
     decay_params = []
     other_params = []
-    # exclude_names = ["recency_nn_last_linear", "forgetting_curve_last_linear", "forgetting_curve_initial_linear", "transform_review_range_linear"] 
     exclude_names = ["recency_nn_last_linear", "forgetting_curve_last_linear", "first_review_last_linear"] 
     found_exclude = set()
     for name, param in model.named_parameters():
@@ -86,7 +85,8 @@ class ValidateResult(NamedTuple):
     first_bce: float
     first_ce: float
 
-def validate(model, summary_txn, label_filter_txn, validate_users, device, log=None):
+def validate(model, summary_txn, label_filter_txn, validate_users, config, log=None):
+    device = config.DEVICE
     torch.cuda.empty_cache()
     try:
         tot_loss = 0
@@ -96,6 +96,11 @@ def validate(model, summary_txn, label_filter_txn, validate_users, device, log=N
         first_bce_scores = []
         first_ce_scores = []
         for user in validate_users:
+            reserved = torch.cuda.memory_reserved()
+            if reserved >= config.THRESHOLD_RESERVED_GB * 1024 ** 3:
+                print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. Emptying cache.")
+                torch.cuda.empty_cache()
+
             model.eval()
             batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
             T = decoder_ops.extract_num_reviews(batches)
@@ -103,7 +108,7 @@ def validate(model, summary_txn, label_filter_txn, validate_users, device, log=N
             equalize_review_ths = load_tensor(label_filter_txn, f"{user}_review_ths", device).tolist()
             rmse_bins = load_tensor(label_filter_txn, f"{user}_rmse_bins", device).tolist()
             assert len(splits) == 6
-            with torch.inference_mode():
+            with torch.no_grad():
                 max_review_th = []
                 for split_i in range(len(splits) - 1):
                     max_review_th.append(splits[split_i] - 1)
@@ -149,17 +154,21 @@ def validate(model, summary_txn, label_filter_txn, validate_users, device, log=N
     first_ce = np.mean(first_ce_scores)
     print(f"First BCE mean: {first_bce:.4f}, CE mean: {first_ce:.4f}")
     return ValidateResult(
-        loss_weighted_review = tot_loss / tot_loss_n,
-        loss_weighted_user = user_avg_loss,
-        first_bce = first_bce,
-        first_ce = first_ce,
+        loss_weighted_review=tot_loss / tot_loss_n,
+        loss_weighted_user=user_avg_loss,
+        first_bce=first_bce,
+        first_ce=first_ce,
     )
 
 def get_split(n):
     assert n >= 12
-    k = min([random.randint(max(100, int(0.2 * n)), n) for _ in range(2)])
+    # k = min([random.randint(max(100, int(0.2 * n)), n) for _ in range(2)])
+    k = random.randint(max(100, int(0.2 * n)), n)
     # r = l + k - 1 <= n-1 implies l <= n - k
-    l = random.randint(0, n - k)
+    print("set l to 0")
+    # setting l to a random value has a huge negative effect, it struggles to overfit on 2 users
+    # l = random.randint(0, n - k)
+    l = 0
     return l, l + k - 1
 
 def generate_subsplits(l, r, T):
@@ -287,15 +296,14 @@ def main(config):
                     model.train()
                     batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
                     T = decoder_ops.extract_num_reviews(batches)
-                    print()
                     if T > config.SKIP_LENGTH:
+                        print()
                         print(f"Skipping: {user}, size: {T}")
                     else:
                         try:
                             train_l, test_r = get_split(T)
                             test_l = generate_subsplits(train_l, test_r, T)
                             train_r = test_l - 1
-                            print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
                             encoding, sum_encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l, train_r)
                             loss_sum_encoding_reg = torch.linalg.vector_norm(sum_encoding)
 
@@ -322,12 +330,6 @@ def main(config):
                             train_first_loss_dict[user] = first_loss_ce_avg.item()
                             train_first_loss_bce_dict[user] = first_loss_bce_avg.item()
 
-                            print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n}")
-                            print(f"First -- loss: ce: {first_loss_ce_avg:.3f}, bce: {first_loss_bce_avg:.3f}, n: {first_n}")
-                            print(f"sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
-                            print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
-                            print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits).cpu().tolist()]}")
-
                             if review_n < 100:
                                 print("Skipping: label sizes are too small:", review_n.item())
                             elif review_loss_ce_avg.requires_grad:
@@ -337,15 +339,24 @@ def main(config):
                                     log["train_first_loss_bce_avg"] = np.mean(np.array(list(train_first_loss_bce_dict.values())))
                                     log["train_first_loss_avg"] = np.mean(np.array(list(train_first_loss_dict.values())))
                                     if len(lagging_train_review_loss_bce_dict) > 100:
-                                        log["bce_epoch_superiority"] = get_superiority(lagging_train_review_loss_bce_dict, train_review_loss_bce_dict)
-                                        log["epoch_superiority"] = get_superiority(lagging_train_review_loss_dict, train_review_loss_dict)
+                                        log["superiority/bce_epoch_superiority"] = get_superiority(lagging_train_review_loss_bce_dict, train_review_loss_bce_dict)
+                                        log["superiority/epoch_superiority"] = get_superiority(lagging_train_review_loss_dict, train_review_loss_dict)
                                 log["sum_encoding_loss"] = loss_sum_encoding_reg
                                 log["encoding/sum_encoding_std"] = sum_encoding.std()
                                 log["encoding/encoding_std"] = encoding.std()
                                 tot_loss.backward()
                                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                                 log["grad_norm"] = grad_norm
-                                print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
+
+                                if step % 10 == 0:
+                                    print()
+                                    print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
+                                    print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n}")
+                                    print(f"First -- loss: ce: {first_loss_ce_avg:.3f}, bce: {first_loss_bce_avg:.3f}, n: {first_n}")
+                                    print(f"sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
+                                    print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
+                                    print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits, dim=-1).cpu().tolist()]}")
+                                    print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                 optimizer.step()
                                 optimizer.zero_grad()
 
@@ -375,12 +386,12 @@ def main(config):
                         torch.save(optimizer.state_dict(), save_optim_path)
                         print("MODEL SAVED.")
 
-                        validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config.DEVICE, log)
+                        validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, log)
                         log["validation/validation_loss"] = validate_result.loss_weighted_review
                         log["validation/validation_loss_user"] = validate_result.loss_weighted_user
                         log["validation/first_bce"] = validate_result.first_bce
                         log["validation/first_ce"] = validate_result.first_ce
-                        validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE, log)
+                        validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config, log)
                         log["validation_overfit/validation_overfit_loss"] = validate_overfit_result.loss_weighted_review
                         log["validation_overfit/validation_overfit_loss_user"] = validate_overfit_result.loss_weighted_user
                         log["validation_overfit/first_bce"] = validate_overfit_result.first_bce
