@@ -4,7 +4,6 @@ import lmdb
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, root_mean_squared_error
-from summary.simple_button_model import SimpleButtonModel
 import torch
 import wandb
 from rwkv.utils import get_number_of_trainable_parameters
@@ -52,7 +51,7 @@ def get_optimizer(config, model):
     decay_params = []
     other_params = []
     # exclude_names = ["recency_nn_last_linear", "forgetting_curve_last_linear", "forgetting_curve_initial_linear", "transform_review_range_linear"] 
-    exclude_names = ["recency_nn_last_linear", "forgetting_curve_last_linear"] 
+    exclude_names = ["recency_nn_last_linear", "forgetting_curve_last_linear", "first_review_last_linear"] 
     found_exclude = set()
     for name, param in model.named_parameters():
         if "weight" not in name:
@@ -67,6 +66,7 @@ def get_optimizer(config, model):
 
     assert len(decay_params) > 0
     assert len(other_params) > 0
+    assert len(found_exclude) == len(exclude_names)
     return torch.optim.AdamW(
         [
             {
@@ -83,20 +83,18 @@ def get_optimizer(config, model):
 class ValidateResult(NamedTuple):
     loss_weighted_review: float
     loss_weighted_user: float
-    first_bce_diff_mean: float
-    first_bce_superiority: float
-    first_ce_diff_mean: float
-    first_ce_superiority: float
+    first_bce: float
+    first_ce: float
 
-def validate(model, summary_txn, label_filter_txn, validate_users, device, first_learn_baseline_scores: Dict[int, decoder_ops.DecodeResult], log=None):
+def validate(model, summary_txn, label_filter_txn, validate_users, device, log=None):
     torch.cuda.empty_cache()
     try:
         tot_loss = 0
         tot_loss_n = 0
         losses = []
 
-        first_bce_baseline_diff = []
-        first_ce_baseline_diff = []
+        first_bce_scores = []
+        first_ce_scores = []
         for user in validate_users:
             model.eval()
             batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
@@ -132,43 +130,30 @@ def validate(model, summary_txn, label_filter_txn, validate_users, device, first
 
                 first_bce_loss = first_stats_accum.bce_loss_sum.item() / (1e-7 + first_stats_accum.loss_n.item())
                 first_ce_loss = first_stats_accum.ce_loss_sum.item() / (1e-7 + first_stats_accum.loss_n.item())
-                baseline_bce = first_learn_baseline_scores[user].bce_loss_sum.item() / (1e-7 + first_learn_baseline_scores[user].loss_n.item())
-                baseline_ce = first_learn_baseline_scores[user].ce_loss_sum.item() / (1e-7 + first_learn_baseline_scores[user].loss_n.item())
-                first_bce_baseline_diff.append(first_bce_loss - baseline_bce)
-                first_ce_baseline_diff.append(first_ce_loss - baseline_ce)
-                assert(abs(first_stats_accum.loss_n - first_learn_baseline_scores[user].loss_n) < 1e-5)
+                first_bce_scores.append(first_bce_loss)
+                first_ce_scores.append(first_ce_loss)
 
                 print()
                 print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {(-1 if auc is None else auc):.6f}, size: {loss_n}")
-                print(f"First learn: LogLoss: {first_bce_loss:.3f}, {first_bce_loss - baseline_bce:.3f} CE: {first_ce_loss:.3f}, {first_ce_loss - baseline_ce:.3f}")
+                print(f"First learn: LogLoss: {first_bce_loss:.3f}, CE: {first_ce_loss:.3f}")
                 for split_i, parameters in enumerate(encoding_s.cpu().numpy()):
-                    print(f"Split: {split_i}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
+                    first_rating_dist = [round(x, 2) for x in decoder_ops.extract_first_review_dist(model.first_review_model, encoding_s[split_i]).cpu().tolist()]
+                    print(f"Split: {split_i}, first rating: {first_rating_dist}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
     except Exception as e:
         print(e)
         raise e
 
     user_avg_loss = np.array(losses).mean()
     print(f"Mean validation loss: by review: {tot_loss / tot_loss_n:.4f}, by user: {user_avg_loss:.4f}")
-    first_bce_diff_mean = np.mean(first_bce_baseline_diff)
-    first_bce_superiority = np.sum([x < 0 for x in first_bce_baseline_diff]) / len(first_bce_baseline_diff)
-    first_ce_diff_mean = np.mean(first_ce_baseline_diff)
-    first_ce_superiority = np.sum([x < 0 for x in first_ce_baseline_diff]) / len(first_ce_baseline_diff)
-    print(f"First BCE diff: {first_bce_diff_mean:.4f}, superiority: {first_bce_superiority:.2f}")
-    print(f"First CE diff: {first_ce_diff_mean:.4f}, superiority: {first_ce_superiority:.2f}")
+    first_bce = np.mean(first_bce_scores)
+    first_ce = np.mean(first_ce_scores)
+    print(f"First BCE mean: {first_bce:.4f}, CE mean: {first_ce:.4f}")
     return ValidateResult(
         loss_weighted_review = tot_loss / tot_loss_n,
         loss_weighted_user = user_avg_loss,
-        first_bce_diff_mean = first_bce_diff_mean,
-        first_bce_superiority = first_bce_superiority,
-        first_ce_diff_mean = first_ce_diff_mean,
-        first_ce_superiority = first_ce_superiority,
+        first_bce = first_bce,
+        first_ce = first_ce,
     )
-
-def get_first_learn_score(user, button_model: SimpleButtonModel, summary_txn, label_filter_txn, config):
-    device = config.DEVICE
-    batches = decoder_ops.get_data(summary_txn, user, device)
-    splits = load_tensor(label_filter_txn, f"{user}_split", device=device).tolist()
-    return decoder_ops.first_logits(batches, torch.log(button_model.get_first_dist(user, device=device)), splits[0], int(1e9))
 
 def get_split(n):
     assert n >= 12
@@ -285,9 +270,6 @@ def main(config):
     step = 0
     with compressed_db_env.begin(write=False) as summary_txn:
         with label_filter_env.begin(write=False) as label_filter_txn:
-            simple_button_model = SimpleButtonModel(config.ANKI_BUTTON_USAGE_REPOSITORY_PATH)
-            first_learn_baseline_scores = { user: get_first_learn_score(user, simple_button_model, summary_txn, label_filter_txn, config) for user in set(validate_users).union(validate_overfit_users)}
-
             for epoch in range(int(1e9)):
                 random.shuffle(train_users)
                 for user_i, user in enumerate(train_users):
@@ -318,7 +300,8 @@ def main(config):
                             loss_sum_encoding_reg = torch.linalg.vector_norm(sum_encoding)
 
                             review_stats: decoder_ops.DecodeResult = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
-                            first_stats: decoder_ops.DecodeResult = decoder_ops.first_decode(batches, model.first_review_model, encoding, min_review_th=test_l, max_review_th=test_r)
+                            first_review_logits = decoder_ops.extract_first_review_dist_logits(model.first_review_model, encoding)
+                            first_stats: decoder_ops.DecodeResult = decoder_ops.first_logits(batches, first_review_logits, min_review_th=test_l, max_review_th=test_r)
                             review_loss_ce_avg = review_stats.ce_loss_sum / (1e-7 + review_stats.loss_n)
                             review_loss_bce_avg = review_stats.bce_loss_sum / (1e-7 + review_stats.loss_n)
                             review_n = review_stats.loss_n
@@ -343,6 +326,7 @@ def main(config):
                             print(f"First -- loss: ce: {first_loss_ce_avg:.3f}, bce: {first_loss_bce_avg:.3f}, n: {first_n}")
                             print(f"sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
                             print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
+                            print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits).cpu().tolist()]}")
 
                             if review_n < 100:
                                 print("Skipping: label sizes are too small:", review_n.item())
@@ -391,20 +375,16 @@ def main(config):
                         torch.save(optimizer.state_dict(), save_optim_path)
                         print("MODEL SAVED.")
 
-                        validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config.DEVICE, first_learn_baseline_scores, log)
+                        validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config.DEVICE, log)
                         log["validation/validation_loss"] = validate_result.loss_weighted_review
                         log["validation/validation_loss_user"] = validate_result.loss_weighted_user
-                        log["validation/first_bce_diff"] = validate_result.first_bce_diff_mean
-                        log["validation/first_ce_diff"] = validate_result.first_ce_diff_mean
-                        log["validation/first_bce_superiority"] = validate_result.first_bce_superiority
-                        log["validation/first_ce_superiority"] = validate_result.first_ce_superiority
-                        validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE, first_learn_baseline_scores, log)
+                        log["validation/first_bce"] = validate_result.first_bce
+                        log["validation/first_ce"] = validate_result.first_ce
+                        validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config.DEVICE, log)
                         log["validation_overfit/validation_overfit_loss"] = validate_overfit_result.loss_weighted_review
                         log["validation_overfit/validation_overfit_loss_user"] = validate_overfit_result.loss_weighted_user
-                        log["validation_overfit/first_bce_diff"] = validate_overfit_result.first_bce_diff_mean
-                        log["validation_overfit/first_ce_diff"] = validate_overfit_result.first_ce_diff_mean
-                        log["validation_overfit/first_bce_superiority"] = validate_overfit_result.first_bce_superiority
-                        log["validation_overfit/first_ce_superiority"] = validate_overfit_result.first_ce_superiority
+                        log["validation_overfit/first_bce"] = validate_overfit_result.first_bce
+                        log["validation_overfit/first_ce"] = validate_overfit_result.first_ce
 
                     if config.USE_WANDB:
                         wandb.log(log, step=step, commit=True)
@@ -415,7 +395,5 @@ def main(config):
 
 
 if __name__ == '__main__':
-    # decorate_training_sample(20, torch.device("cpu"))
-    # exit()
     config = parse_toml()
     main(config)

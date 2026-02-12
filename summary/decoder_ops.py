@@ -104,6 +104,12 @@ def first_logits(batches, first_review_logits_4, min_review_th, max_review_th):
         loss_n=first_n,
     )
 
+def extract_first_review_dist_logits(first_review_model, encoding_h):
+    return first_review_model(encoding_h.unsqueeze(0)).squeeze(0)
+
+def extract_first_review_dist(first_review_model, encoding_h):
+    return F.softmax(first_review_model(encoding_h.unsqueeze(0)).squeeze(0))
+
 def first_decode(batches, first_review_model, encoding_h, min_review_th, max_review_th):
     first_review_logits_4 = first_review_model(encoding_h.unsqueeze(0)).squeeze(0)
     return first_logits(batches, first_review_logits_4, min_review_th, max_review_th)

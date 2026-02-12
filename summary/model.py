@@ -207,14 +207,14 @@ class FirstReviewModel(torch.nn.Module):
         super().__init__()
         self.n_layers = 3
         self.n_hidden = n_encoding
+        self.first_review_last_linear = nn.Linear(self.n_hidden, 4)
         self.core = nn.Sequential(
             *[FFBlock(self.n_hidden, use_timeshift=False, dropout=0.5) for _ in range(self.n_layers)],
             nn.LayerNorm(self.n_hidden),
-            nn.Linear(self.n_hidden, 4),
         )
 
     def forward(self, encoding_bh):
-        return self.core(encoding_bh)
+        return self.first_review_last_linear(self.core(encoding_bh))
 
 class Model(torch.nn.Module):
     def __init__(self):
