@@ -18,54 +18,51 @@ from utils import load_tensor, parse_toml, save_tensor
 random.seed(1234)
 
 def process_df(df, dtype, device):
-    df.sort_values(by=["card_id", "review_th"], inplace=True)
-    df.drop(df[~df["rating"].isin([1, 2, 3, 4])].index, inplace=True)
-    df["elapsed_seconds"] = df["elapsed_seconds"].map(lambda x: max(0, x))
-    df["is_same_day"] = (df["elapsed_days"] == 0).astype(int)
-    df["elapsed_days_int"] = df["elapsed_days"].map(lambda x: max(0, x))
-    df.drop(columns=["elapsed_days"], inplace=True)
-    df["elapsed_days_real"] = df["elapsed_seconds"] / 86400
-    df["y"] = df["rating"].map(lambda x: {1: 0, 2: 1, 3: 1, 4: 1}[x])
-    df["i"] = df.groupby("card_id").cumcount() + 1
-    df["has_label"] = (df.groupby("card_id").cumcount(ascending=False) != 0).astype(int)
+    df = df.sort_values(["card_id", "review_th"]).copy()
+    df = df[df["rating"].isin([1, 2, 3, 4])]
+    df["elapsed_seconds"] = df["elapsed_seconds"].clip(lower=0)
+    df["elapsed_days_int"] = df["elapsed_days"].clip(lower=0)
+    df["is_same_day"] = (df["elapsed_days"] == 0)
+    df["elapsed_days_real"] = df["elapsed_seconds"] / 86400.0
+    df.drop(columns="elapsed_days", inplace=True)
+    g = df.groupby("card_id", sort=False)
+    df["i"] = g.cumcount() + 1
+    df["has_label"] = g.cumcount(ascending=False) != 0
+    df["label_review_th"] = g["review_th"].shift(-1).fillna(-1)
+    df["label_elapsed_days_int"] = g["elapsed_days_int"].shift(-1).fillna(0)
+    df["label_elapsed_days_real"] = g["elapsed_days_real"].shift(-1).fillna(0)
+    df["label_rating"] = g["rating"].shift(-1).fillna(0)
+    df["label_is_same_day"] = g["is_same_day"].shift(-1).fillna(False)
 
-    def process_group(group):
-        feature_review_th = torch.tensor(group["review_th"].to_numpy(), dtype=torch.int, device=device)
-        feature_elapsed_days_int = torch.tensor(group["elapsed_days_int"].to_numpy(), dtype=torch.int, device=device)
-        feature_elapsed_days_real = torch.tensor(group["elapsed_days_real"].to_numpy(), dtype=dtype, device=device)
-        feature_rating = torch.tensor(group["rating"].to_numpy(), dtype=dtype, device=device)
-        label_review_th = torch.tensor(
-            group["review_th"].shift(-1).fillna(-1).to_numpy(),
-            dtype=torch.int32,
-            device=device,
-        )
-        label_elapsed_days_int = torch.tensor(
-            group["elapsed_days_int"].shift(-1).fillna(0).to_numpy(),
-            dtype=dtype,
-            device=device,
-        )
-        label_elapsed_days_real = torch.tensor(
-            group["elapsed_days_real"].shift(-1).fillna(0).to_numpy(),
-            dtype=dtype,
-            device=device,
-        )
-        label_rating = torch.tensor(
-            group["rating"].shift(-1).fillna(0).to_numpy(), dtype=dtype, device=device
-        )
-        label_is_same_day = torch.tensor(group["is_same_day"].shift(-1).fillna(0).to_numpy(), dtype=torch.bool, device=device)
-        has_label = torch.tensor(group["has_label"].to_numpy(), device=device)
-        return feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_rating, label_review_th, label_is_same_day, has_label
+    out = {}
+    for cid, group in g:
+        arr = group
+        out[cid] = (
+            torch.as_tensor(arr["review_th"].to_numpy(copy=True), dtype=torch.int32, device=device),
+            torch.as_tensor(arr["elapsed_days_int"].to_numpy(copy=True), dtype=torch.int32, device=device),
+            torch.as_tensor(arr["elapsed_days_real"].to_numpy(copy=True), dtype=dtype, device=device),
+            torch.as_tensor(arr["rating"].to_numpy(copy=True), dtype=dtype, device=device),
 
-    card_id_to_group = {
-        card_id: group.reset_index(drop=True)
-        for card_id, group in df.groupby("card_id")
-    }
-    card_id_to_tensors = {
-        card_id: process_group(group) for card_id, group in card_id_to_group.items()
-    }
-    return card_id_to_tensors
+            torch.as_tensor(arr["label_elapsed_days_int"].to_numpy(copy=True), dtype=dtype, device=device),
+            torch.as_tensor(arr["label_elapsed_days_real"].to_numpy(copy=True), dtype=dtype, device=device),
+            torch.as_tensor(arr["label_rating"].to_numpy(copy=True), dtype=dtype, device=device),
+            torch.as_tensor(arr["label_review_th"].to_numpy(copy=True), dtype=torch.int32, device=device),
+            torch.as_tensor(
+                arr["label_is_same_day"].to_numpy(dtype=np.bool_, copy=True),
+                dtype=torch.bool,
+                device=device,
+            ),
+            torch.as_tensor(arr["has_label"].to_numpy(copy=True), device=device),
+        )
 
-def greedy_splits(freqs, factor, allowed_excess_in_one_step=100000):
+    return out
+
+def greedy_splits(freqs, factor, allowed_excess_in_one_step=20000):
+    # 3000 -> 4.1
+    # 10000 -> 2.7 (2.4 lowest)
+    # 20000 -> 2.4? (2.15 lowest)
+    # 30000 -> 2.7 (2.2 lowest)
+    # 100k -> 3
     lens = list(reversed(sorted(freqs.keys())))
     splits = []
     l = 0
@@ -79,7 +76,7 @@ def greedy_splits(freqs, factor, allowed_excess_in_one_step=100000):
             next_waste = waste + extra_waste
             if (
                 (factor - 1) * next_used >= next_waste
-                and extra_waste <= allowed_excess_in_one_step
+                and next_waste <= allowed_excess_in_one_step
             ):
                 used = next_used
                 waste = next_waste
@@ -187,7 +184,7 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
 
 
 def progress_tracker(total_items, progress_queue):
-    with tqdm(total=total_items, desc="Generating Data") as pbar:
+    with tqdm(total=total_items, desc="Generating Data", smoothing=1e-2) as pbar:
         for _ in range(total_items):
             progress_queue.get()
             pbar.update(1)
