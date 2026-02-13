@@ -41,6 +41,7 @@ def encode(batches, encoder_model, min_review_th_s, max_review_th_s):
         feature_review_th_bl, feature_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_rating_bl, label_review_th_bl, label_is_same_day_bl, has_label_bl = batch
         B, L = feature_review_th_bl.shape
         weight_blh, value_blh = encoder_model(feature_elapsed_days_real_bl=feature_elapsed_days_real_bl, feature_rating_bl=feature_rating_bl)
+        assert not weight_blh.isnan().any(), "Nan found."
         min_review_sbl = min_review_th_s.view(S, 1, 1).expand(S, B, L)
         max_review_sbl = max_review_th_s.view(S, 1, 1).expand(S, B, L)
         review_range_sbl = review_range_s.view(S, 1, 1).expand(S, B, L)
@@ -108,7 +109,7 @@ def extract_first_review_dist_logits(first_review_model, encoding_h):
     return first_review_model(encoding_h.unsqueeze(0)).squeeze(0)
 
 def extract_first_review_dist(first_review_model, encoding_h):
-    return F.softmax(first_review_model(encoding_h.unsqueeze(0)).squeeze(0))
+    return F.softmax(first_review_model(encoding_h.unsqueeze(0)).squeeze(0), dim=-1)
 
 def first_decode(batches, first_review_model, encoding_h, min_review_th, max_review_th):
     first_review_logits_4 = first_review_model(encoding_h.unsqueeze(0)).squeeze(0)
@@ -186,9 +187,6 @@ def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_revie
         assert not logits_hbl4.isnan().any()
         probs_hbl4 = torch.softmax(logits_hbl4, dim=-1)
         p_success_hbl = probs_hbl4[..., 1:].sum(dim=-1)
-
-        p_success_hbl = torch.full_like(p_success_hbl, 0.9)
-
         label_pass_bl = (label_rating_bl > 1).float()
         label_pass_hbl = label_pass_bl.unsqueeze(0).expand(H, -1, -1).float()
         label_review_th_hbl = label_review_th_bl.unsqueeze(0).expand(H, -1, -1)

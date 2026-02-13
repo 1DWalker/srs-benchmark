@@ -108,7 +108,7 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, log=N
             equalize_review_ths = load_tensor(label_filter_txn, f"{user}_review_ths", device).tolist()
             rmse_bins = load_tensor(label_filter_txn, f"{user}_rmse_bins", device).tolist()
             assert len(splits) == 6
-            with torch.no_grad():
+            with torch.inference_mode():
                 max_review_th = []
                 for split_i in range(len(splits) - 1):
                     max_review_th.append(splits[split_i] - 1)
@@ -165,9 +165,9 @@ def get_split(n):
     # k = min([random.randint(max(100, int(0.2 * n)), n) for _ in range(2)])
     k = random.randint(max(100, int(0.2 * n)), n)
     # r = l + k - 1 <= n-1 implies l <= n - k
-    print("set l to 0")
-    # setting l to a random value has a huge negative effect, it struggles to overfit on 2 users
     # l = random.randint(0, n - k)
+
+    # setting l to a random value has a huge negative effect, it struggles to overfit on 2 users
     l = 0
     return l, l + k - 1
 
@@ -260,15 +260,15 @@ def main(config):
             "parameters": get_number_of_trainable_parameters(model),
             "seed": config.SEED,
         }
-        if config.WANDB_RESUME:
-            wandb.init(
-                project=config.WANDB_PROJECT_NAME,
-                id=config.WANDB_RESUME_ID,
-                resume="must",
-                config=wandb_config,
-            )
-        else:
-            wandb.init(project=config.WANDB_PROJECT_NAME, config=wandb_config)
+        wandb_kwargs = dict(
+            project=config.WANDB_PROJECT_NAME,
+            config=wandb_config,
+            name=config.WANDB_RUN_NAME,
+            id=config.WANDB_RUN_NAME,
+        )
+        if config.WANDB_RESUME_MODE != "never":
+            wandb_kwargs["resume"] = config.WANDB_RESUME_MODE
+        wandb.init(**wandb_kwargs)
 
     train_review_loss_dict = {}
     train_review_loss_bce_dict = {}
@@ -333,12 +333,12 @@ def main(config):
                             if review_n < 100:
                                 print("Skipping: label sizes are too small:", review_n.item())
                             elif review_loss_ce_avg.requires_grad:
-                                if step % 10 == 0:
+                                if step % 10 == 0 and step - config.START_STEP >= len(train_users):
                                     log["train_loss_bce_avg"] = np.mean(np.array(list(train_review_loss_bce_dict.values())))
                                     log["train_loss_avg"] = np.mean(np.array(list(train_review_loss_dict.values())))
                                     log["train_first_loss_bce_avg"] = np.mean(np.array(list(train_first_loss_bce_dict.values())))
                                     log["train_first_loss_avg"] = np.mean(np.array(list(train_first_loss_dict.values())))
-                                    if len(lagging_train_review_loss_bce_dict) > 100:
+                                    if len(lagging_train_review_loss_bce_dict) == len(train_review_loss_bce_dict):
                                         log["superiority/bce_epoch_superiority"] = get_superiority(lagging_train_review_loss_bce_dict, train_review_loss_bce_dict)
                                         log["superiority/epoch_superiority"] = get_superiority(lagging_train_review_loss_dict, train_review_loss_dict)
                                 log["sum_encoding_loss"] = loss_sum_encoding_reg

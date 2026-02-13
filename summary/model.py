@@ -2,10 +2,16 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-def transform_elapsed_days_real(x):
-    return (x.clamp(min=1e-5).log() + 1.3) / 5
+BASE_DROPOUT = 0.3
+FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
+FIRST_REVIEW_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 4
+ENCODE_TRANSFORM_DROPOUT = 0.7
+RECENCY_NN_DROPOUT = 0.5
 
-class TimeShiftLerp(nn.Module):
+def transform_elapsed_days_real(x):
+    return ((x + 1e-5).log() + 1.3) / 5
+
+class TimeShiftLerp(torch.nn.Module):
     def __init__(self, n_hidden):
         super().__init__()
         self.time_shift = torch.nn.ZeroPad2d((0, 0, 1, -1))
@@ -15,7 +21,7 @@ class TimeShiftLerp(nn.Module):
         x_shift = self.time_shift(x_blh)
         return torch.lerp(x_shift, x_blh, self.lerp)
 
-class ResBlock(nn.Module):
+class ResBlock(torch.nn.Module):
     def __init__(self, module):
         super().__init__()
         self.module = module
@@ -24,7 +30,7 @@ class ResBlock(nn.Module):
         return self.module(inputs) + inputs
 
 
-class RNNWrapper(nn.Module):
+class RNNWrapper(torch.nn.Module):
     def __init__(self, module):
         super().__init__()
         self.module = module
@@ -32,7 +38,7 @@ class RNNWrapper(nn.Module):
     def forward(self, inputs):
         return self.module(inputs)[0]
 
-class RNNBlock(nn.Module):
+class RNNBlock(torch.nn.Module):
     def __init__(self, n_hidden, dropout=0):
         super().__init__()
 
@@ -56,7 +62,7 @@ class RNNBlock(nn.Module):
     def forward(self, x):
         return self.seq(x)
 
-class FFBlock(nn.Module):
+class FFBlock(torch.nn.Module):
     def __init__(self, n_hidden, use_timeshift, dropout=0):
         super().__init__()
         self.seq = ResBlock(nn.Sequential(
@@ -71,7 +77,7 @@ class FFBlock(nn.Module):
     def forward(self, x):
         return self.seq(x)
 
-class Block(nn.Module):
+class Block(torch.nn.Module):
     def __init__(self, n_hidden, dropout=0):
         super().__init__()
         self.seq = nn.Sequential(
@@ -86,11 +92,11 @@ class EncoderModel(torch.nn.Module):
     def __init__(self, n_encoding):
         super().__init__()
         self.n_features = 5
-        self.n_hidden = 16
+        self.n_hidden = n_encoding
         self.n_layers = 3
         self.n_curves = 3
         self.n_encoding = n_encoding
-        self.dropout = 0.1
+        self.dropout = BASE_DROPOUT
 
         self.encoder = nn.Linear(self.n_features, self.n_hidden)
         self.blocks = nn.ModuleList([Block(self.n_hidden, dropout=self.dropout) for _ in range(self.n_layers)])
@@ -99,9 +105,8 @@ class EncoderModel(torch.nn.Module):
         self.weight_linear = nn.Linear(self.n_hidden, self.n_encoding)
         self.encode_transform_nn = nn.Sequential(
             nn.Linear(self.n_encoding + 1, self.n_encoding),
-            *[FFBlock(self.n_encoding, use_timeshift=False, dropout=0.5) for _ in range(6)],
+            *[FFBlock(self.n_encoding, use_timeshift=False, dropout=ENCODE_TRANSFORM_DROPOUT) for _ in range(6)],
             nn.LayerNorm(self.n_encoding),
-            nn.Linear(self.n_encoding, self.n_encoding),
         )
         self.recency_nn_hidden = 8
         self.recency_nn_last_linear = nn.Linear(self.recency_nn_hidden, 2)
@@ -110,16 +115,19 @@ class EncoderModel(torch.nn.Module):
             self.recency_nn_last_linear.bias.copy_(torch.tensor([np.log(0.05), np.log(15)]))
         self.recency_nn = nn.Sequential(
             nn.Linear(1, self.recency_nn_hidden),
-            *[FFBlock(self.recency_nn_hidden, use_timeshift=False, dropout=0.5) for _ in range(2)],
+            *[FFBlock(self.recency_nn_hidden, use_timeshift=False, dropout=RECENCY_NN_DROPOUT) for _ in range(2)],
             nn.LayerNorm(self.recency_nn_hidden),
         )
 
     def forward(self, feature_elapsed_days_real_bl, feature_rating_bl):
         feature_rating_onehot_bl4 = torch.nn.functional.one_hot((feature_rating_bl.long() - 1).clamp(min=0), num_classes=4).float()
         x = torch.cat((transform_elapsed_days_real(feature_elapsed_days_real_bl).unsqueeze(-1), feature_rating_onehot_bl4), dim=-1)
+        assert not x.isnan().any()
         x = self.encoder(x)
+        assert not x.isnan().any()
         for block in self.blocks:
             x = block(x)
+            assert not x.isnan().any()
         x = self.out_norm(x)
         value_blh = self.value_linear(x)
         weight_blh = torch.sigmoid(self.weight_linear(x))
@@ -151,7 +159,7 @@ class ForgettingCurveNN(torch.nn.Module):
         self.n_hidden = n_input        
         self.n_layers = 4
         self.core = nn.Sequential(
-            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=dropout) for _ in range(self.n_layers)],
+            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=FORGETTING_CURVE_DROPOUT) for _ in range(self.n_layers)],
             nn.LayerNorm(self.n_hidden),
         )
 
@@ -170,10 +178,10 @@ class CardModel(torch.nn.Module):
     def __init__(self, n_encoding):
         super().__init__()
         self.n_features = 5 + n_encoding
-        self.n_hidden = 16
+        self.n_hidden = n_encoding
         self.n_blocks = 2
         self.n_encoding = n_encoding
-        self.dropout = 0.1
+        self.dropout = BASE_DROPOUT
         self.encoder = nn.Linear(self.n_features, self.n_hidden)
         self.blocks = nn.ModuleList([Block(self.n_hidden, dropout=self.dropout) for _ in range(self.n_blocks)])
         self.last_rnn_block = RNNBlock(self.n_hidden, dropout=self.dropout)
@@ -209,7 +217,7 @@ class FirstReviewModel(torch.nn.Module):
         self.n_hidden = n_encoding
         self.first_review_last_linear = nn.Linear(self.n_hidden, 4)
         self.core = nn.Sequential(
-            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=0.5) for _ in range(self.n_layers)],
+            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=FIRST_REVIEW_DROPOUT) for _ in range(self.n_layers)],
             nn.LayerNorm(self.n_hidden),
         )
 
@@ -219,7 +227,7 @@ class FirstReviewModel(torch.nn.Module):
 class Model(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.n_encoding = 16
+        self.n_encoding = 24
         self.encoder_model = EncoderModel(n_encoding=self.n_encoding)
         self.card_model = CardModel(n_encoding=self.n_encoding)
         self.first_review_model = FirstReviewModel(n_encoding=self.n_encoding)
