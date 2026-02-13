@@ -1,0 +1,15 @@
+SUMMARY_DB_PATH = "compact_db"
+LABEL_FILTER_DB_PATH = "label_filter_db"
+
+USER_START = 1
+USER_END = 100
+
+MODEL_PATH = "pretrain/lstm_encoder/lstm_encoder_big_decay_19999.pth"
+OUT_NAME = "LSTM-encoder"
+
+DEVICE = "cuda"
+
+PROCESSES = 1
+
+# Clear the CUDA cache if the reserved memory is over a certain amount
+THRESHOLD_RESERVED_GB = 7.0

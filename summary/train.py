@@ -286,7 +286,8 @@ def main(config):
                     log["epoch"] = epoch
                     step += 1
                     if step < config.START_STEP:
-                        scheduler.step()
+                        if config.START_SCHEDULER_AT_START_STEP:
+                            scheduler.step()
                         continue
                     validate_iter = (step + 1) % config.VALIDATE_STEPS == 0
                     log["step"] = step
