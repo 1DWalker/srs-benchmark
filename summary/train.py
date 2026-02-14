@@ -186,6 +186,9 @@ def get_superiority(lagging_dict, now_dict):
             w += 1
     return w / max(1, n)
 
+def cosine_down(step, total_steps):
+    return 1 + np.cos(0.5 * np.pi * (1 + step / total_steps))
+
 
 def main(config):
     seed = config.SEED + config.START_STEP
@@ -199,24 +202,28 @@ def main(config):
     curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
     print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
 
-    if config.TRAIN_MODE == "WS":
+    if config.TRAIN_MODE == "WSD":
         start_factor = max(1e-4, config.WARMUP_START_LR / config.PEAK_LR)
         start_lr = start_factor * config.PEAK_LR
         warmup_steps = config.WARMUP_STEPS
+        decay_steps = int(0.1 * config.TOTAL_STEPS)
+        constant_steps = config.TOTAL_STEPS - warmup_steps - decay_steps
         print("Warmup steps:", warmup_steps)
+        print("Constant steps:", constant_steps)
+        print("Decay steps:", decay_steps)
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=start_factor, end_factor=1.0, total_iters=warmup_steps
         )
         main_scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0)
+        decay_scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=lambda t: cosine_down(t, decay_steps)
+        )
         scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer,
-            schedulers=[warmup_scheduler, main_scheduler],
-            milestones=[warmup_steps],
+            schedulers=[warmup_scheduler, main_scheduler, decay_scheduler],
+            milestones=[warmup_steps, warmup_steps + constant_steps],
         )
     elif config.TRAIN_MODE == "D":
-        def cosine_down(step, total_steps):
-            return 1 + np.cos(0.5 * np.pi * (1 + step / total_steps))
-
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer, lr_lambda=lambda t: cosine_down(t, config.TOTAL_STEPS)
         )
@@ -229,7 +236,7 @@ def main(config):
         print("Loading model:", model_path)
         model.load_state_dict(torch.load(model_path, weights_only=True))
         optimizer_state = torch.load(optim_path, weights_only=True)
-        if config.TRAIN_MODE == "WS":
+        if config.TRAIN_MODE == "WSD":
             for group in optimizer_state["param_groups"]:
                 group["lr"] = start_lr
         optimizer.load_state_dict(optimizer_state)
@@ -290,7 +297,6 @@ def main(config):
                             scheduler.step()
                         continue
                     validate_iter = (step + 1) % config.VALIDATE_STEPS == 0
-                    log["step"] = step
                     current_lr = optimizer.param_groups[0]["lr"]
                     log["lr"] = current_lr
 

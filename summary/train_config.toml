@@ -1,7 +1,7 @@
 SUMMARY_DB_PATH = "compact_db"
 LABEL_FILTER_DB_PATH = "label_filter_db"
 
-SEED = 111
+SEED = 112
 
 TRAIN_USER_START = 5001
 TRAIN_USER_END = 10000
@@ -17,26 +17,25 @@ DEVICE = "cuda"
 DTYPE = "float"
 
 # If we use a warmup, set the lr to start at for the warmup. Useful for continuing a run that was in the middle of a warmup
-WARMUP_START_LR = 2e-3
-PEAK_LR = 4e-3
+WARMUP_START_LR = 0
+PEAK_LR = 3e-3
 
-# Available modes are "WS" and "D" for the corresponding phases of the WSD learning rate scheduler.
-TRAIN_MODE = "D"
+TRAIN_MODE = "WSD" # options are "WSD", "D"
 START_STEP = 0
 START_SCHEDULER_AT_START_STEP = true
-WARMUP_STEPS = 0
-TOTAL_STEPS = 20000
-VALIDATE_STEPS = 2500
+WARMUP_STEPS = 30
+TOTAL_STEPS = 200
+VALIDATE_STEPS = 5000
 
-LOAD_MODEL = true
+LOAD_MODEL = false
 LOAD_MODEL_FOLDER = "pretrain/lstm_encoder"
-LOAD_MODEL_NAME = "lstm_encoder_big_197499"
+LOAD_MODEL_NAME = "lstm_encoder_big_nodropout_214999"
 SAVE_MODEL_FOLDER = "pretrain/lstm_encoder"
-SAVE_MODEL_PREFIX = "lstm_encoder_big_decay"
+SAVE_MODEL_PREFIX = "lstm_encoder_big_nodropout_decay"
 
-USE_WANDB = true
+USE_WANDB = false
 WANDB_PROJECT_NAME = "LSTM encoder"
-WANDB_RUN_NAME = "l to 0 - decay"  # Human-readable name shown in UI and the ID
+WANDB_RUN_NAME = "small"  # Human-readable name shown in UI and the ID
 WANDB_RESUME_MODE = "never"   # "never" | "allow" | "must" | "auto"
 
 # Skip batches of a certain length of longer
