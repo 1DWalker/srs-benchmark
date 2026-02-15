@@ -2,11 +2,16 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-BASE_DROPOUT = 0.3
+# BASE_DROPOUT = 0.3
+# FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
+# FIRST_REVIEW_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 4
+# ENCODE_TRANSFORM_DROPOUT = 0.7
+# RECENCY_NN_DROPOUT = 0.5
+BASE_DROPOUT = 0
 FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
 FIRST_REVIEW_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 4
-ENCODE_TRANSFORM_DROPOUT = 0.7
-RECENCY_NN_DROPOUT = 0.5
+ENCODE_TRANSFORM_DROPOUT = 0
+RECENCY_NN_DROPOUT = 0
 
 def transform_elapsed_days_real(x):
     return ((x + 1e-5).log() + 1.3) / 5
@@ -47,7 +52,7 @@ class RNNBlock(torch.nn.Module):
             TimeShiftLerp(n_hidden=n_hidden),
             RNNWrapper(nn.LSTM(input_size=n_hidden, hidden_size=n_hidden, batch_first=True)),
             nn.Linear(n_hidden, n_hidden),
-            nn.Dropout(p=dropout),
+            *[nn.Dropout(p=dropout) for _ in range(1 if dropout > 0 else 0)],
         ))
         for name, param in self.named_parameters():
             if "weight_ih" in name:  # Input-to-hidden weights
@@ -71,7 +76,7 @@ class FFBlock(torch.nn.Module):
             nn.Linear(n_hidden, n_hidden),
             nn.Mish(),
             nn.Linear(n_hidden, n_hidden),
-            nn.Dropout(p=dropout),
+            *[nn.Dropout(p=dropout) for _ in range(1 if dropout > 0 else 0)],
         ))
 
     def forward(self, x):
@@ -167,8 +172,8 @@ class ForgettingCurveNN(torch.nn.Module):
         with torch.no_grad():
             self.forgetting_curve_last_linear.bias.data.copy_(torch.tensor([-0.1645, -0.0393,  0.3989, -0.2395]))
 
-    def forward(self, x, label_elapsed_days_real_bl, label_is_new_anki_day_bl):
-        x = torch.cat([x, transform_elapsed_days_real(label_elapsed_days_real_bl).unsqueeze(-1), label_is_new_anki_day_bl.float().unsqueeze(-1)], dim=-1)
+    def forward(self, x, label_elapsed_days_real_bl):
+        x = torch.cat([x, transform_elapsed_days_real(label_elapsed_days_real_bl).unsqueeze(-1)], dim=-1)
         x = self.core(x)
         x = self.forgetting_curve_last_linear(x)
         return x
@@ -187,11 +192,11 @@ class CardModel(torch.nn.Module):
         self.last_rnn_block = RNNBlock(self.n_hidden, dropout=self.dropout)
         self.transition = nn.Sequential(
             nn.LayerNorm(self.n_hidden),
-            nn.Linear(self.n_hidden, self.n_hidden - 2),
+            nn.Linear(self.n_hidden, self.n_hidden - 1),
         )
         self.forgetting_curve_nn = ForgettingCurveNN(self.n_hidden, self.dropout)
 
-    def forward(self, encoding_bh, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl, label_is_new_anki_day):
+    def forward(self, encoding_bh, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl):
         B, L = feature_elapsed_days_real_bl.shape
         H = encoding_bh.size(1)
         feature_rating_onehot_bl4 = torch.nn.functional.one_hot((feature_rating_bl.long() - 1).clamp(min=0), num_classes=4).float()
@@ -208,7 +213,7 @@ class CardModel(torch.nn.Module):
             x = block(x)
         x = self.last_rnn_block(x)
         x = self.transition(x)
-        return self.forgetting_curve_nn(x, label_elapsed_days_real_bl, label_is_new_anki_day)
+        return self.forgetting_curve_nn(x, label_elapsed_days_real_bl)
 
 class FirstReviewModel(torch.nn.Module):
     def __init__(self, n_encoding):
