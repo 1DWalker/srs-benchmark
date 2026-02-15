@@ -20,14 +20,6 @@ CLIP = 3
 
 def log_model(log, model, device):
     with torch.no_grad():
-        sizes = [300, 1000, 3000, 10000, 30000, 100000]
-        model.eval()
-        recency_const_s, recency_degree_s = model.encoder_model.train_size_to_recency_poly(torch.tensor(sizes, device=device))
-
-        for size, recency_const, recency_degree in zip(sizes, recency_const_s.cpu().tolist(), recency_degree_s.cpu().tolist()):
-            log[f"recency_const/recency_const_{size}"] = recency_const
-            log[f"recency_degree/recency_degree_{size}"] = recency_degree
-
         for name, param in model.named_parameters():
             log[f"model/{name}.data.mean"] = param.mean().item()
             if param.numel() > 1:
@@ -50,7 +42,7 @@ def log_model(log, model, device):
 def get_optimizer(config, model):
     decay_params = []
     other_params = []
-    exclude_names = ["recency_nn_last_linear", "forgetting_curve_last_linear", "first_review_last_linear"] 
+    exclude_names = ["forgetting_curve_last_linear", "first_review_last_linear"] 
     found_exclude = set()
     for name, param in model.named_parameters():
         if "weight" not in name:
@@ -73,7 +65,7 @@ def get_optimizer(config, model):
                 "weight_decay": WEIGHT_DECAY,
                 "lr": config.PEAK_LR,
             },
-            {"params": other_params, "weight_decay": 0.0, "lr": config.PEAK_LR},
+            {"params": other_params, "weight_decay": 1e-6, "lr": config.PEAK_LR},
         ],
         eps=ADAMW_EPS,
         betas=ADAMW_BETAS,
@@ -114,8 +106,8 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, log=N
                     max_review_th.append(splits[split_i] - 1)
 
                 max_review_th_s = torch.tensor(max_review_th, device=device)
-                min_review_th_s = torch.zeros_like(max_review_th_s)
-                encoding_s, sum_encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s)
+                min_review_th_s = torch.ones_like(max_review_th_s)
+                encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s)
                 loss, loss_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_s, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
                 tot_loss += loss * loss_n
                 tot_loss_n += loss_n
@@ -311,12 +303,11 @@ def main(config):
                             train_l, test_r = get_split(T)
                             test_l = generate_subsplits(train_l, test_r, T)
                             train_r = test_l - 1
-                            encoding, sum_encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l, train_r)
-                            loss_sum_encoding_reg = torch.linalg.vector_norm(sum_encoding)
+                            encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l + 1, train_r + 1)
 
-                            review_stats: decoder_ops.DecodeResult = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l, max_review_th=test_r)
+                            review_stats: decoder_ops.DecodeResult = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l + 1, max_review_th=test_r + 1)
                             first_review_logits = decoder_ops.extract_first_review_dist_logits(model.first_review_model, encoding)
-                            first_stats: decoder_ops.DecodeResult = decoder_ops.first_logits(batches, first_review_logits, min_review_th=test_l, max_review_th=test_r)
+                            first_stats: decoder_ops.DecodeResult = decoder_ops.first_logits(batches, first_review_logits, min_review_th=test_l + 1, max_review_th=test_r + 1)
                             review_loss_ce_avg = review_stats.ce_loss_sum / (1e-7 + review_stats.loss_n)
                             review_loss_bce_avg = review_stats.bce_loss_sum / (1e-7 + review_stats.loss_n)
                             review_n = review_stats.loss_n
@@ -326,7 +317,7 @@ def main(config):
 
                             ce_avg = (review_stats.ce_loss_sum + first_stats.ce_loss_sum) / (1e-7 + review_n + first_n)
                             bce_avg = (review_stats.bce_loss_sum + first_stats.bce_loss_sum) / (1e-7 + review_n + first_n)
-                            tot_loss = bce_avg + 1e-1 * ce_avg + 1e-3 * loss_sum_encoding_reg
+                            tot_loss = bce_avg + 1e-1 * ce_avg
 
                             if user in train_review_loss_dict:
                                 lagging_train_review_loss_dict[user] = train_review_loss_dict[user]
@@ -348,8 +339,6 @@ def main(config):
                                     if len(lagging_train_review_loss_bce_dict) == len(train_review_loss_bce_dict):
                                         log["superiority/bce_epoch_superiority"] = get_superiority(lagging_train_review_loss_bce_dict, train_review_loss_bce_dict)
                                         log["superiority/epoch_superiority"] = get_superiority(lagging_train_review_loss_dict, train_review_loss_dict)
-                                log["sum_encoding_loss"] = loss_sum_encoding_reg
-                                log["encoding/sum_encoding_std"] = sum_encoding.std()
                                 log["encoding/encoding_std"] = encoding.std()
                                 tot_loss.backward()
                                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
@@ -360,7 +349,6 @@ def main(config):
                                     print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
                                     print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n}")
                                     print(f"First -- loss: ce: {first_loss_ce_avg:.3f}, bce: {first_loss_bce_avg:.3f}, n: {first_n}")
-                                    print(f"sum encoding: {list(map(lambda x: round(float(x), 4), sum_encoding.tolist()))}")
                                     print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
                                     print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits, dim=-1).cpu().tolist()]}")
                                     print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
