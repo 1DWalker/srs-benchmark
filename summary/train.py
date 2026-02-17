@@ -1,3 +1,4 @@
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, NamedTuple
 import lmdb
@@ -40,35 +41,54 @@ def log_model(log, model, device):
                 log[f"model/{name}.grad.75th"] = torch.quantile(param.grad, 0.75).item()
 
 def get_optimizer(config, model):
-    decay_params = []
-    other_params = []
     exclude_names = ["forgetting_curve_last_linear", "first_review_last_linear"] 
     found_exclude = set()
+    params_by_width = defaultdict(list)
+    param_groups = []
     for name, param in model.named_parameters():
-        if "weight" not in name:
-            print("Skip decay:", name)
-            other_params.append(param)
-        elif np.array([x in name for x in exclude_names]).any():
-            other_params.append(param)
-            found_exclude.add(name)
-            print("Skip decay:", name)
-        else:
-            decay_params.append(param)
+        width = param.size(0)
+        params_by_width[width].append((name, param))
 
-    assert len(decay_params) > 0
-    assert len(other_params) > 0
-    assert len(found_exclude) == len(exclude_names)
-    return torch.optim.AdamW(
-        [
+    for width, named_parameters in params_by_width.items():
+        decay_params = []
+        other_params = []
+        print("WIDTH:", width)
+        for name, param in named_parameters:
+            if "weight" not in name:
+                print("Skip decay:", name)
+                other_params.append(param)
+            elif np.array([x in name for x in exclude_names]).any():
+                other_params.append(param)
+                found_exclude.add(name)
+                print("Skip decay:", name)
+            else:
+                print("Decay:", name)
+                decay_params.append(param)
+
+        lr = 16 * config.PEAK_LR / width
+        print("Width:", width, "lr:", lr, len(decay_params), len(other_params))
+        param_groups.append(
             {
                 "params": decay_params,
                 "weight_decay": WEIGHT_DECAY,
-                "lr": config.PEAK_LR,
-            },
-            {"params": other_params, "weight_decay": 1e-6, "lr": config.PEAK_LR},
-        ],
+                "lr": lr,
+            }
+        )
+        param_groups.append(
+            {
+                "params": other_params,
+                "weight_decay": WEIGHT_DECAY,
+                "lr": lr,
+            }
+        )
+
+    assert len(found_exclude) == len(exclude_names)
+    # exit()
+    return torch.optim.AdamW(
+        param_groups,
         eps=ADAMW_EPS,
         betas=ADAMW_BETAS,
+        fused=True,
     )
 
 class ValidateResult(NamedTuple):
@@ -190,7 +210,7 @@ def main(config):
     model: Model = Model().to(config.DEVICE)
     optimizer = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
-    encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder)
+    encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder) + get_number_of_trainable_parameters(model.encoder_model.last_global_nn)
     encoder_model_card_parallel_params = encoder_model_params - encoder_model_global_params
     card_model_params = get_number_of_trainable_parameters(model.card_model)
     curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
