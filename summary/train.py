@@ -116,7 +116,7 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, log=N
                 first_stats_accum = None
                 for i in range(encoding_s.size(0)):
                     encoding = encoding_s[i]
-                    first_stats = decoder_ops.first_decode(batches, model.first_review_model, encoding, splits[i], splits[i + 1] - 1)
+                    first_stats = decoder_ops.first_decode(batches, model.first_review_model, encoding, splits[i], min(T, splits[i + 1] - 1))
                     if first_stats_accum is None:
                         first_stats_accum = first_stats
                     else:
@@ -187,12 +187,14 @@ def main(config):
     random.seed(seed)
     torch.manual_seed(seed)
     np.random.seed(config.SEED)
-    model = Model().to(config.DEVICE)
+    model: Model = Model().to(config.DEVICE)
     optimizer = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
+    encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder)
+    encoder_model_card_parallel_params = encoder_model_params - encoder_model_global_params
     card_model_params = get_number_of_trainable_parameters(model.card_model)
     curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
-    print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
+    print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}, total: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
 
     if config.TRAIN_MODE == "WSD":
         start_factor = max(1e-4, config.WARMUP_START_LR / config.PEAK_LR)
@@ -248,6 +250,7 @@ def main(config):
     label_filter_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
 
     if config.USE_WANDB:
+        print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}, total: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
         wandb_config = {
             "peak_lr": config.PEAK_LR,
             "adamw_betas": ADAMW_BETAS,
@@ -256,8 +259,13 @@ def main(config):
             "clip": CLIP,
             "user_start": config.TRAIN_USER_START,
             "user_end": config.TRAIN_USER_END,
-            "parameters": get_number_of_trainable_parameters(model),
             "seed": config.SEED,
+            "parameters": get_number_of_trainable_parameters(model),
+            "params_encoder_total": encoder_model_params,
+            "params_encoder_parallel": encoder_model_card_parallel_params,
+            "params_encoder_global": encoder_model_global_params,
+            "params_card_model": card_model_params,
+            "params_forgetting_curve": curve_params,
         }
         wandb_kwargs = dict(
             project=config.WANDB_PROJECT_NAME,
@@ -357,7 +365,7 @@ def main(config):
 
                                 reserved = torch.cuda.memory_reserved()
                                 if reserved >= config.THRESHOLD_RESERVED_GB * 1024 ** 3:
-                                    print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. Emptying cache.")
+                                    print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. T: {T}. Emptying cache.")
                                     torch.cuda.empty_cache()
                             else:
                                 print("No grad required.")

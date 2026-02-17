@@ -83,6 +83,8 @@ def combine_decode_results(a: DecodeResult, b: DecodeResult) -> DecodeResult:
     )
 
 def first_logits(batches, first_review_logits_4, min_review_th, max_review_th):
+    assert min_review_th > 0
+    assert max_review_th < 1e7
     first_ce_tot = 0
     first_bce_tot = 0
     first_n = 0

@@ -2,10 +2,14 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-BASE_DROPOUT = 0.2
+BASE_DROPOUT = 0
 FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
-FIRST_REVIEW_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 4
-GLOBAL_ENCODER_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 4
+FIRST_REVIEW_DROPOUT = 0.5
+GLOBAL_ENCODER_DROPOUT = 0.5
+
+ENCODER_N_HIDDEN = 16
+N_ENCODING = 24
+FORGETTING_CURVE_N_LAYERS = 4
 
 def transform_elapsed_days_real(x):
     return ((x + 1e-5).log() + 1.3) / 5
@@ -94,11 +98,17 @@ class Block(torch.nn.Module):
         return self.seq(x)
 
 class GlobalEncoder(torch.nn.Module):
-    def __init__(self, n_in, n_out):
+    def __init__(self, n_in, n_out, return_accept_weights=False):
         super().__init__()
         self.n_hidden = 4 * n_in
+        self.norm = nn.LayerNorm(n_in)
         self.value_linear = nn.Linear(n_in, self.n_hidden, bias=False)
         self.weight_linear = nn.Linear(n_in, self.n_hidden)
+        self.return_accept_weights = return_accept_weights
+        if self.return_accept_weights:
+            self.accept_linear = nn.Linear(n_in, n_out)
+            torch.nn.init.zeros_(self.accept_linear.weight)
+            torch.nn.init.zeros_(self.accept_linear.bias)
 
         self.core = nn.Sequential(
             *[FFBlock(self.n_hidden, use_timeshift=False, dropout=GLOBAL_ENCODER_DROPOUT) for _ in range(3)],
@@ -109,24 +119,31 @@ class GlobalEncoder(torch.nn.Module):
     def forward(self, x_list, mask_list):
         accum_weighted_value_h = 0
         accum_weight_h = 0
+        accept_weights_list = []
         for x_bl, mask_bl in zip(x_list, mask_list):
             assert len(x_bl.shape) == 3
+            x_bl = self.norm(x_bl)
             value_blh = self.value_linear(x_bl)
             weight_blh = torch.nn.functional.softplus(self.weight_linear(x_bl))
+            if self.return_accept_weights:
+                accept_weights_list.append(self.accept_linear(x_bl))
+
             eff_weight_blh = mask_bl.unsqueeze(-1).float() * weight_blh
             accum_weighted_value_h += (eff_weight_blh * value_blh).sum(dim=(0, 1))
             accum_weight_h += eff_weight_blh.sum(dim=(0, 1))
 
-        sum_encoding_sh = accum_weighted_value_h / (accum_weight_h + 1e-6)
-        return self.core(sum_encoding_sh)
+        sum_encoding_h = accum_weighted_value_h / (accum_weight_h + 1e-6)
+        if self.return_accept_weights:
+            return self.core(sum_encoding_h), accept_weights_list
+        else:
+            return self.core(sum_encoding_h)
 
 
 class EncoderModel(torch.nn.Module):
     def __init__(self, n_encoding):
         super().__init__()
         self.n_features = 9
-        self.n_hidden = n_encoding
-        self.n_layers = 3
+        self.n_hidden = ENCODER_N_HIDDEN
         self.n_curves = 3
         self.n_encoding = n_encoding
         self.dropout = BASE_DROPOUT
@@ -136,7 +153,7 @@ class EncoderModel(torch.nn.Module):
             Block(self.n_hidden, dropout=self.dropout),
         )
         self.full_blocks = 2  # 1 full block consists of GLOBAL - FF - LSTM - FF
-        self.intermediate_global_encoders = nn.ModuleList([GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden) for _ in range(self.full_blocks)])
+        self.intermediate_global_encoders = nn.ModuleList([GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, return_accept_weights=True) for _ in range(self.full_blocks)])
         self.intermediate_sequentials = nn.ModuleList([
             nn.Sequential(
                 FFBlock(self.n_hidden, use_timeshift=True, dropout=self.dropout),
@@ -144,7 +161,7 @@ class EncoderModel(torch.nn.Module):
             )
             for _ in range(self.full_blocks)
         ])
-        self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_encoding)
+        self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_encoding, return_accept_weights=False)
 
     def first(
             self, 
@@ -172,40 +189,18 @@ class EncoderModel(torch.nn.Module):
     def run_core(self, x_list, mask_list):
         for global_encoder, sequential in zip(self.intermediate_global_encoders, self.intermediate_sequentials):
             new_x_list = []
-            global_encoding = global_encoder(x_list, mask_list)
-            for x in x_list:
-                new_x_list.append(sequential(x + global_encoding))
+            global_encoding, accept_weights_list = global_encoder(x_list, mask_list)
+            for x, accept in zip(x_list, accept_weights_list):
+                new_x_list.append(sequential(x + accept * global_encoding))
             x_list = new_x_list
         
         return self.last_global_encoder(x_list, mask_list)
-
-
-
-    def train_n_transform(self, train_n_s):
-        return (train_n_s.clamp(min=1, max=1e5).log() - 9) / 2
-
-    def transform(self, encoding_sh, review_range_s):
-        return self.encode_transform_nn(torch.cat((encoding_sh, self.train_n_transform(review_range_s).unsqueeze(-1)), dim=-1))
-
-    def train_size_to_recency_poly(self, train_n_s):
-        x = self.recency_nn_last_linear(self.recency_nn(self.train_n_transform(train_n_s).unsqueeze(-1)))
-        return x.exp().unbind(dim=-1)
-
-    def get_non_norm_recency_weights(self, ord_sbl, n_s):
-        # ord_bl contains values from 0 to n-1
-        S = n_s.size(0)
-        x_sbl = ord_sbl / n_s.view(S, 1, 1)
-
-        recency_const_s, recency_degree_s = self.train_size_to_recency_poly(n_s)
-        x_sbl = recency_const_s.view(S, 1, 1) + torch.pow(x_sbl, recency_degree_s.view(S, 1, 1))
-        return x_sbl
-
 
 class ForgettingCurveNN(torch.nn.Module):
     def __init__(self, n_input, dropout):
         super().__init__()
         self.n_hidden = n_input        
-        self.n_layers = 4
+        self.n_layers = FORGETTING_CURVE_N_LAYERS
         self.core = nn.Sequential(
             *[FFBlock(self.n_hidden, use_timeshift=False, dropout=FORGETTING_CURVE_DROPOUT) for _ in range(self.n_layers)],
             nn.LayerNorm(self.n_hidden),
@@ -261,7 +256,7 @@ class CardModel(torch.nn.Module):
 class FirstReviewModel(torch.nn.Module):
     def __init__(self, n_encoding):
         super().__init__()
-        self.n_layers = 3
+        self.n_layers = 2
         self.n_hidden = n_encoding
         self.first_review_last_linear = nn.Linear(self.n_hidden, 4)
         self.core = nn.Sequential(
@@ -275,7 +270,7 @@ class FirstReviewModel(torch.nn.Module):
 class Model(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.n_encoding = 16
+        self.n_encoding = N_ENCODING
         self.encoder_model = EncoderModel(n_encoding=self.n_encoding)
         self.card_model = CardModel(n_encoding=self.n_encoding)
         self.first_review_model = FirstReviewModel(n_encoding=self.n_encoding)
