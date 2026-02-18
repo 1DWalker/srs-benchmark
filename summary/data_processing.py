@@ -37,6 +37,8 @@ def process_df(df, dtype, device):
     out = {}
     for cid, group in g:
         arr = group
+        x = arr["elapsed_days_real"].to_numpy(copy=True)
+        assert x[0] == 0
         out[cid] = (
             torch.as_tensor(arr["review_th"].to_numpy(copy=True), dtype=torch.int32, device=device),
             torch.as_tensor(arr["elapsed_days_int"].to_numpy(copy=True), dtype=torch.int32, device=device),
@@ -126,7 +128,7 @@ def process(user_id, config):
             continue
 
         feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_rating, label_review_th, label_is_same_day, has_label = list(zip(*group_lists))
-        feature_review_th = pad_sequence(feature_review_th, batch_first=True, padding_value=0)
+        feature_review_th = pad_sequence(feature_review_th, batch_first=True, padding_value=int(2e9))
         feature_elapsed_days_int = pad_sequence(feature_elapsed_days_int, batch_first=True, padding_value=0)
         feature_elapsed_days_real = pad_sequence(feature_elapsed_days_real, batch_first=True, padding_value=0)
         feature_rating = pad_sequence(feature_rating, batch_first=True, padding_value=0)
@@ -134,7 +136,7 @@ def process(user_id, config):
         label_elapsed_days_real = pad_sequence(label_elapsed_days_real, batch_first=True, padding_value=0)
         label_rating = pad_sequence(label_rating, batch_first=True, padding_value=0)
         label_review_th = pad_sequence(
-            label_review_th, batch_first=True, padding_value=-1
+            label_review_th, batch_first=True, padding_value=int(2e9)
         )
         label_is_same_day = pad_sequence(label_is_same_day, batch_first=True, padding_value=0)
         has_label = pad_sequence(has_label, batch_first=True, padding_value=0)
@@ -184,7 +186,7 @@ def save_job(lmdb_path, lmdb_size, writer_queue):
 
 
 def progress_tracker(total_items, progress_queue):
-    with tqdm(total=total_items, desc="Generating Data", smoothing=1e-2) as pbar:
+    with tqdm(total=total_items, desc="Generating Data", smoothing=5e-3) as pbar:
         for _ in range(total_items):
             progress_queue.get()
             pbar.update(1)
@@ -236,8 +238,18 @@ def main(config):
 
 if __name__ == "__main__":
     config = parse_toml()
-    # process(1, config)
     main(config)
+    # process(1, config)
+
+    # for user_id in range(1, 10):
+    #     df_revlogs = pd.read_parquet(
+    #         config.DATA_PATH / "revlogs", filters=[("user_id", "=", user_id)]
+    #     )
+
+    #     df_revlogs["review_th"] = range(1, df_revlogs.shape[0] + 1)
+    #     df_revlogs.drop(columns=["user_id"], inplace=True)
+    #     card_id_to_tensors = process_df(df_revlogs, config.DTYPE, torch.device("cpu"))
+    # exit()
     # exit()
 
     # # for user_id in range(2, 3):
