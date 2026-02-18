@@ -17,7 +17,7 @@ from utils import compact_lmdb, load_tensor, parse_toml
 WEIGHT_DECAY = 1e-3
 ADAMW_BETAS = (0.90, 0.999)
 ADAMW_EPS = 1e-8
-CLIP = 3
+CLIP = 2
 
 def log_model(log, model, device):
     with torch.no_grad():
@@ -210,7 +210,7 @@ def main(config):
     model: Model = Model().to(config.DEVICE)
     optimizer = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
-    encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder) + get_number_of_trainable_parameters(model.encoder_model.last_global_nn)
+    encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder) + get_number_of_trainable_parameters(model.encoder_model.last_global_nn_linear)
     encoder_model_card_parallel_params = encoder_model_params - encoder_model_global_params
     card_model_params = get_number_of_trainable_parameters(model.card_model)
     curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)

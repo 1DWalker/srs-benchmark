@@ -100,25 +100,27 @@ class Block(torch.nn.Module):
         return self.seq(x)
 
 class GlobalEncoder(torch.nn.Module):
-    def __init__(self, n_in, n_out, num_blocks=3, intermediate=False):
+    def __init__(self, n_in, n_out, n_hidden_in, num_blocks=3, intermediate=False):
         super().__init__()
-        self.n_hidden = GLOBAL_FACTOR * n_in
+        self.n_proj = GLOBAL_FACTOR * n_in
+        self.n_hidden = self.n_proj + n_hidden_in
         self.norm = nn.LayerNorm(n_in)
-        self.value_linear = nn.Linear(n_in, self.n_hidden, bias=False)
-        self.weight_linear = nn.Linear(n_in, self.n_hidden)
+        self.value_linear = nn.Linear(n_in, self.n_proj, bias=False)
+        self.weight_linear = nn.Linear(n_in, self.n_proj)
         self.intermediate = intermediate
         if self.intermediate:
             self.accept_linear = nn.Linear(n_in, n_out)
-            torch.nn.init.zeros_(self.accept_linear.weight)
-            torch.nn.init.zeros_(self.accept_linear.bias)
+            torch.nn.init.orthogonal_(self.accept_linear.weight)
             self.intermediate_out = nn.Linear(self.n_hidden, n_out)
+            torch.nn.init.zeros_(self.intermediate_out.weight)
 
+        self.in_norm = nn.LayerNorm(self.n_proj)
         self.core = nn.Sequential(
             *[FFBlock(self.n_hidden, use_timeshift=False, dropout=GLOBAL_ENCODER_DROPOUT) for _ in range(num_blocks)],
             nn.LayerNorm(self.n_hidden),
         )
     
-    def forward(self, x_list, mask_list):
+    def forward(self, x_list, mask_list, h_in):
         accum_weighted_value_h = 0
         accum_weight_h = 0
         accept_weights_list = []
@@ -135,7 +137,9 @@ class GlobalEncoder(torch.nn.Module):
             accum_weight_h += eff_weight_blh.sum(dim=(0, 1))
 
         sum_encoding_h = accum_weighted_value_h / (accum_weight_h + 1e-6)
-        x_h = self.core(sum_encoding_h)
+        x_h = self.in_norm(sum_encoding_h)
+        x_h = torch.cat((x_h, h_in), dim=-1)
+        x_h = self.core(x_h)
         if self.intermediate:
             return x_h, self.intermediate_out(x_h), accept_weights_list
         else:
@@ -156,7 +160,9 @@ class EncoderModel(torch.nn.Module):
             Block(self.n_hidden, dropout=self.dropout),
         )
         self.full_blocks = 2  # 1 full block consists of GLOBAL - FF - LSTM - FF
-        self.intermediate_global_encoders = nn.ModuleList([GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, intermediate=True) for _ in range(self.full_blocks)])
+        self.intermediate_global_encoders = nn.ModuleList(
+            [GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=GLOBAL_FACTOR * i * self.n_hidden, intermediate=True) for i in range(self.full_blocks)]
+        )
         self.intermediate_sequentials = nn.ModuleList([
             nn.Sequential(
                 FFBlock(self.n_hidden, use_timeshift=True, dropout=self.dropout),
@@ -164,17 +170,12 @@ class EncoderModel(torch.nn.Module):
             )
             for _ in range(self.full_blocks)
         ])
-        self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, num_blocks=0, intermediate=False)
+        self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=GLOBAL_FACTOR * self.full_blocks * self.n_hidden, num_blocks=6, intermediate=False)
 
         self.n_full_global = (self.full_blocks + 1) * self.n_hidden * GLOBAL_FACTOR
-        last_global_nn_linear = nn.Linear(self.n_full_global, n_encoding)
-        torch.nn.init.zeros_(last_global_nn_linear.weight)
-        torch.nn.init.zeros_(last_global_nn_linear.bias)
-        self.last_global_nn = nn.Sequential(
-            *[FFBlock(self.n_full_global, use_timeshift=False, dropout=LAST_GLOBAL_NN_DROPOUT) for _ in range(6)],
-            nn.LayerNorm(self.n_full_global),
-            last_global_nn_linear,
-        )
+        self.last_global_nn_linear = nn.Linear(self.n_full_global, n_encoding)
+        torch.nn.init.zeros_(self.last_global_nn_linear.weight)
+        torch.nn.init.zeros_(self.last_global_nn_linear.bias)
 
     def first(
             self, 
@@ -200,18 +201,16 @@ class EncoderModel(torch.nn.Module):
         return self.encode_block(x)
 
     def run_core(self, x_list, mask_list):
-        global_embs = []
+        global_hidden = torch.tensor([], device=x_list[0].device)
         for global_encoder, sequential in zip(self.intermediate_global_encoders, self.intermediate_sequentials):
             new_x_list = []
-            global_contrib, inter_contrib, accept_weights_list = global_encoder(x_list, mask_list)
-            global_embs.append(global_contrib)
+            new_global_hidden, inter_contrib, accept_weights_list = global_encoder(x_list, mask_list, h_in=global_hidden)
+            global_hidden = new_global_hidden
             for x, accept in zip(x_list, accept_weights_list):
                 new_x_list.append(sequential(x + accept * inter_contrib))
             x_list = new_x_list
         
-        global_contrib = self.last_global_encoder(x_list, mask_list)
-        global_embs.append(global_contrib)
-        return self.last_global_nn(torch.cat(global_embs, dim=-1))
+        return self.last_global_nn_linear(self.last_global_encoder(x_list, mask_list, h_in=global_hidden))
 
 class ForgettingCurveNN(torch.nn.Module):
     def __init__(self, n_input, dropout):
