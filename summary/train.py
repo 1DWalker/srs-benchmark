@@ -128,7 +128,7 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, log=N
                 max_review_th_s = torch.tensor(max_review_th, device=device)
                 min_review_th_s = torch.ones_like(max_review_th_s)
                 encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s)
-                loss, loss_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_s, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
+                loss, loss_n, cond_loss, cond_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_s, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
                 tot_loss += loss * loss_n
                 tot_loss_n += loss_n
                 losses.append(loss.item())
@@ -152,10 +152,12 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, log=N
 
                 print()
                 print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {(-1 if auc is None else auc):.6f}, size: {loss_n}")
+                print(f"Cond CE: {cond_loss.item():.6f}, n: {int(cond_n)}")
                 print(f"First learn: LogLoss: {first_bce_loss:.3f}, CE: {first_ce_loss:.3f}")
                 for split_i, parameters in enumerate(encoding_s.cpu().numpy()):
                     first_rating_dist = [round(x, 2) for x in decoder_ops.extract_first_review_dist(model.first_review_model, encoding_s[split_i]).cpu().tolist()]
-                    print(f"Split: {split_i}, first rating: {first_rating_dist}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
+                    # print(f"Split: {split_i}, first rating: {first_rating_dist}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
+                    print(f"Split: {split_i}, first rating: {first_rating_dist}, n: {first_stats_accum.loss_n.item()}")
     except Exception as e:
         print(e)
         raise e
@@ -210,7 +212,7 @@ def main(config):
     model: Model = Model().to(config.DEVICE)
     optimizer = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
-    encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder) + get_number_of_trainable_parameters(model.encoder_model.last_global_nn_linear)
+    encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders)
     encoder_model_card_parallel_params = encoder_model_params - encoder_model_global_params
     card_model_params = get_number_of_trainable_parameters(model.card_model)
     curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
@@ -377,7 +379,7 @@ def main(config):
                                     print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
                                     print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n}")
                                     print(f"First -- loss: ce: {first_loss_ce_avg:.3f}, bce: {first_loss_bce_avg:.3f}, n: {first_n}")
-                                    print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
+                                    # print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
                                     print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits, dim=-1).cpu().tolist()]}")
                                     print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                 optimizer.step()

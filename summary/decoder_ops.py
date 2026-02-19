@@ -132,7 +132,7 @@ def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
         B, L = feature_review_th_bl.shape
         H = encoding_h.size(0)
         logits_bl4 = decoder_model(
-            encoding_bh=encoding_h.unsqueeze(0).expand(B, H),
+            encoding_h=encoding_h,
             feature_elapsed_days_real_bl=feature_elapsed_days_real_bl, 
             feature_rating_bl=feature_rating_bl, 
             label_elapsed_days_real_bl=label_elapsed_days_real_bl,
@@ -171,6 +171,8 @@ def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_revie
     loss_n = 0
     y_pred = []
     y = []
+    cond_loss_tot = 0
+    cond_n = 0
 
     H, P = encoding_hp.shape
     min_review_th_list = []
@@ -184,12 +186,17 @@ def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_revie
     for batch in batches:
         feature_review_th_bl, feature_elapsed_days_int_bl, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_int_bl, label_elapsed_days_real_bl, label_rating_bl, label_review_th_bl, label_is_same_day_bl, has_label_bl = batch
         B, L = feature_elapsed_days_int_bl.shape
-        logits_hbl4 = decoder_model(
-            encoding_bh=encoding_hp.view(H, 1, -1).expand(H, B, P).reshape(-1, P),
-            feature_elapsed_days_real_bl=feature_elapsed_days_real_bl.expand(H, B, L).reshape(-1, L),
-            feature_rating_bl=feature_rating_bl.expand(H, B, L).reshape(-1, L), 
-            label_elapsed_days_real_bl=label_elapsed_days_real_bl.expand(H, B, L).reshape(-1, L),
-        ).view(H, B, L, 4)
+        logits_bl4_list = []
+        for h in range(H):
+            logits_bl4 = decoder_model(
+                encoding_h=encoding_hp[h],
+                feature_elapsed_days_real_bl=feature_elapsed_days_real_bl, 
+                feature_rating_bl=feature_rating_bl, 
+                label_elapsed_days_real_bl=label_elapsed_days_real_bl,
+            )
+            logits_bl4_list.append(logits_bl4)
+        logits_hbl4 = torch.stack(logits_bl4_list, dim=0)
+
         assert not logits_hbl4.isnan().any()
         probs_hbl4 = torch.softmax(logits_hbl4, dim=-1)
         p_success_hbl = probs_hbl4[..., 1:].sum(dim=-1)
@@ -207,6 +214,18 @@ def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_revie
         loss_hbl = loss_fn(p_success_hbl, label_pass_hbl)
         loss_tot += (loss_hbl * label_mask_hbl).sum()
         loss_n += label_mask_hbl.sum()
+
+        label_cond_mask_hbl = label_mask_hbl * label_pass_hbl
+        cond_prob_hbl3 = probs_hbl4[..., 1:] / p_success_hbl.unsqueeze(-1)
+        label_rating_hbl = label_rating_bl.unsqueeze(0).expand(H, -1, -1)
+        loss_flat = torch.nn.functional.cross_entropy(
+            cond_prob_hbl3.log().reshape(-1, 3),   # (H*B*L, 3)
+            (label_rating_hbl.long() - 2).clamp_min(0).reshape(-1),
+            reduction="none",
+        )
+        cond_loss_hbl = loss_flat.view(H, B, L)
+        cond_loss_tot += (cond_loss_hbl * label_cond_mask_hbl).sum()
+        cond_n += label_cond_mask_hbl.sum()
 
         _, B, L = label_pass_hbl.shape
         mask_np = label_mask_hbl.cpu().numpy()
@@ -250,4 +269,4 @@ def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_revie
         tmp["y"], tmp["p"], sample_weight=tmp["weights"]
     )
 
-    return loss_tot / loss_n, loss_n.item(), rmse_raw, rmse_bins, auc
+    return loss_tot / loss_n, loss_n.item(), cond_loss_tot / (1e-7 + cond_n), cond_n.item(), rmse_raw, rmse_bins, auc

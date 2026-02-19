@@ -11,7 +11,7 @@ from script import sort_jsonl
 from utils import load_tensor, parse_toml
 import multiprocessing as mp
 
-def to_json(user_id, loss, loss_n, rmse_raw, rmse_bins, auc, params):
+def to_json(user_id, loss, loss_n, cond_loss, cond_n, first_bce, first_ce, first_n, rmse_raw, rmse_bins, auc, initial_rating, params):
     try:
         auc = round(auc, 6)
     except:
@@ -22,11 +22,17 @@ def to_json(user_id, loss, loss_n, rmse_raw, rmse_bins, auc, params):
             "LogLoss": round(loss, 6),
             "RMSE(bins)": round(rmse_bins, 6),
             "AUC": auc,
+            "CE | passed review": round(cond_loss, 6),
+            "First BCE": round(first_bce, 6),
+            "First CE": round(first_ce, 6),
         },
         "user": int(user_id),
         "size": loss_n,
+        "passed review size": int(cond_n),
+        "first rating size": int(first_n),
+        "first rating": initial_rating,
         "parameters": {
-            "0": list(map(lambda x: round(x, 4), params.tolist()))
+            "0": list(params.tolist())
         }
     }
     return stats
@@ -66,14 +72,14 @@ def worker_job(config, job_queue, writer_queue, progress_queue):
                             max_review_th.append(splits[split_i] - 1)
 
                         max_review_th_s = torch.tensor(max_review_th, device=device)
-                        min_review_th_s = torch.zeros_like(max_review_th_s)
-                        encoding_s, sum_encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s)
-                        loss, loss_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_s, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
+                        min_review_th_s = torch.ones_like(max_review_th_s)
+                        encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s)
+                        loss, loss_n, cond_loss, cond_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_s, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
 
                         first_stats_accum = None
                         for i in range(encoding_s.size(0)):
                             encoding = encoding_s[i]
-                            first_stats = decoder_ops.first_decode(batches, model.first_review_model, encoding, splits[i], splits[i + 1] - 1)
+                            first_stats = decoder_ops.first_decode(batches, model.first_review_model, encoding, splits[i], min(T, splits[i + 1] - 1))
                             if first_stats_accum is None:
                                 first_stats_accum = first_stats
                             else:
@@ -81,16 +87,18 @@ def worker_job(config, job_queue, writer_queue, progress_queue):
 
                         first_bce_loss = first_stats_accum.bce_loss_sum.item() / (1e-7 + first_stats_accum.loss_n.item())
                         first_ce_loss = first_stats_accum.ce_loss_sum.item() / (1e-7 + first_stats_accum.loss_n.item())
+                        first_n = first_stats_accum.loss_n.item()
 
                         print()
                         print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {(-1 if auc is None else auc):.6f}, size: {loss_n}")
-                        print(f"First learn: LogLoss: {first_bce_loss:.3f}, CE: {first_ce_loss:.3f}")
+                        print(f"Cond CE: {cond_loss.item():.6f}, n: {int(cond_n)}")
+                        print(f"First learn: LogLoss: {first_bce_loss:.3f}, CE: {first_ce_loss:.3f}, n: {first_n}")
                         for split_i, parameters in enumerate(encoding_s.cpu().numpy()):
-                            first_rating_dist = [round(x, 2) for x in decoder_ops.extract_first_review_dist(model.first_review_model, encoding_s[split_i]).cpu().tolist()]
-                            print(f"Split: {split_i}, first rating: {first_rating_dist}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
+                            first_rating_dist = [round(x, 3) for x in decoder_ops.extract_first_review_dist(model.first_review_model, encoding_s[split_i]).cpu().tolist()]
+                            print(f"Split: {split_i}, first rating: {first_rating_dist}")
 
                         progress_queue.put(1)
-                        writer_queue.put(to_json(user, loss.item(), loss_n, rmse_raw, rmse_bins, auc, encoding_s[-1]))
+                        writer_queue.put(to_json(user, loss.item(), loss_n, cond_loss.item(), cond_n, first_bce_loss, first_ce_loss, first_n, rmse_raw, rmse_bins, auc, first_rating_dist, encoding_s[-1]))
                 except queue.Empty:
                     return
 
