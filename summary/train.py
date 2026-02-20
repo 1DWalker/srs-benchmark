@@ -210,7 +210,7 @@ def cosine_down(step, total_steps):
 
 
 def main(config):
-    seed = config.SEED + config.START_STEP
+    seed = config.SEED + config.START_STEP + len(config.TRAIN_MODE)
     random.seed(seed)
     torch.manual_seed(seed)
     np.random.seed(config.SEED)
