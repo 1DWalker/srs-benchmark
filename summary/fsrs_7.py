@@ -1,134 +1,168 @@
 import time
 import torch
+from dataclasses import dataclass
 
+@dataclass
+class FSRS7Params:
+    s: torch.Tensor
+    # forgetting curve
+    decay: torch.Tensor
+    base: torch.Tensor
+    base_weight: torch.Tensor
+    swp: torch.Tensor
+    s_exp: torch.Tensor
 
-def forgetting_curve(w, t, s):
-    decay = -w[27:29]
-    base = w[29:31]
-    base_weight = w[31:33]
+    # stability after review
+    sinc_base: torch.Tensor
+    sinc_s_exp: torch.Tensor
+    sinc_r_mult: torch.Tensor
+    fail_mult: torch.Tensor
+    fail_d_exp: torch.Tensor
+    fail_s_exp: torch.Tensor
+    fail_r_mult: torch.Tensor
+    hard: torch.Tensor
+    easy: torch.Tensor
+
+    # scalar params
+    init_d0: torch.Tensor
+    init_d1: torch.Tensor
+    nextd_mult: torch.Tensor
+
+    trans_a: torch.Tensor
+    trans_b: torch.Tensor
+
+def build_params(w):
+    w_base = torch.tensor([7, 16], device=w.device)
     swp = w[33:35]
+    s_exp = torch.stack([-swp[0], swp[1]])  # PRECOMPUTED
+
+    return FSRS7Params(
+        s=w[:4],
+        decay=-w[27:29],
+        base=w[29:31],
+        base_weight=w[31:33],
+        swp=swp,
+        s_exp=s_exp,
+
+        sinc_base=w[w_base],
+        sinc_s_exp=w[w_base + 1],
+        sinc_r_mult=w[w_base + 2],
+        fail_mult=w[w_base + 3],
+        fail_d_exp=w[w_base + 4],
+        fail_s_exp=w[w_base + 5],
+        fail_r_mult=w[w_base + 6],
+        hard=w[w_base + 7],
+        easy=w[w_base + 8],
+
+        init_d0=w[4],
+        init_d1=w[5],
+        nextd_mult=w[6],
+
+        trans_a=w[26],
+        trans_b=w[25],
+    )
+
+def forgetting_curve(p, t, s):
     t_over_s = (t / s).unsqueeze(-1)
-    factor = base ** (1 / decay) - 1
-    R = (1 + factor * t_over_s) ** decay
-    s_exp = torch.stack([-swp[0], swp[1]])
-    weight = base_weight * s.unsqueeze(-1) ** s_exp
-    return (weight * R).sum(dim=-1) / weight.sum(dim=-1)
+    factor = p.base ** (1 / p.decay) - 1
+    R = (1 + factor * t_over_s) ** p.decay
+    weight = p.base_weight * s.unsqueeze(-1) ** p.s_exp
+    return (weight * R).sum(-1) / weight.sum(-1)
 
-
-def stability_after_review(w, state, r, rating):
+def stability_after_review(p, state, r, rating):
     old_s = state[:, 0]
     old_d = state[:, 1]
     success = rating > 1
-
-    w_base = torch.tensor([7, 16], device=w.device)
-
-    w_sinc_base = w[w_base]
-    w_sinc_s_exp = w[w_base + 1]
-    w_sinc_r_mult = w[w_base + 2]
-    w_fail_mult = w[w_base + 3]
-    w_fail_d_exp = w[w_base + 4]
-    w_fail_s_exp = w[w_base + 5]
-    w_fail_r_mult = w[w_base + 6]
-    w_hard = w[w_base + 7]
-    w_easy = w[w_base + 8]
-
     B = state.shape[0]
 
     hard_penalty = torch.where(
         rating.unsqueeze(1) == 2,
-        w_hard.unsqueeze(0),
-        torch.ones(B, 2, device=w.device),
+        p.hard.unsqueeze(0),
+        torch.ones(B, 2, device=state.device),
     )
 
     easy_bonus = torch.where(
         rating.unsqueeze(1) == 4,
-        w_easy.unsqueeze(0),
-        torch.ones(B, 2, device=w.device),
+        p.easy.unsqueeze(0),
+        torch.ones(B, 2, device=state.device),
     )
 
     new_s_fail = (
-        w_fail_mult
-        * torch.pow(old_d.unsqueeze(1), -w_fail_d_exp)
-        * (torch.pow(old_s.unsqueeze(1) + 1, w_fail_s_exp) - 1)
-        * torch.exp((1 - r).unsqueeze(1) * w_fail_r_mult)
+        p.fail_mult
+        * old_d.unsqueeze(1).pow(-p.fail_d_exp)
+        * ((old_s.unsqueeze(1) + 1).pow(p.fail_s_exp) - 1)
+        * torch.exp((1 - r).unsqueeze(1) * p.fail_r_mult)
     )
 
     pls = torch.minimum(old_s.unsqueeze(1), new_s_fail)
 
     SInc = (
         1
-        + torch.exp(w_sinc_base - 1.5)
+        + torch.exp(p.sinc_base - 1.5)
         * (11 - old_d).unsqueeze(1)
-        * torch.pow(old_s.unsqueeze(1), -w_sinc_s_exp)
-        * (torch.exp((1 - r).unsqueeze(1) * w_sinc_r_mult) - 1)
+        * old_s.unsqueeze(1).pow(-p.sinc_s_exp)
+        * (torch.exp((1 - r).unsqueeze(1) * p.sinc_r_mult) - 1)
         * hard_penalty
         * easy_bonus
     )
 
     new_s_success = torch.maximum(pls, old_s.unsqueeze(1) * SInc)
-
     new_s_both = torch.where(success.unsqueeze(1), new_s_success, pls)
 
     return new_s_both[:, 0], new_s_both[:, 1]
 
+def init_d(p, rating):
+    return p.init_d0 - torch.exp(p.init_d1 * (rating - 1)) + 1
 
-def init_d(w, rating):
-    return w[4] - torch.exp(w[5] * (rating - 1)) + 1
+def next_d(p, state, rating):
+    delta_d = -p.nextd_mult * (rating - 3)
+    new_d = state[:, 1] + delta_d * (10 - state[:, 1]) / 9
+    new_d = 0.01 * init_d(p, torch.tensor(4.0, device=state.device)) + 0.99 * new_d
+    return new_d
 
+def transition_function(p, delta_t):
+    return 1 - p.trans_a * torch.exp(-p.trans_b * delta_t)
 
 def linear_damping(delta_d, old_d):
     return delta_d * (10 - old_d) / 9
 
-
-def mean_reversion(init, current):
-    return 0.01 * init + 0.99 * current
-
-
-def next_d(w, state, rating):
-    delta_d = -w[6] * (rating - 3)
-    new_d = state[:, 1] + linear_damping(delta_d, state[:, 1])
-    new_d = mean_reversion(init_d(w, torch.tensor(4.0, device=w.device)), new_d)
-    return new_d
-
-
-def transition_function(w, delta_t):
-    return 1 - w[26] * torch.exp(-w[25] * delta_t)
-
-
-def fsrs7_step(w, X, state):
+def fsrs7_step(p, X, state):
     if torch.equal(state, torch.zeros_like(state)):
         keys = torch.tensor([1, 2, 3, 4], device=X.device)
-        keys = keys.view(1, -1).expand(X.shape[0], -1)
         index = (X[:, 1].long().unsqueeze(1) == keys).nonzero(as_tuple=True)
-        new_s = torch.ones_like(state[:, 0], device=X.device)
-        new_s[index[0]] = w[index[1]]
-        new_d = init_d(w, X[:, 1]).clamp(1, 10)
-    else:
-        r = forgetting_curve(w, X[:, 0], state[:, 0])
-        s_long, s_short = stability_after_review(w, state, r, X[:, 1])
-        coef = transition_function(w, X[:, 0])
-        new_s = coef * s_long + (1 - coef) * s_short
-        new_d = next_d(w, state, X[:, 1]).clamp(1, 10)
 
-    new_s = new_s.clamp(0.0001, 36500)
+        new_s = torch.ones_like(state[:, 0])
+        new_s[index[0]] = p.s[index[1]]
+
+        new_d = init_d(p, X[:, 1]).clamp(1, 10)
+    else:
+        r = forgetting_curve(p, X[:, 0], state[:, 0])
+        s_long, s_short = stability_after_review(p, state, r, X[:, 1])
+        coef = transition_function(p, X[:, 0])
+
+        new_s = coef * s_long + (1 - coef) * s_short
+        new_d = next_d(p, state, X[:, 1]).clamp(1, 10)
+
+    new_s = new_s.clamp(1e-4, 36500)
     return torch.stack([new_s, new_d], dim=1)
 
-def forward(
-    parameters_p, 
-    feature_elapsed_days_real_bl,
-    feature_rating_bl,
-    label_elapsed_days_real_bl, 
-):
+def forward(parameters_p, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl):
+    p = build_params(parameters_p)
+
     B, L = feature_elapsed_days_real_bl.shape
     inputs_bl2 = torch.stack((feature_elapsed_days_real_bl, feature_rating_bl), dim=-1)
-    state_b2 = torch.zeros((inputs_bl2.size(0), 2), device=inputs_bl2.device)
-    outputs_list = []
+
+    state = torch.zeros((B, 2), device=inputs_bl2.device)
+    outputs = []
+
     for X in inputs_bl2.transpose(0, 1):
-        state_b2 = fsrs7_step(parameters_p, X, state_b2)
-        outputs_list.append(state_b2)
-    output_tensor_bl2 = torch.stack(outputs_list).permute(1, 0, 2)
-    output_s_bl, _ = output_tensor_bl2.unbind(dim=-1)
-    return forgetting_curve(parameters_p, label_elapsed_days_real_bl, output_s_bl), output_tensor_bl2
+        state = fsrs7_step(p, X, state)
+        outputs.append(state)
+
+    output_tensor = torch.stack(outputs).permute(1, 0, 2)
+    output_s = output_tensor[..., 0]
+
+    return forgetting_curve(p, label_elapsed_days_real_bl, output_s), output_tensor
 
 
 FSRS7_DEFAULT_35 = torch.tensor(

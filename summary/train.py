@@ -10,7 +10,7 @@ import wandb
 from rwkv.utils import get_number_of_trainable_parameters
 import random
 
-from summary import decoder_ops
+from summary import decoder_ops, fsrs_encoder_model
 from summary.model import Model
 from utils import compact_lmdb, load_tensor, parse_toml
 
@@ -41,13 +41,22 @@ def log_model(log, model, device):
                 log[f"model/{name}.grad.75th"] = torch.quantile(param.grad, 0.75).item()
 
 def get_optimizer(config, model):
-    exclude_names = ["forgetting_curve_last_linear", "first_review_last_linear"] 
+    exclude_names = model.get_excluded_params()
     found_exclude = set()
     params_by_width = defaultdict(list)
+    param_width = {}
     param_groups = []
     for name, param in model.named_parameters():
-        width = param.size(0)
-        params_by_width[width].append((name, param))
+        width = param.shape[-1]
+        param_width[name] = width
+
+    for name, param in model.named_parameters():
+        width = param.shape[-1]
+        if "bias" in name[-4:]:
+            search_name = name[:-4] + "weight"
+            params_by_width[param_width[search_name]].append((name, param))
+        else:
+            params_by_width[width].append((name, param))
 
     for width, named_parameters in params_by_width.items():
         decay_params = []
@@ -55,14 +64,14 @@ def get_optimizer(config, model):
         print("WIDTH:", width)
         for name, param in named_parameters:
             if "weight" not in name:
-                print("Skip decay:", name)
+                print("Skip decay:", name, param.shape)
                 other_params.append(param)
             elif np.array([x in name for x in exclude_names]).any():
                 other_params.append(param)
                 found_exclude.add(name)
-                print("Skip decay:", name)
+                print("Skip decay:", name, param.shape)
             else:
-                print("Decay:", name)
+                print("Decay:", name, param.shape)
                 decay_params.append(param)
 
         lr = 16 * config.PEAK_LR / width
@@ -158,8 +167,8 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, log=N
                 print(f"First learn: LogLoss: {first_bce_loss:.3f}, CE: {first_ce_loss:.3f}")
                 for split_i, parameters in enumerate(encoding_s.cpu().numpy()):
                     first_rating_dist = [round(x, 2) for x in decoder_ops.extract_first_review_dist(model.first_review_model, encoding_s[split_i]).cpu().tolist()]
-                    # print(f"Split: {split_i}, first rating: {first_rating_dist}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
-                    print(f"Split: {split_i}, first rating: {first_rating_dist}")
+                    print(f"Split: {split_i}, first rating: {first_rating_dist}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
+                    # print(f"Split: {split_i}, first rating: {first_rating_dist}")
     except Exception as e:
         print(e)
         raise e
@@ -210,18 +219,18 @@ def cosine_down(step, total_steps):
 
 
 def main(config):
-    seed = config.SEED + config.START_STEP + len(config.TRAIN_MODE)
+    seed = config.SEED + config.START_STEP + (len(config.TRAIN_MODE) if config.TRAIN_MODE != "WSD" else 0)
     random.seed(seed)
     torch.manual_seed(seed)
     np.random.seed(config.SEED)
-    model: Model = Model().to(config.DEVICE)
+    model = fsrs_encoder_model.Model().to(config.DEVICE)
     optimizer = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
-    encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders)
+    encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder)
     encoder_model_card_parallel_params = encoder_model_params - encoder_model_global_params
-    card_model_params = get_number_of_trainable_parameters(model.card_model)
-    curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
-    print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}, total: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
+    # card_model_params = get_number_of_trainable_parameters(model.card_model)
+    # curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
+    # print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}, total: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
 
     if config.TRAIN_MODE == "WSD":
         start_factor = max(1e-4, config.WARMUP_START_LR / config.PEAK_LR)
@@ -277,7 +286,7 @@ def main(config):
     label_filter_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
 
     if config.USE_WANDB:
-        print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}, total: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
+        # print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}, total: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
         wandb_config = {
             "peak_lr": config.PEAK_LR,
             "adamw_betas": ADAMW_BETAS,
@@ -291,8 +300,8 @@ def main(config):
             "params_encoder_total": encoder_model_params,
             "params_encoder_parallel": encoder_model_card_parallel_params,
             "params_encoder_global": encoder_model_global_params,
-            "params_card_model": card_model_params,
-            "params_forgetting_curve": curve_params,
+            # "params_card_model": card_model_params,
+            # "params_forgetting_curve": curve_params,
         }
         wandb_kwargs = dict(
             project=config.WANDB_PROJECT_NAME,
@@ -384,7 +393,7 @@ def main(config):
                                     print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
                                     print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n}")
                                     print(f"First -- loss: ce: {first_loss_ce_avg:.3f}, bce: {first_loss_bce_avg:.3f}, n: {first_n}")
-                                    # print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
+                                    print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
                                     print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits, dim=-1).cpu().tolist()]}")
                                     print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                 optimizer.step()
