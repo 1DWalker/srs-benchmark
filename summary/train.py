@@ -94,6 +94,7 @@ def get_optimizer(config, model):
 class ValidateResult(NamedTuple):
     loss_weighted_review: float
     loss_weighted_user: float
+    cond_loss: float
     first_bce: float
     first_ce: float
 
@@ -104,7 +105,7 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, log=N
         tot_loss = 0
         tot_loss_n = 0
         losses = []
-
+        cond_losses = []
         first_bce_scores = []
         first_ce_scores = []
         for user in validate_users:
@@ -132,6 +133,7 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, log=N
                 tot_loss += loss * loss_n
                 tot_loss_n += loss_n
                 losses.append(loss.item())
+                cond_losses.append(cond_loss.item())
 
                 first_stats_accum = None
                 for i in range(encoding_s.size(0)):
@@ -157,19 +159,22 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, log=N
                 for split_i, parameters in enumerate(encoding_s.cpu().numpy()):
                     first_rating_dist = [round(x, 2) for x in decoder_ops.extract_first_review_dist(model.first_review_model, encoding_s[split_i]).cpu().tolist()]
                     # print(f"Split: {split_i}, first rating: {first_rating_dist}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
-                    print(f"Split: {split_i}, first rating: {first_rating_dist}, n: {first_stats_accum.loss_n.item()}")
+                    print(f"Split: {split_i}, first rating: {first_rating_dist}")
     except Exception as e:
         print(e)
         raise e
 
     user_avg_loss = np.array(losses).mean()
     print(f"Mean validation loss: by review: {tot_loss / tot_loss_n:.4f}, by user: {user_avg_loss:.4f}")
+    cond_loss = np.mean(cond_losses)
+    print(f"Conditional loss: {cond_loss:.4f}")
     first_bce = np.mean(first_bce_scores)
     first_ce = np.mean(first_ce_scores)
     print(f"First BCE mean: {first_bce:.4f}, CE mean: {first_ce:.4f}")
     return ValidateResult(
         loss_weighted_review=tot_loss / tot_loss_n,
         loss_weighted_user=user_avg_loss,
+        cond_loss=cond_loss,
         first_bce=first_bce,
         first_ce=first_ce,
     )
@@ -414,11 +419,13 @@ def main(config):
                         validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, log)
                         log["validation/validation_loss"] = validate_result.loss_weighted_review
                         log["validation/validation_loss_user"] = validate_result.loss_weighted_user
+                        log["validation/cond_loss"] = validate_result.cond_loss
                         log["validation/first_bce"] = validate_result.first_bce
                         log["validation/first_ce"] = validate_result.first_ce
                         validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config, log)
                         log["validation_overfit/validation_overfit_loss"] = validate_overfit_result.loss_weighted_review
                         log["validation_overfit/validation_overfit_loss_user"] = validate_overfit_result.loss_weighted_user
+                        log["validation_overfit/cond_loss"] = validate_overfit_result.cond_loss
                         log["validation_overfit/first_bce"] = validate_overfit_result.first_bce
                         log["validation_overfit/first_ce"] = validate_overfit_result.first_ce
 

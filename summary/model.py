@@ -6,6 +6,7 @@ BASE_DROPOUT = 0
 FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
 FIRST_REVIEW_DROPOUT = 0
 GLOBAL_ENCODER_DROPOUT = 0
+GLOBAL_ENCODER_CHANNEL_DROPOUT = 0.01
 LAST_GLOBAL_NN_DROPOUT = 0
 
 ENCODER_N_HIDDEN = 16
@@ -76,7 +77,7 @@ class RNNBlock(torch.nn.Module):
         return self.seq(x)
 
 class FFBlock(torch.nn.Module):
-    def __init__(self, n_hidden, use_timeshift, dropout=0):
+    def __init__(self, n_hidden, use_timeshift, dropout=0, dropout_channel=0):
         super().__init__()
         self.seq = ResBlock(nn.Sequential(
             nn.LayerNorm(n_hidden),
@@ -86,9 +87,10 @@ class FFBlock(torch.nn.Module):
             nn.Linear(n_hidden, n_hidden),
             *[nn.Dropout(p=dropout) for _ in range(1 if dropout > 0 else 0)],
         ))
+        self.dropout_channel = nn.Dropout(p=dropout_channel)
 
     def forward(self, x):
-        return self.seq(x)
+        return self.dropout_channel(self.seq(x))
 
 class Block(torch.nn.Module):
     def __init__(self, n_hidden, dropout=0):
@@ -153,7 +155,7 @@ class GlobalEncoder(torch.nn.Module):
 
         self.in_norm = nn.LayerNorm(self.n_proj)
         self.core = nn.Sequential(
-            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=GLOBAL_ENCODER_DROPOUT) for _ in range(num_blocks)],
+            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=GLOBAL_ENCODER_DROPOUT, dropout_channel=GLOBAL_ENCODER_CHANNEL_DROPOUT) for _ in range(num_blocks)],
             nn.LayerNorm(self.n_hidden),
         )
     

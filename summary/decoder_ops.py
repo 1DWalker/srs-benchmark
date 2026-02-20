@@ -97,14 +97,16 @@ def first_logits(batches, first_review_logits_4, min_review_th, max_review_th):
         first_feature_review_th_b = feature_review_th_bl[:, 0]
         first_rating_mask_b = (min_review_th <= first_feature_review_th_b) * (first_feature_review_th_b <= max_review_th)
         first_n += first_rating_mask_b.sum()
-        first_ce_loss = F.cross_entropy(first_review_logits_4.unsqueeze(0).expand(B, 4), first_rating_b.long() - 1)
+        first_ce_loss = F.cross_entropy(first_review_logits_4.unsqueeze(0).expand(B, 4), first_rating_b.long() - 1, reduction='none')
+        assert first_ce_loss.shape == first_rating_mask_b.shape
         first_ce_tot += (first_ce_loss * first_rating_mask_b).sum()
 
         first_fail_logit = first_review_logits_4[0]
         first_pass_logit = torch.logsumexp(first_review_logits_4[1:], dim=-1)
         first_logits_binary = first_pass_logit - first_fail_logit
         first_target_bce = (first_rating_b > 1).float()
-        first_bce_loss = F.binary_cross_entropy_with_logits(first_logits_binary.expand(B), first_target_bce)
+        first_bce_loss = F.binary_cross_entropy_with_logits(first_logits_binary.expand(B), first_target_bce, reduction='none')
+        assert first_bce_loss.shape == first_rating_mask_b.shape
         first_bce_tot += (first_bce_loss * first_rating_mask_b).sum()
     
     return DecodeResult(
@@ -224,6 +226,7 @@ def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_revie
             reduction="none",
         )
         cond_loss_hbl = loss_flat.view(H, B, L)
+        assert cond_loss_hbl.shape == label_cond_mask_hbl.shape
         cond_loss_tot += (cond_loss_hbl * label_cond_mask_hbl).sum()
         cond_n += label_cond_mask_hbl.sum()
 
