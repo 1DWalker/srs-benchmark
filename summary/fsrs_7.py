@@ -6,6 +6,7 @@ from typing import NamedTuple, Tuple
 class FSRS7Buffer(NamedTuple):
     s: torch.Tensor
     # forgetting curve
+    factor: torch.Tensor
     decay: torch.Tensor
     base: torch.Tensor
     base_weight: torch.Tensor
@@ -21,6 +22,7 @@ class FSRS7Buffer(NamedTuple):
     fail_s_exp: torch.Tensor
     fail_r_mult: torch.Tensor
     sinc_coef_lb2: torch.Tensor
+    delta_d_over_9_lb: torch.Tensor
 
     # scalar params
     init_d0: torch.Tensor
@@ -58,12 +60,14 @@ def build_params(w, elapsed_bl, rating_bl):
 
     transition_coef_lb = (1 - w[26] * torch.exp(-w[25] * elapsed_bl)).transpose(0, 1)
 
-    # new_d = 0.01 * iinit_d(p, torch.tensor(4.0, device=difficulty.device))nit_d(p, torch.tensor(4.0, device=difficulty.device)) + 0.99 * new_d
-    # init_d_4_rating = 0.01 * (w[4] - torch.exp(w[5] * (4.0 - 1)) + 1)
     init_d_4_rating = 0.01 * init_d(w[4], w[5], torch.tensor(4.0, device=elapsed_bl.device))
+    delta_d_over_9 = ((-w[6] * (rating_bl - 3)) / 9).transpose(0, 1)
+
+    factor = w[29:31] ** (1 / -w[27:29]) - 1
 
     return FSRS7Buffer(
         s=w[:4],
+        factor=factor,
         decay=-w[27:29],
         base=w[29:31],
         base_weight=w[31:33],
@@ -82,6 +86,7 @@ def build_params(w, elapsed_bl, rating_bl):
         init_d0=w[4],
         init_d1=w[5],
         nextd_mult=w[6],
+        delta_d_over_9_lb=delta_d_over_9,
         init_d_4_rating_weight=init_d_4_rating,
 
         transition_coef_lb=transition_coef_lb,
@@ -89,8 +94,7 @@ def build_params(w, elapsed_bl, rating_bl):
 
 def forgetting_curve(p: FSRS7Buffer, t, s):
     t_over_s = (t / s).unsqueeze(-1)
-    factor = p.base ** (1 / p.decay) - 1
-    R = (1 + factor * t_over_s) ** p.decay
+    R = (1 + p.factor * t_over_s) ** p.decay
     weight = p.base_weight * s.unsqueeze(-1) ** p.s_exp
     return (weight * R).sum(-1) / weight.sum(-1)
 
@@ -122,9 +126,8 @@ def stability_after_review(l: int, p: FSRS7Buffer, stability, difficulty, r, rat
 def init_d(d0, d1, rating):
     return d0 - torch.exp(d1 * (rating - 1)) + 1
 
-def next_d(p: FSRS7Buffer, difficulty, rating):
-    delta_d = -p.nextd_mult * (rating - 3)
-    new_d = difficulty + delta_d * (10 - difficulty) / 9
+def next_d(l: int, p: FSRS7Buffer, difficulty, rating):
+    new_d = difficulty + p.delta_d_over_9_lb[l] * (10 - difficulty)
     new_d = p.init_d_4_rating_weight + 0.99 * new_d
     return new_d
 
@@ -137,11 +140,9 @@ def fsrs7_step(l: int, p: FSRS7Buffer, feature_elapsed, feature_rating, stabilit
         s_long, s_short = stability_after_review(l, p, stability, difficulty, r, feature_rating)
         coef_b = p.transition_coef_lb[l]
         new_s = torch.lerp(s_short, s_long, coef_b)
-        new_d = next_d(p, difficulty, feature_rating).clamp(1, 10)
-        # ts = time.time()
+        new_d = next_d(l, p, difficulty, feature_rating).clamp(1, 10)
 
     new_s = new_s.clamp(1e-4, 36500)
-    # return torch.stack([new_s, new_d], dim=1)
     return new_s, new_d
 
 @torch.jit.script
