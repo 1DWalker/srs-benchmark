@@ -1,5 +1,6 @@
 from collections import defaultdict
 from pathlib import Path
+from time import time
 from typing import Dict, NamedTuple
 import lmdb
 import numpy as np
@@ -98,7 +99,7 @@ def get_optimizer(config, model):
         eps=ADAMW_EPS,
         betas=ADAMW_BETAS,
         fused=True,
-    )
+    ), param_groups[0]['lr']
 
 class ValidateResult(NamedTuple):
     loss_weighted_review: float
@@ -224,7 +225,7 @@ def main(config):
     torch.manual_seed(seed)
     np.random.seed(config.SEED)
     model = fsrs_encoder_model.Model().to(config.DEVICE)
-    optimizer = get_optimizer(config, model)
+    optimizer, peak_lr_first_param = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
     encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder)
     encoder_model_card_parallel_params = encoder_model_params - encoder_model_global_params
@@ -233,14 +234,15 @@ def main(config):
     # print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}, total: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
 
     if config.TRAIN_MODE == "WSD":
-        start_factor = max(1e-4, config.WARMUP_START_LR / config.PEAK_LR)
-        start_lr = start_factor * config.PEAK_LR
+        start_factor = max(1e-8, config.WARMUP_START_LR / config.PEAK_LR)
+        start_lr = config.PEAK_LR  # Scheduler handles it
         warmup_steps = config.WARMUP_STEPS
         decay_steps = int(0.1 * config.TOTAL_STEPS)
         constant_steps = config.TOTAL_STEPS - warmup_steps - decay_steps
         print("Warmup steps:", warmup_steps)
         print("Constant steps:", constant_steps)
         print("Decay steps:", decay_steps)
+        print(start_factor, start_lr)
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=start_factor, end_factor=1.0, total_iters=warmup_steps
         )
@@ -267,9 +269,12 @@ def main(config):
         model.load_state_dict(torch.load(model_path, weights_only=True))
         optimizer_state = torch.load(optim_path, weights_only=True)
         if config.TRAIN_MODE == "WSD":
-            for group in optimizer_state["param_groups"]:
-                group["lr"] = start_lr
+            for init_group, load_group in zip(optimizer.state_dict()["param_groups"], optimizer_state["param_groups"]):
+                load_group["lr"] = init_group["lr"]
         optimizer.load_state_dict(optimizer_state)
+        # for init_group, load_group in zip(optimizer.state_dict()["param_groups"], optimizer_state["param_groups"]):
+        #     print(init_group["lr"])
+        # exit()
         print("Loaded model:", model_path)
     else:
         print("No model loaded.")
@@ -320,6 +325,7 @@ def main(config):
     train_first_loss_dict = {}
     train_first_loss_bce_dict = {}
     step = 0
+    time_start = time()
     with compressed_db_env.begin(write=False) as summary_txn:
         with label_filter_env.begin(write=False) as label_filter_txn:
             for epoch in range(int(1e9)):
@@ -333,7 +339,7 @@ def main(config):
                             scheduler.step()
                         continue
                     validate_iter = (step + 1) % config.VALIDATE_STEPS == 0
-                    current_lr = optimizer.param_groups[0]["lr"]
+                    current_lr = scheduler.get_last_lr()[0] / peak_lr_first_param * config.PEAK_LR
                     log["lr"] = current_lr
 
                     model.train()
@@ -396,6 +402,8 @@ def main(config):
                                     print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
                                     print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits, dim=-1).cpu().tolist()]}")
                                     print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
+                                    print(f"Elapsed: {time() - time_start:.3f}")
+                                    time_start = time()
                                 optimizer.step()
                                 optimizer.zero_grad()
 
