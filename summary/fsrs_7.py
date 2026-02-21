@@ -1,9 +1,9 @@
 import time
 import torch
 from dataclasses import dataclass
+from typing import NamedTuple
 
-@dataclass
-class FSRS7Params:
+class FSRS7Params(NamedTuple):
     s: torch.Tensor
     # forgetting curve
     decay: torch.Tensor
@@ -62,107 +62,113 @@ def build_params(w):
         trans_b=w[25],
     )
 
-def forgetting_curve(p, t, s):
+def forgetting_curve(p: FSRS7Params, t, s):
     t_over_s = (t / s).unsqueeze(-1)
     factor = p.base ** (1 / p.decay) - 1
     R = (1 + factor * t_over_s) ** p.decay
     weight = p.base_weight * s.unsqueeze(-1) ** p.s_exp
     return (weight * R).sum(-1) / weight.sum(-1)
 
-def stability_after_review(p, state, r, rating):
-    old_s = state[:, 0]
-    old_d = state[:, 1]
+def stability_after_review(p: FSRS7Params, stability, difficulty, r, rating):
     success = rating > 1
-    B = state.shape[0]
+    B = stability.shape[0]
 
     hard_penalty = torch.where(
         rating.unsqueeze(1) == 2,
         p.hard.unsqueeze(0),
-        torch.ones(B, 2, device=state.device),
+        torch.ones(B, 2, device=stability.device),
     )
 
     easy_bonus = torch.where(
         rating.unsqueeze(1) == 4,
         p.easy.unsqueeze(0),
-        torch.ones(B, 2, device=state.device),
+        torch.ones(B, 2, device=stability.device),
     )
 
     new_s_fail = (
         p.fail_mult
-        * old_d.unsqueeze(1).pow(-p.fail_d_exp)
-        * ((old_s.unsqueeze(1) + 1).pow(p.fail_s_exp) - 1)
+        * difficulty.unsqueeze(1).pow(-p.fail_d_exp)
+        * ((stability.unsqueeze(1) + 1).pow(p.fail_s_exp) - 1)
         * torch.exp((1 - r).unsqueeze(1) * p.fail_r_mult)
     )
 
-    pls = torch.minimum(old_s.unsqueeze(1), new_s_fail)
+    pls = torch.minimum(stability.unsqueeze(1), new_s_fail)
 
     SInc = (
         1
         + torch.exp(p.sinc_base - 1.5)
-        * (11 - old_d).unsqueeze(1)
-        * old_s.unsqueeze(1).pow(-p.sinc_s_exp)
+        * (11 - difficulty).unsqueeze(1)
+        * stability.unsqueeze(1).pow(-p.sinc_s_exp)
         * (torch.exp((1 - r).unsqueeze(1) * p.sinc_r_mult) - 1)
         * hard_penalty
         * easy_bonus
     )
 
-    new_s_success = torch.maximum(pls, old_s.unsqueeze(1) * SInc)
+    new_s_success = torch.maximum(pls, stability.unsqueeze(1) * SInc)
     new_s_both = torch.where(success.unsqueeze(1), new_s_success, pls)
 
     return new_s_both[:, 0], new_s_both[:, 1]
 
-def init_d(p, rating):
+def init_d(p: FSRS7Params, rating):
     return p.init_d0 - torch.exp(p.init_d1 * (rating - 1)) + 1
 
-def next_d(p, state, rating):
+def next_d(p: FSRS7Params, difficulty, rating):
     delta_d = -p.nextd_mult * (rating - 3)
-    new_d = state[:, 1] + delta_d * (10 - state[:, 1]) / 9
-    new_d = 0.01 * init_d(p, torch.tensor(4.0, device=state.device)) + 0.99 * new_d
+    new_d = difficulty + delta_d * (10 - difficulty) / 9
+    new_d = 0.01 * init_d(p, torch.tensor(4.0, device=difficulty.device)) + 0.99 * new_d
     return new_d
 
-def transition_function(p, delta_t):
+def transition_function(p: FSRS7Params, delta_t):
     return 1 - p.trans_a * torch.exp(-p.trans_b * delta_t)
 
 def linear_damping(delta_d, old_d):
     return delta_d * (10 - old_d) / 9
 
-def fsrs7_step(p, X, state):
-    if torch.equal(state, torch.zeros_like(state)):
-        keys = torch.tensor([1, 2, 3, 4], device=X.device)
-        index = (X[:, 1].long().unsqueeze(1) == keys).nonzero(as_tuple=True)
+import time
 
-        new_s = torch.ones_like(state[:, 0])
-        new_s[index[0]] = p.s[index[1]]
-
-        new_d = init_d(p, X[:, 1]).clamp(1, 10)
+def fsrs7_step(p: FSRS7Params, feature_elapsed, feature_rating, stability, difficulty):
+    if torch.equal(stability, torch.zeros_like(stability)):
+        # ts = time.time()
+        new_s = p.s.gather(dim=0, index=(feature_rating - 1))
+        new_d = init_d(p, feature_rating).clamp(1, 10)
+        # print("init", time.time() - ts)
     else:
-        r = forgetting_curve(p, X[:, 0], state[:, 0])
-        s_long, s_short = stability_after_review(p, state, r, X[:, 1])
-        coef = transition_function(p, X[:, 0])
+        # ts = time.time()
+        r = forgetting_curve(p, feature_elapsed, stability)
+        # print("a", time.time() - ts)
+        # ts = time.time()
+        s_long, s_short = stability_after_review(p, stability, difficulty, r, feature_rating)
+        # print("b", time.time() - ts)
+        # ts = time.time()
+        coef = transition_function(p, feature_elapsed)
+        # print("c", time.time() - ts)
+        # ts = time.time()
 
         new_s = coef * s_long + (1 - coef) * s_short
-        new_d = next_d(p, state, X[:, 1]).clamp(1, 10)
+        new_d = next_d(p, difficulty, feature_rating).clamp(1, 10)
+        # ts = time.time()
 
     new_s = new_s.clamp(1e-4, 36500)
-    return torch.stack([new_s, new_d], dim=1)
+    # return torch.stack([new_s, new_d], dim=1)
+    return new_s, new_d
 
+@torch.jit.script
 def forward(parameters_p, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl):
-    p = build_params(parameters_p)
+    p: FSRS7Params = build_params(parameters_p)
 
     B, L = feature_elapsed_days_real_bl.shape
-    inputs_bl2 = torch.stack((feature_elapsed_days_real_bl, feature_rating_bl), dim=-1)
 
-    state = torch.zeros((B, 2), device=inputs_bl2.device)
+    stability = torch.zeros((B,), device=parameters_p.device)
+    difficulty = torch.zeros((B,), device=parameters_p.device)
     outputs = []
 
-    for X in inputs_bl2.transpose(0, 1):
-        state = fsrs7_step(p, X, state)
-        outputs.append(state)
+    for feature_elapsed, feature_rating in zip(feature_elapsed_days_real_bl.transpose(0, 1), feature_rating_bl.long().transpose(0, 1)):
+        stability, difficulty = fsrs7_step(p, feature_elapsed, feature_rating, stability, difficulty)
+        outputs.append(stability)
 
-    output_tensor = torch.stack(outputs).permute(1, 0, 2)
-    output_s = output_tensor[..., 0]
+    output_tensor = torch.stack(outputs, dim=-1)
 
-    return forgetting_curve(p, label_elapsed_days_real_bl, output_s), output_tensor
+    return forgetting_curve(p, label_elapsed_days_real_bl, output_tensor), output_tensor
 
 
 FSRS7_DEFAULT_35 = torch.tensor(
@@ -281,10 +287,12 @@ FSRS_MAX = torch.tensor([
     1.1     # 34
 ])
 
+@torch.jit.script
 def _bounded(x, lo, hi, default):
     mid = torch.log((default - lo) / (hi - default))
     return lo + (hi - lo) * torch.sigmoid(x + mid)
 
+@torch.jit.script
 def _bounded_exp(x, lo, hi, default):
     lo_log = torch.log(lo)
     hi_log = torch.log(hi)
