@@ -1,7 +1,7 @@
 import time
 import torch
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import NamedTuple, Tuple
 
 class FSRS7Params(NamedTuple):
     s: torch.Tensor
@@ -128,10 +128,8 @@ import time
 
 def fsrs7_step(p: FSRS7Params, feature_elapsed, feature_rating, stability, difficulty):
     if torch.equal(stability, torch.zeros_like(stability)):
-        # ts = time.time()
-        new_s = p.s.gather(dim=0, index=(feature_rating - 1))
+        new_s = p.s.gather(dim=0, index=(feature_rating - 1).clamp_min(0))
         new_d = init_d(p, feature_rating).clamp(1, 10)
-        # print("init", time.time() - ts)
     else:
         # ts = time.time()
         r = forgetting_curve(p, feature_elapsed, stability)
@@ -169,7 +167,6 @@ def forward(parameters_p, feature_elapsed_days_real_bl, feature_rating_bl, label
     output_tensor = torch.stack(outputs, dim=-1)
 
     return forgetting_curve(p, label_elapsed_days_real_bl, output_tensor), output_tensor
-
 
 FSRS7_DEFAULT_35 = torch.tensor(
     [
