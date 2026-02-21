@@ -26,6 +26,7 @@ class FSRS7Buffer(NamedTuple):
     init_d0: torch.Tensor
     init_d1: torch.Tensor
     nextd_mult: torch.Tensor
+    init_d_4_rating_weight: torch.Tensor
 
     transition_coef_lb: torch.Tensor
 
@@ -57,6 +58,10 @@ def build_params(w, elapsed_bl, rating_bl):
 
     transition_coef_lb = (1 - w[26] * torch.exp(-w[25] * elapsed_bl)).transpose(0, 1)
 
+    # new_d = 0.01 * iinit_d(p, torch.tensor(4.0, device=difficulty.device))nit_d(p, torch.tensor(4.0, device=difficulty.device)) + 0.99 * new_d
+    # init_d_4_rating = 0.01 * (w[4] - torch.exp(w[5] * (4.0 - 1)) + 1)
+    init_d_4_rating = 0.01 * init_d(w[4], w[5], torch.tensor(4.0, device=elapsed_bl.device))
+
     return FSRS7Buffer(
         s=w[:4],
         decay=-w[27:29],
@@ -77,6 +82,7 @@ def build_params(w, elapsed_bl, rating_bl):
         init_d0=w[4],
         init_d1=w[5],
         nextd_mult=w[6],
+        init_d_4_rating_weight=init_d_4_rating,
 
         transition_coef_lb=transition_coef_lb,
     )
@@ -111,42 +117,26 @@ def stability_after_review(l: int, p: FSRS7Buffer, stability, difficulty, r, rat
 
     new_s_success = torch.maximum(pls, stability.unsqueeze(1) * SInc)
     new_s_both = torch.where(success.unsqueeze(1), new_s_success, pls)
+    return new_s_both.unbind(dim=-1)
 
-    return new_s_both[:, 0], new_s_both[:, 1]
-
-def init_d(p: FSRS7Buffer, rating):
-    return p.init_d0 - torch.exp(p.init_d1 * (rating - 1)) + 1
+def init_d(d0, d1, rating):
+    return d0 - torch.exp(d1 * (rating - 1)) + 1
 
 def next_d(p: FSRS7Buffer, difficulty, rating):
     delta_d = -p.nextd_mult * (rating - 3)
     new_d = difficulty + delta_d * (10 - difficulty) / 9
-    new_d = 0.01 * init_d(p, torch.tensor(4.0, device=difficulty.device)) + 0.99 * new_d
+    new_d = p.init_d_4_rating_weight + 0.99 * new_d
     return new_d
-
-# def transition_function(p: FSRS7Buffer, delta_t):
-#     return 1 - p.trans_a * torch.exp(-p.trans_b * delta_t)
-
-def linear_damping(delta_d, old_d):
-    return delta_d * (10 - old_d) / 9
 
 def fsrs7_step(l: int, p: FSRS7Buffer, feature_elapsed, feature_rating, stability, difficulty):
     if l == 0:
         new_s = p.s.gather(dim=0, index=(feature_rating - 1).clamp_min(0))
-        new_d = init_d(p, feature_rating).clamp(1, 10)
+        new_d = init_d(p.init_d0, p.init_d1, feature_rating).clamp(1, 10)
     else:
-        # ts = time.time()
         r = forgetting_curve(p, feature_elapsed, stability)
-        # print("a", time.time() - ts)
-        # ts = time.time()
         s_long, s_short = stability_after_review(l, p, stability, difficulty, r, feature_rating)
-        # print("b", time.time() - ts)
-        # ts = time.time()
-        # coef = transition_function(p, feature_elapsed)
-        # print("c", time.time() - ts)
-        # ts = time.time()
-
-        coef = p.transition_coef_lb[l]
-        new_s = torch.lerp(s_short, s_long, coef)
+        coef_b = p.transition_coef_lb[l]
+        new_s = torch.lerp(s_short, s_long, coef_b)
         new_d = next_d(p, difficulty, feature_rating).clamp(1, 10)
         # ts = time.time()
 
@@ -154,7 +144,7 @@ def fsrs7_step(l: int, p: FSRS7Buffer, feature_elapsed, feature_rating, stabilit
     # return torch.stack([new_s, new_d], dim=1)
     return new_s, new_d
 
-# @torch.jit.script
+@torch.jit.script
 def forward(parameters_p, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl):
     p: FSRS7Buffer = build_params(parameters_p, feature_elapsed_days_real_bl, feature_rating_bl)
 
