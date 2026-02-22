@@ -54,7 +54,7 @@ def encode_single(batches, encoder_model: EncoderModel, min_review_th, max_revie
         idx = torch.arange(L, device=mask_bl.device).view(1, L)
         card_i_ratio_bl = idx / card_num_reviews_bl.clamp_min(1)
 
-        x_sbl = encoder_model.first(
+        x_sbl = encoder_model(
             feature_elapsed_days_real_bl=feature_elapsed_days_real_bl,
             feature_rating_bl=feature_rating_bl, 
             card_review_th_ratio_bl=card_review_th_ratio_bl, 

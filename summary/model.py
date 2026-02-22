@@ -327,3 +327,6 @@ class Model(torch.nn.Module):
         self.encoder_model = EncoderModel(n_encoding=self.n_encoding)
         self.card_model = CardModel(n_encoding=self.n_encoding)
         self.first_review_model = FirstReviewModel(n_encoding=self.n_encoding)
+
+    def get_excluded_params():
+        return ["forgetting_curve_last_linear", "first_review_last_linear"] 

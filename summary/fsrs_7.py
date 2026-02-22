@@ -96,7 +96,7 @@ def forgetting_curve(p: FSRS7Buffer, t, s):
     t_over_s = (t / s).unsqueeze(-1)
     R = (1 + p.factor * t_over_s) ** p.decay
     weight = p.base_weight * s.unsqueeze(-1) ** p.s_exp
-    return (weight * R).sum(-1) / weight.sum(-1)
+    return 1e-5 + (1 - 2e-5) * ((weight * R).sum(-1) / weight.sum(-1))
 
 def stability_after_review(l: int, p: FSRS7Buffer, stability, difficulty, r, rating):
     success = rating > 1
@@ -126,7 +126,7 @@ def stability_after_review(l: int, p: FSRS7Buffer, stability, difficulty, r, rat
 def init_d(d0, d1, rating):
     return d0 - torch.exp(d1 * (rating - 1)) + 1
 
-def next_d(l: int, p: FSRS7Buffer, difficulty, rating):
+def next_d(l: int, p: FSRS7Buffer, difficulty):
     new_d = difficulty + p.delta_d_over_9_lb[l] * (10 - difficulty)
     new_d = p.init_d_4_rating_weight + 0.99 * new_d
     return new_d
@@ -140,7 +140,7 @@ def fsrs7_step(l: int, p: FSRS7Buffer, feature_elapsed, feature_rating, stabilit
         s_long, s_short = stability_after_review(l, p, stability, difficulty, r, feature_rating)
         coef_b = p.transition_coef_lb[l]
         new_s = torch.lerp(s_short, s_long, coef_b)
-        new_d = next_d(l, p, difficulty, feature_rating).clamp(1, 10)
+        new_d = next_d(l, p, difficulty).clamp(1, 10)
 
     new_s = new_s.clamp(1e-4, 36500)
     return new_s, new_d
