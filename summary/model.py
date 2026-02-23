@@ -138,52 +138,6 @@ class BlockWithEncoder(torch.nn.Module):
         x = self.ff(x, encoding_h=encoding_h)
         return x
 
-class GlobalEncoder(torch.nn.Module):
-    def __init__(self, n_in, n_out, n_hidden_in, num_blocks=3, intermediate=False):
-        super().__init__()
-        self.n_proj = GLOBAL_FACTOR * n_in
-        self.n_hidden = self.n_proj + n_hidden_in
-        self.norm = nn.LayerNorm(n_in)
-        self.value_linear = nn.Linear(n_in, self.n_proj, bias=False)
-        self.weight_linear = nn.Linear(n_in, self.n_proj)
-        self.intermediate = intermediate
-        if self.intermediate:
-            self.accept_linear = nn.Linear(n_in, n_out)
-            torch.nn.init.orthogonal_(self.accept_linear.weight)
-            self.intermediate_out = nn.Linear(self.n_hidden, n_out)
-            torch.nn.init.zeros_(self.intermediate_out.weight)
-
-        self.in_norm = nn.LayerNorm(self.n_proj)
-        self.core = nn.Sequential(
-            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=GLOBAL_ENCODER_DROPOUT, dropout_channel=GLOBAL_ENCODER_CHANNEL_DROPOUT) for _ in range(num_blocks)],
-            nn.LayerNorm(self.n_hidden),
-        )
-    
-    def forward(self, x_list, mask_list, h_in):
-        accum_weighted_value_h = 0
-        accum_weight_h = 0
-        accept_weights_list = []
-        for x_bl, mask_bl in zip(x_list, mask_list):
-            assert len(x_bl.shape) == 3
-            x_bl = self.norm(x_bl)
-            value_blh = self.value_linear(x_bl)
-            weight_blh = torch.nn.functional.softplus(self.weight_linear(x_bl))
-            if self.intermediate:
-                accept_weights_list.append(self.accept_linear(x_bl))
-
-            eff_weight_blh = mask_bl.unsqueeze(-1).float() * weight_blh
-            accum_weighted_value_h += (eff_weight_blh * value_blh).sum(dim=(0, 1))
-            accum_weight_h += eff_weight_blh.sum(dim=(0, 1))
-
-        sum_encoding_h = accum_weighted_value_h / (accum_weight_h + 1e-6)
-        x_h = self.in_norm(sum_encoding_h)
-        x_h = torch.cat((x_h, h_in), dim=-1)
-        x_h = self.core(x_h)
-        if self.intermediate:
-            return x_h, self.intermediate_out(x_h), accept_weights_list
-        else:
-            return x_h
-
 
 class EncoderModel(torch.nn.Module):
     def __init__(self, n_encoding):

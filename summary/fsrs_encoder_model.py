@@ -164,16 +164,26 @@ class GlobalEncoder(torch.nn.Module):
             self.intermediate_out = nn.Linear(self.n_hidden, n_out)
             torch.nn.init.zeros_(self.intermediate_out.weight)
 
-        self.in_norm = nn.LayerNorm(self.n_proj)
+        self.in_norm = nn.GroupNorm(
+                num_groups = 3,
+                num_channels = 3 * self.n_proj,
+                affine=True
+            )
+        self.in_proj = nn.Sequential(
+            nn.Linear(3 * self.n_proj, self.n_proj, bias=False),
+            nn.LayerNorm(self.n_proj),
+        )
         self.core = nn.Sequential(
             *[FFBlock(self.n_hidden, use_timeshift=False, dropout=GLOBAL_ENCODER_DROPOUT, dropout_channel=GLOBAL_ENCODER_CHANNEL_DROPOUT) for _ in range(num_blocks)],
             nn.LayerNorm(self.n_hidden),
         )
     
     def forward(self, x_list, mask_list, h_in):
-        accum_weighted_value_h = 0
-        accum_weight_h = 0
         accept_weights_list = []
+        sum_w = 0
+        sum_wx = 0
+        sum_wx2 = 0
+        sum_wx3 = 0
         for x_bl, mask_bl in zip(x_list, mask_list):
             assert len(x_bl.shape) == 3
             x_bl = self.norm(x_bl)
@@ -182,19 +192,29 @@ class GlobalEncoder(torch.nn.Module):
             if self.intermediate:
                 accept_weights_list.append(self.accept_linear(x_bl))
 
-            eff_weight_blh = mask_bl.unsqueeze(-1).float() * weight_blh
-            accum_weighted_value_h += (eff_weight_blh * value_blh).sum(dim=(0, 1))
-            accum_weight_h += eff_weight_blh.sum(dim=(0, 1))
+            eff_w = mask_bl.unsqueeze(-1).float() * weight_blh
 
-        sum_encoding_h = accum_weighted_value_h / (accum_weight_h + 1e-6)
-        x_h = self.in_norm(sum_encoding_h)
-        x_h = torch.cat((x_h, h_in), dim=-1)
-        x_h = self.core(x_h)
+            sum_w   += eff_w.sum((0,1))
+            sum_wx  += (eff_w * value_blh).sum((0,1))
+            sum_wx2 += (eff_w * value_blh**2).sum((0,1))
+            sum_wx3 += (eff_w * value_blh**3).sum((0,1))
+
+        den = sum_w + 1e-6
+        mean_h = sum_wx / den
+        var = sum_wx2 / den - mean_h**2
+        m3 = sum_wx3 / den - 3*mean_h*var - mean_h**3
+        std_h = torch.sqrt(var + 1e-7)
+        skew_h = m3 / (std_h**3 + 1e-7)
+
+        x_3h = torch.cat((mean_h, std_h, skew_h), dim=-1)
+        x_3h = self.in_norm(x_3h.unsqueeze(0)).squeeze(0)
+        x_3h = self.in_proj(x_3h)
+        x_p = torch.cat((x_3h, h_in), dim=-1)
+        x_p = self.core(x_p)
         if self.intermediate:
-            return x_h, self.intermediate_out(x_h), accept_weights_list
+            return x_p, self.intermediate_out(x_p), accept_weights_list
         else:
-            return x_h
-
+            return x_p
 
 class EncoderModel(torch.nn.Module):
     def __init__(self, n_encoding):
