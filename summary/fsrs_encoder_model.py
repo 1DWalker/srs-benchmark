@@ -18,6 +18,15 @@ N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * (ENCODER_FULL_BLOCKS + 1)
 INTERMEDIATE_GLOBAL_LAYERS = 5
 LAST_GLOBAL_LAYERS = 20
 
+
+# ENCODER_N_HIDDEN = 2
+# GLOBAL_FACTOR = 1
+# ENCODER_FULL_BLOCKS = 1
+# N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * (ENCODER_FULL_BLOCKS + 1)
+
+# INTERMEDIATE_GLOBAL_LAYERS = 1
+# LAST_GLOBAL_LAYERS = 1
+
 def transform_elapsed_days_real(x):
     return ((x + 1e-5).log() + 1.3) / 5
 
@@ -219,7 +228,7 @@ class EncoderModel(torch.nn.Module):
         torch.nn.init.zeros_(self.fsrs_linear.weight)
         torch.nn.init.zeros_(self.fsrs_linear.bias)
 
-    def first(
+    def forward(
             self, 
             feature_elapsed_days_real_bl, 
             feature_rating_bl, 
@@ -259,12 +268,12 @@ class EncoderModel(torch.nn.Module):
         x = fsrs_7.nn_vec_to_fsrs7_params(x)
         return x
 
-# class Config:
-#     def __init__(self):
-#         self.s_min = 0.0001
-#         self.init_s_max = 100
-#         self.use_secs_intervals = True
-#         self.device = torch.device("cuda")
+class Config:
+    def __init__(self):
+        self.s_min = 0.0001
+        self.init_s_max = 100
+        self.use_secs_intervals = True
+        self.device = torch.device("cuda")
 
 
 class CardModel(torch.nn.Module):
@@ -273,21 +282,31 @@ class CardModel(torch.nn.Module):
 
     def forward(self, encoding_h, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl):
         B, L = feature_elapsed_days_real_bl.shape
+        # from time import time
+        # ts = time()
         x_bl, state_bl2 = fsrs_7.forward(
             parameters_p=encoding_h, 
             feature_elapsed_days_real_bl=feature_elapsed_days_real_bl,
             feature_rating_bl=feature_rating_bl,   
             label_elapsed_days_real_bl=label_elapsed_days_real_bl,
         )
-        # fsrs = fsrs_7_truth.FSRS7(config=Config(), w=encoding_h.tolist()).to(torch.device("cuda"))
-        # sequences_lb2 = torch.stack((feature_elapsed_days_real_bl, feature_rating_bl), dim=-1).transpose(0, 1)
-        # out2 = fsrs.batch_process(sequences_lb2, 0, 0, real_batch_size=B)
+        # print("Forward", time() - ts, x_bl.shape)
+        # x_bl, state_bl2 = fsrs_7.forward(
+        #     parameters_p=encoding_h.double(), 
+        #     feature_elapsed_days_real_bl=feature_elapsed_days_real_bl.double(),
+        #     feature_rating_bl=feature_rating_bl,   
+        #     label_elapsed_days_real_bl=label_elapsed_days_real_bl.double(),
+        # )
+        # fsrs = fsrs_7_truth.FSRS7(config=Config(), w=encoding_h.double().tolist()).to(torch.device("cuda"))
+        # sequences_lb2 = torch.stack((feature_elapsed_days_real_bl.double(), feature_rating_bl), dim=-1).transpose(0, 1)
+        # out2 = fsrs.batch_process(sequences_lb2, 0, 0, real_batch_size=B).unbind(dim=-1)[0]
         # out1 = state_bl2.transpose(0, 1)
         # error = (out1 - out2).max()
-        # print("done, error", error)
+        # print("done, error", error, error.type())
+        # print()
 
         eps = 1e-6
-        x_bl4 = torch.full((*x_bl.shape, 4), float("-inf"),
+        x_bl4 = torch.full((B, L, 4), float("-inf"),
                         device=x_bl.device, dtype=x_bl.dtype)
         x_bl4[..., 0] = torch.log((1 - x_bl).clamp_min(eps))
         x_bl4[..., 2] = torch.log(x_bl.clamp_min(eps))
