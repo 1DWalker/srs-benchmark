@@ -192,11 +192,11 @@ FSRS7_DEFAULT_35 = torch.tensor(
         2.6413,
         0.5594,
         1.15,  # Stability (short-term)
-        2.5,
-        1.0,  # Long-short term transition function
+        3.5,
+        0.5,  # Long-short term transition function
         0.0723,
         0.1634,
-        0.5,
+        0.6,
         0.9555,
         0.2245,
         0.6232,
@@ -280,6 +280,9 @@ FSRS_MAX = torch.tensor([
     0.9,    # 33
     1.1     # 34
 ])
+
+assert (FSRS_MIN < FSRS7_DEFAULT_35).all()
+assert (FSRS7_DEFAULT_35 < FSRS_MAX).all(), FSRS7_DEFAULT_35 < FSRS_MAX
 
 @torch.jit.script
 def _bounded(x, lo, hi, default):
