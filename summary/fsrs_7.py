@@ -298,36 +298,76 @@ def _bounded_exp(x, lo, hi, default):
     out_log = lo_log + (hi_log - lo_log) * torch.sigmoid(x + mid)
     return torch.exp(out_log)
 
-def nn_vec_to_fsrs7_params(nn_vec_35):
-    lo = FSRS_MIN.to(nn_vec_35.device)
-    hi = FSRS_MAX.to(nn_vec_35.device)
-    default = FSRS7_DEFAULT_35.to(nn_vec_35.device)
+def nn_vec_to_fsrs7_params(x):
+    lo = FSRS_MIN.to(x.device)
+    hi = FSRS_MAX.to(x.device)
+    default = FSRS7_DEFAULT_35.to(x.device)
 
-    exp_mask = torch.zeros(35, dtype=torch.bool, device=nn_vec_35.device)
+    exp_mask = torch.zeros(35, dtype=torch.bool, device=x.device)
     exp_mask[:4] = True
 
-    out = torch.empty_like(nn_vec_35)
+    out = torch.empty_like(x)
 
     out[exp_mask] = _bounded_exp(
-        nn_vec_35[exp_mask],
+        x[exp_mask],
         lo[exp_mask],
         hi[exp_mask],
         default[exp_mask],
     )
 
     out[~exp_mask] = _bounded(
-        nn_vec_35[~exp_mask],
+        x[~exp_mask],
         lo[~exp_mask],
         hi[~exp_mask],
         default[~exp_mask],
     )
 
+    sorted_S1_to_S3, _ = torch.sort(x[1:4])
+    low_S = out[0].expand(3)
+    hi_S = hi[1:4]
+    default_S = low_S * 0.95 + hi_S * 0.05
+    out = out.clone()
+    out[1:4] = _bounded_exp(
+        sorted_S1_to_S3,
+        low_S,
+        hi_S,
+        default_S,
+    )
+
+    out[28] = _bounded(
+        x[28],
+        out[27],
+        hi[28],
+        (out[27] + hi[28]) / 2,
+    )
+
+    out[30] = _bounded(
+        x[30],
+        out[29],
+        hi[30],
+        (out[29] + hi[30]) / 2,
+    )
+
     return out
 
 if __name__ == '__main__':
-    a = nn_vec_to_fsrs7_params(torch.full((35,), -10.0))
+    a = nn_vec_to_fsrs7_params(torch.full((35,), -100.0))
     b = nn_vec_to_fsrs7_params(torch.full((35,), 0.0))
-    c = nn_vec_to_fsrs7_params(torch.full((35,), 10.0))
+    c = nn_vec_to_fsrs7_params(torch.full((35,), 100.0))
     print(a)
     print(b)
     print(c)
+
+    sampler = torch.distributions.studentT.StudentT(torch.full((35,), 1.0))
+    for i in range(1000):
+        x = sampler.sample()
+        w = nn_vec_to_fsrs7_params(x)
+
+        # check dynamic constraints
+        for i in range(1, 4):
+            assert w[i - 1] <= w[i], w
+
+        assert w[27] <= w[28]
+        assert w[29] <= w[30]
+
+    print("Check complete.")

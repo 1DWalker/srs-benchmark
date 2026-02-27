@@ -8,30 +8,98 @@ import torch
 from utils import load_tensor
 import torch.nn.functional as F
 from typing import NamedTuple
+from torch.nn.utils.rnn import pad_sequence
 
+PAD_VALS = (
+    int(2e9),  # feature_review_th
+    0,         # feature_elapsed_days_int
+    0,         # feature_elapsed_days_real
+    0,         # feature_rating
+    0,         # label_elapsed_days_int
+    0,         # label_elapsed_days_real
+    0,         # label_rating
+    int(2e9),  # label_review_th
+    0,         # label_is_same_day
+    0,         # has_label
+)
 
-def load_batch(txn, user, i, device):
-    feature_review_th = load_tensor(txn, f"{user}_feature_review_th_{i}", device)
-    feature_elapsed_days_int = load_tensor(txn, f"{user}_feature_elapsed_days_int_{i}", device)
-    feature_elapsed_days_real = load_tensor(txn, f"{user}_feature_elapsed_days_real_{i}", device)
-    feature_rating = load_tensor(txn, f"{user}_feature_rating_{i}", device)
-    label_elapsed_days_int = load_tensor(txn, f"{user}_label_elapsed_days_int_{i}", device)
-    label_elapsed_days_real = load_tensor(txn, f"{user}_label_elapsed_days_real_{i}", device)
-    label_rating = load_tensor(txn, f"{user}_label_rating_{i}", device)
-    label_review_th = load_tensor(txn, f"{user}_label_review_th_{i}", device)
-    label_is_same_day = load_tensor(txn, f"{user}_label_is_same_day_{i}", device)
-    has_label = load_tensor(txn, f"{user}_has_label_{i}", device)
-    return feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_rating, label_review_th, label_is_same_day, has_label
+def load_batch(txn, user, i, device, max_L=10**9):
+    batch = (
+        load_tensor(txn, f"{user}_feature_review_th_{i}", device),
+        load_tensor(txn, f"{user}_feature_elapsed_days_int_{i}", device),
+        load_tensor(txn, f"{user}_feature_elapsed_days_real_{i}", device),
+        load_tensor(txn, f"{user}_feature_rating_{i}", device),
+        load_tensor(txn, f"{user}_label_elapsed_days_int_{i}", device),
+        load_tensor(txn, f"{user}_label_elapsed_days_real_{i}", device),
+        load_tensor(txn, f"{user}_label_rating_{i}", device),
+        load_tensor(txn, f"{user}_label_review_th_{i}", device),
+        load_tensor(txn, f"{user}_label_is_same_day_{i}", device),
+        load_tensor(txn, f"{user}_has_label_{i}", device),
+    )
 
-def get_data(txn, user_id, device):
+    return tuple(t[:, :max_L] for t in batch)
+
+def greedy_pad_concat(grouped, pad_vals, GREEDY_WASTE):
+    merged = [[] for _ in grouped]
+
+    for slot_idx, (tensors, pad_val) in enumerate(zip(grouped, pad_vals)):
+        pack = []
+        sum_B = 0
+        sum_BL = 0
+        max_L = 0
+
+        for t in tensors:
+            B, L = t.shape
+
+            new_max_L = max(max_L, L)
+            new_sum_B = sum_B + B
+            new_sum_BL = sum_BL + B * L
+
+            waste = new_sum_B * new_max_L - new_sum_BL
+
+            if pack and waste > GREEDY_WASTE:
+                # finalize current pack
+                padded = [
+                    F.pad(x, (0, max_L - x.shape[1]), value=pad_val)
+                    for x in pack
+                ]
+                merged[slot_idx].append(torch.cat(padded, dim=0))
+
+                # start new pack
+                pack = [t]
+                sum_B = B
+                sum_BL = B * L
+                max_L = L
+            else:
+                pack.append(t)
+                sum_B = new_sum_B
+                sum_BL = new_sum_BL
+                max_L = new_max_L
+
+        # flush last pack
+        if pack:
+            padded = [
+                F.pad(x, (0, max_L - x.shape[1]), value=pad_val)
+                for x in pack
+            ]
+            merged[slot_idx].append(torch.cat(padded, dim=0))
+
+    return [tuple(i) for i in zip(*merged)]
+
+def get_data(txn, user_id, device, max_L=10**9, merge=False):
     num_batches = load_tensor(txn, f"{user_id}_batches", torch.device("cpu")).item()
-    indices = list(range(num_batches))
-    return [load_batch(txn, user_id, i, device) for i in indices]
+    batches = [load_batch(txn, user_id, i, device, max_L) for i in range(num_batches)]
+    if not merge:
+        return batches
+    
+    grouped = list(zip(*batches))
+    merged_groups = greedy_pad_concat(grouped, PAD_VALS, GREEDY_WASTE=int(2e6))
+    return merged_groups
 
 def extract_num_reviews(batches):
     return sum(map(lambda batch: (batch[0] < int(1e8)).sum().item(), batches))
 
-def encode_single(batches, encoder_model: EncoderModel, min_review_th, max_review_th):
+def encode_single(batches, encoder_model: EncoderModel, min_review_th, max_review_th, log=None):
     assert min_review_th > 0
     assert max_review_th < 1e7
     device = batches[0][0].device
@@ -65,10 +133,10 @@ def encode_single(batches, encoder_model: EncoderModel, min_review_th, max_revie
         x_list.append(x_sbl)
         mask_list.append(mask_bl)
 
-    return encoder_model.run_core(x_list, mask_list)
+    return encoder_model.run_core(x_list, mask_list, log=log)
 
-def encode(batches, encoder_model, min_review_th_s, max_review_th_s):
-    return torch.stack([encode_single(batches, encoder_model, min_review_th_s[i].item(), max_review_th_s[i].item()) for i in range(min_review_th_s.size(0))])
+def encode(batches, encoder_model, min_review_th_s, max_review_th_s, log=None):
+    return torch.stack([encode_single(batches, encoder_model, min_review_th_s[i].item(), max_review_th_s[i].item(), log=log) for i in range(min_review_th_s.size(0))])
 
 class DecodeResult(NamedTuple):
     ce_loss_sum: torch.Tensor
@@ -139,6 +207,7 @@ def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
             feature_rating_bl=feature_rating_bl, 
             label_elapsed_days_real_bl=label_elapsed_days_real_bl,
         )
+        assert not logits_bl4.isnan().any()
         label_mask_bl = has_label_bl * (min_review_th <= label_review_th_bl) * (label_review_th_bl <= max_review_th)
 
         # CE loss

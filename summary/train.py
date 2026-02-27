@@ -1,4 +1,5 @@
 from collections import defaultdict
+import hashlib
 from pathlib import Path
 from time import time
 from typing import Dict, NamedTuple
@@ -15,7 +16,7 @@ from summary import decoder_ops, fsrs_encoder_model
 from summary.model import Model
 from utils import compact_lmdb, load_tensor, parse_toml
 
-WEIGHT_DECAY = 1e-3
+WEIGHT_DECAY = 1e-2
 ADAMW_BETAS = (0.90, 0.999)
 ADAMW_EPS = 1e-8
 CLIP = 2
@@ -61,6 +62,7 @@ def get_optimizer(config, model):
 
     for width, named_parameters in params_by_width.items():
         decay_params = []
+        combine_params = []
         other_params = []
         print("WIDTH:", width)
         for name, param in named_parameters:
@@ -71,6 +73,9 @@ def get_optimizer(config, model):
                 other_params.append(param)
                 found_exclude.add(name)
                 print("Skip decay:", name, param.shape)
+            elif "combine" in name:
+                print("Combine:", name)
+                combine_params.append(param)
             else:
                 print("Decay:", name, param.shape)
                 decay_params.append(param)
@@ -86,14 +91,20 @@ def get_optimizer(config, model):
         )
         param_groups.append(
             {
-                "params": other_params,
+                "params": combine_params,
                 "weight_decay": WEIGHT_DECAY,
+                "lr": lr / 2,
+            }
+        )
+        param_groups.append(
+            {
+                "params": other_params,
+                "weight_decay": WEIGHT_DECAY / 10,
                 "lr": lr,
             }
         )
 
     assert len(found_exclude) == len(exclude_names)
-    # exit()
     return torch.optim.AdamW(
         param_groups,
         eps=ADAMW_EPS,
@@ -215,15 +226,22 @@ def get_superiority(lagging_dict, now_dict):
             w += 1
     return w / max(1, n)
 
-def cosine_down(step, total_steps):
-    return 1 + np.cos(0.5 * np.pi * (1 + step / total_steps))
+def cosine_down(step, total_steps, base=1e-2):
+    return base + (1 - base) * (1 + np.cos(0.5 * np.pi * (1 + step / total_steps)))
 
+def make_iter_seed(base_seed: int, step: int) -> int:
+    combined = f"{base_seed}_{step}".encode()
+    digest = hashlib.sha256(combined).digest()
+    return int.from_bytes(digest[:4], "big")
 
-def main(config):
-    seed = config.SEED + config.START_STEP + (len(config.TRAIN_MODE) if config.TRAIN_MODE != "WSD" else 0)
+def set_seed(seed):
     random.seed(seed)
     torch.manual_seed(seed)
-    np.random.seed(config.SEED)
+    np.random.seed(seed)
+
+def main(config):
+    seed = config.SEED + (len(config.TRAIN_MODE) if config.TRAIN_MODE != "WSD" else 0)
+    set_seed(seed)
     model = fsrs_encoder_model.Model().to(config.DEVICE)
     optimizer, peak_lr_first_param = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
@@ -290,8 +308,8 @@ def main(config):
     compressed_db_env = lmdb.open(config.SUMMARY_DB_PATH, readonly=True, lock=False)
     label_filter_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
 
+    print(f"encoder params total: {encoder_model_params}, parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}")
     if config.USE_WANDB:
-        # print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}, total: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
         wandb_config = {
             "peak_lr": config.PEAK_LR,
             "adamw_betas": ADAMW_BETAS,
@@ -329,22 +347,37 @@ def main(config):
     with compressed_db_env.begin(write=False) as summary_txn:
         with label_filter_env.begin(write=False) as label_filter_txn:
             for epoch in range(int(1e9)):
-                random.shuffle(train_users)
-                for user_i, user in enumerate(train_users):
+                for user_i in range(len(train_users)):
                     log = {}
                     log["epoch"] = epoch
                     step += 1
+
+                    iter_seed = make_iter_seed(base_seed=config.SEED, step=step)
+                    set_seed(iter_seed)
+
+                    if user_i == 0:
+                        random.shuffle(train_users)
+
                     if step < config.START_STEP:
                         if config.START_SCHEDULER_AT_START_STEP:
                             scheduler.step()
                         continue
+
+                    user = train_users[user_i]
+
                     validate_iter = (step + 1) % config.VALIDATE_STEPS == 0
                     current_lr = scheduler.get_last_lr()[0] / peak_lr_first_param * config.PEAK_LR
                     log["lr"] = current_lr
 
                     model.train()
-                    batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
-                    T = decoder_ops.extract_num_reviews(batches)
+                    encode_batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
+                    if config.USE_MAX_SEQ_LEN:
+                        if random.random() < 0.9:
+                            decode_max_L =  64
+                        else:
+                            decode_max_L = int(1e9)
+                    decode_batches = decoder_ops.get_data(summary_txn, user, config.DEVICE, max_L=decode_max_L, merge=config.MERGE_DECODE_BATCHES)
+                    T = decoder_ops.extract_num_reviews(encode_batches)
                     if T > config.SKIP_LENGTH:
                         print()
                         print(f"Skipping: {user}, size: {T}")
@@ -353,11 +386,11 @@ def main(config):
                             train_l, test_r = get_split(T)
                             test_l = generate_subsplits(train_l, test_r, T)
                             train_r = test_l - 1
-                            encoding = decoder_ops.encode_single(batches, model.encoder_model, train_l + 1, train_r + 1)
+                            encoding = decoder_ops.encode_single(encode_batches, model.encoder_model, train_l + 1, train_r + 1, log=log)
 
-                            review_stats: decoder_ops.DecodeResult = decoder_ops.decode(batches, model.card_model, encoding, min_review_th=test_l + 1, max_review_th=test_r + 1)
+                            review_stats: decoder_ops.DecodeResult = decoder_ops.decode(decode_batches, model.card_model, encoding, min_review_th=test_l + 1, max_review_th=test_r + 1)
                             first_review_logits = decoder_ops.extract_first_review_dist_logits(model.first_review_model, encoding)
-                            first_stats: decoder_ops.DecodeResult = decoder_ops.first_logits(batches, first_review_logits, min_review_th=test_l + 1, max_review_th=test_r + 1)
+                            first_stats: decoder_ops.DecodeResult = decoder_ops.first_logits(decode_batches, first_review_logits, min_review_th=test_l + 1, max_review_th=test_r + 1)
                             review_loss_ce_avg = review_stats.ce_loss_sum / (1e-7 + review_stats.loss_n)
                             review_loss_bce_avg = review_stats.bce_loss_sum / (1e-7 + review_stats.loss_n)
                             review_n = review_stats.loss_n
@@ -390,6 +423,11 @@ def main(config):
                                         log["superiority/bce_epoch_superiority"] = get_superiority(lagging_train_review_loss_bce_dict, train_review_loss_bce_dict)
                                         log["superiority/epoch_superiority"] = get_superiority(lagging_train_review_loss_dict, train_review_loss_dict)
                                 log["encoding/encoding_std"] = encoding.std()
+                                if encoding.size(0) <= 50:
+                                    for i, x in enumerate(encoding.tolist()):
+                                        i_str = "0" * (2 - len(str(i))) + str(i)
+                                        log[f"encoding_value/{i_str}"] = x
+                                
                                 tot_loss.backward()
                                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                                 log["grad_norm"] = grad_norm
