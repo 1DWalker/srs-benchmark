@@ -11,12 +11,12 @@ GLOBAL_ENCODER_CHANNEL_DROPOUT = 0.01
 LAST_GLOBAL_NN_DROPOUT = 0
 
 ENCODER_N_HIDDEN = 24
-GLOBAL_FACTOR = 4
-ENCODER_FULL_BLOCKS = 3
+GLOBAL_FACTOR = 2
+ENCODER_FULL_BLOCKS = 4
 N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * (ENCODER_FULL_BLOCKS + 1)
 
-INTERMEDIATE_GLOBAL_LAYERS = 5
-LAST_GLOBAL_LAYERS = 20
+INTERMEDIATE_GLOBAL_LAYERS = 8
+LAST_GLOBAL_LAYERS = INTERMEDIATE_GLOBAL_LAYERS
 
 
 # ENCODER_N_HIDDEN = 2
@@ -90,8 +90,8 @@ class RNNBlock(torch.nn.Module):
 class FFBlock(torch.nn.Module):
     def __init__(self, n_hidden, use_timeshift, dropout=0, dropout_channel=0):
         super().__init__()
-        # self.n_act = int(n_hidden * 2 / 3)
-        self.n_act = n_hidden
+        self.n_act = int(n_hidden * 2 / 3)
+        # self.n_act = n_hidden
         self.start = nn.Sequential(
             nn.LayerNorm(n_hidden),
             *[TimeShiftLerp(n_hidden=n_hidden) for _ in range(1 if use_timeshift else 0)],
@@ -142,8 +142,8 @@ class Block(torch.nn.Module):
 class FFBlockWithEncoder(torch.nn.Module):
     def __init__(self, n_hidden, n_encoding, use_timeshift, dropout=0):
         super().__init__()
-        # self.n_act = int(n_hidden * 2 / 3)
-        self.n_act = n_hidden
+        self.n_act = int(n_hidden * 2 / 3)
+        # self.n_act = n_hidden
         self.start = nn.Sequential(
             nn.LayerNorm(n_hidden),
             *[TimeShiftLerp(n_hidden=n_hidden) for _ in range(1 if use_timeshift else 0)],
@@ -165,35 +165,49 @@ class FFBlockWithEncoder(torch.nn.Module):
             *[nn.Dropout(p=dropout) for _ in range(1 if dropout > 0 else 0)],
         )
 
-    # def forward(self, x_in, encoding_h):
+    # def _core(self, x_in, encoding_h):
     #     x = self.start(x_in)
-    #     gate = self.gate_linear_combine(x) + self.encoding_gate_linear_combine(encoding_h)
-    #     x = self.A_combine(x) + self.encoding_linear_combine(encoding_h)
+    #     gate = (
+    #         self.gate_linear_combine(x)
+    #         + self.encoding_gate_linear_combine(encoding_h)
+    #     )
+    #     x = (
+    #         self.A_combine(x)
+    #         + self.encoding_linear_combine(encoding_h)
+    #     )
     #     x = self.act(x)
     #     x = x * gate
     #     assert not x.isnan().any()
     #     x = self.B(x)
+
+    #     return x
+
+    # def forward(self, x_in, encoding_h):
+    #     x = torch.utils.checkpoint.checkpoint(self._core, x_in, encoding_h)
     #     return x_in + x
 
-    def _core(self, x_in, encoding_h):
-        x = self.start(x_in)
-        gate = (
-            self.gate_linear_combine(x)
-            + self.encoding_gate_linear_combine(encoding_h)
-        )
-        x = (
-            self.A_combine(x)
-            + self.encoding_linear_combine(encoding_h)
-        )
+    def _core(self, x, enc_gate, enc_lin):
+        gate = self.gate_linear_combine(x) + enc_gate
+        x = self.A_combine(x) + enc_lin
         x = self.act(x)
         x = x * gate
         assert not x.isnan().any()
         x = self.B(x)
-
         return x
 
+
     def forward(self, x_in, encoding_h):
-        x = torch.utils.checkpoint.checkpoint(self._core, x_in, encoding_h)
+        x = self.start(x_in)
+        enc_gate = self.encoding_gate_linear_combine(encoding_h)
+        enc_lin = self.encoding_linear_combine(encoding_h)
+
+        x = torch.utils.checkpoint.checkpoint(
+            self._core,
+            x,
+            enc_gate,
+            enc_lin,
+        )
+
         return x_in + x
 
 
@@ -217,10 +231,14 @@ class FFBlockWithEncoder(torch.nn.Module):
 #             *[nn.Dropout(p=dropout) for _ in range(1 if dropout > 0 else 0)],
 #         )
 
-#     def forward(self, x_in, encoding_h):
+#     def _core(self, x_in, encoding_h):
 #         x = self.start(x_in)
 #         x = self.act(self.A_combine(x) + self.encoding_linear_combine(encoding_h))
 #         x = self.B(x)
+#         return x
+
+#     def forward(self, x_in, encoding_h):
+#         x = torch.utils.checkpoint.checkpoint(self._core, x_in, encoding_h)
 #         return x_in + x
 
 class BlockWithEncoder(torch.nn.Module):
@@ -323,26 +341,29 @@ class EncoderModel(torch.nn.Module):
 
         self.encode_block = nn.Sequential(
             nn.Linear(self.n_features, self.n_hidden),
-            Block(self.n_hidden, dropout=self.dropout),
+            RNNBlock(n_hidden=self.n_hidden, dropout=self.dropout),
         )
-        self.full_blocks = ENCODER_FULL_BLOCKS # 1 full block consists of GLOBAL - FF - LSTM - FF
+        self.full_blocks = ENCODER_FULL_BLOCKS # 1 full block consists of LSTM - GLOBAL_FF - GLOBAL_FF 
+        self.FF_PER_BLOCK = 2
         self.intermediate_global_encoders = nn.ModuleList(
-            [GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=GLOBAL_FACTOR * i * self.n_hidden, num_blocks=INTERMEDIATE_GLOBAL_LAYERS) for i in range(self.full_blocks)]
+            [GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=GLOBAL_FACTOR * i * self.n_hidden, num_blocks=INTERMEDIATE_GLOBAL_LAYERS) for i in range(self.FF_PER_BLOCK * self.full_blocks)]
         )
         self.intermediate_ffs = nn.ModuleList([
             FFBlockWithEncoder(self.n_hidden, n_encoding=GLOBAL_FACTOR * (i + 1) * self.n_hidden, use_timeshift=True, dropout=self.dropout)
+            for i in range(self.FF_PER_BLOCK * self.full_blocks)
+        ])
+        self.intermediate_lstm = nn.ModuleList([
+            RNNBlock(n_hidden=self.n_hidden, dropout=self.dropout)
             for i in range(self.full_blocks)
         ])
-        self.intermediate_blocks = nn.ModuleList([
-            BlockWithEncoder(self.n_hidden, n_encoding=GLOBAL_FACTOR * (i + 1) * self.n_hidden, dropout=self.dropout)
-            for i in range(self.full_blocks)
-        ])
-        self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=GLOBAL_FACTOR * self.full_blocks * self.n_hidden, num_blocks=LAST_GLOBAL_LAYERS)
-        self.n_full_global = (self.full_blocks + 1) * self.n_hidden * GLOBAL_FACTOR
+        self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=GLOBAL_FACTOR * self.FF_PER_BLOCK * self.full_blocks * self.n_hidden, num_blocks=LAST_GLOBAL_LAYERS)
+        self.n_full_global = (self.FF_PER_BLOCK * self.full_blocks + 1) * self.n_hidden * GLOBAL_FACTOR
 
         self.fsrs_linear = nn.Linear(self.n_full_global, 35, bias=True)
         torch.nn.init.zeros_(self.fsrs_linear.weight)
         torch.nn.init.zeros_(self.fsrs_linear.bias)
+        with torch.no_grad():
+            self.fsrs_linear.bias[1:4].copy_(torch.tensor([-2.2, -0.5, -0.5]))
 
     def forward(
             self, 
@@ -367,21 +388,32 @@ class EncoderModel(torch.nn.Module):
         )
         return self.encode_block(x)
 
+    def run_intermediate_lstm(self, i, x_list):
+        new_x_list = []
+        for x in x_list:
+            new_x_list.append(self.intermediate_lstm[i](x))
+        return new_x_list
+
+    def run_ff(self, i, j, global_hidden, x_list, mask_list):
+        new_x_list = []
+        global_hidden = self.intermediate_global_encoders[2 * i + j](x_list, mask_list, h_in=global_hidden)
+        for x in x_list:
+            new_x_list.append(self.intermediate_ffs[2 * i + j](x, encoding_h=global_hidden))
+        return global_hidden, new_x_list
+
     def run_core(self, x_list, mask_list, log=None):
         global_hidden = torch.tensor([], device=x_list[0].device)
         card_max_stds = []
-        for global_encoder, ff, block in zip(self.intermediate_global_encoders, self.intermediate_ffs, self.intermediate_blocks):
-            new_x_list = []
-            new_global_hidden = global_encoder(x_list, mask_list, h_in=global_hidden)
-            global_hidden = new_global_hidden
-            for x in x_list:
-                x = ff(x, encoding_h=global_hidden)
-                x = block(x, encoding_h=global_hidden)
-                new_x_list.append(x)
-                with torch.no_grad():
+        for i in range(self.full_blocks):
+            x_list = self.run_intermediate_lstm(i, x_list)
+
+            for j in range(self.FF_PER_BLOCK):
+                global_hidden, x_list = self.run_ff(i, j, global_hidden, x_list, mask_list)
+
+            with torch.no_grad():
+                for x in x_list:
                     card_max_stds.append(x.std(dim=-1).max().item())
-            x_list = new_x_list
-        
+
         x = self.fsrs_linear(self.last_global_encoder(x_list, mask_list, h_in=global_hidden, log=log))
         x = fsrs_7.nn_vec_to_fsrs7_params(x)
         if log is not None:

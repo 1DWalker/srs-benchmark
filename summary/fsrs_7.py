@@ -298,10 +298,34 @@ def _bounded_exp(x, lo, hi, default):
     out_log = lo_log + (hi_log - lo_log) * torch.sigmoid(x + mid)
     return torch.exp(out_log)
 
+def make_slices_increasing(x):
+    sort_slices = [(1, 4)]
+    for i in range(1, len(sort_slices)):
+        assert sort_slices[i][0] >= sort_slices[i-1][1]
+    x_out = []
+    start = 0
+    for l, r in sort_slices:
+        if l > start:
+            x_out.append(x[start:l])
+        slice_len = r - l
+        if slice_len == 1:
+            x_out.append(x[l:r])
+        else:
+            first = x[l:l+1]
+            increments = torch.nn.functional.softplus(x[(l+1):r])
+            increasing_slice = torch.cat([first, first + torch.cumsum(increments, dim=0)], dim=0)
+            x_out.append(increasing_slice)
+        start = r
+    if start < x.shape[0]:
+        x_out.append(x[start:])
+    return torch.cat(x_out, dim=0)
+
 def nn_vec_to_fsrs7_params(x):
     lo = FSRS_MIN.to(x.device)
     hi = FSRS_MAX.to(x.device)
     default = FSRS7_DEFAULT_35.to(x.device)
+
+    x = make_slices_increasing(x)
 
     exp_mask = torch.zeros(35, dtype=torch.bool, device=x.device)
     exp_mask[:4] = True
@@ -322,41 +346,40 @@ def nn_vec_to_fsrs7_params(x):
         default[~exp_mask],
     )
 
-    sorted_S1_to_S3, _ = torch.sort(x[1:4])
-    low_S = out[0].expand(3)
-    hi_S = hi[1:4]
-    default_S = low_S * 0.95 + hi_S * 0.05
-    out = out.clone()
-    out[1:4] = _bounded_exp(
-        sorted_S1_to_S3,
-        low_S,
-        hi_S,
-        default_S,
+    out_copy = out.clone()
+    out_copy[1:4] = _bounded_exp(
+        x[1:4],
+        out[0].expand(3),
+        hi[1:4],
+        (out[0].expand(3) + hi[1:4]) / 2,
     )
-
-    out[28] = _bounded(
+    out_copy[28] = _bounded(
         x[28],
         out[27],
         hi[28],
         (out[27] + hi[28]) / 2,
     )
-
-    out[30] = _bounded(
+    out_copy[30] = _bounded(
         x[30],
         out[29],
         hi[30],
         (out[29] + hi[30]) / 2,
     )
-
-    return out
+    return out_copy
 
 if __name__ == '__main__':
-    a = nn_vec_to_fsrs7_params(torch.full((35,), -100.0))
+    a = nn_vec_to_fsrs7_params(torch.full((35,), -1000.0))
     b = nn_vec_to_fsrs7_params(torch.full((35,), 0.0))
-    c = nn_vec_to_fsrs7_params(torch.full((35,), 100.0))
+    c = nn_vec_to_fsrs7_params(torch.full((35,), 1000.0))
     print(a)
     print(b)
     print(c)
+    assert ((a - FSRS_MIN).abs() < 1e-4).all()
+    assert ((c - FSRS_MAX).abs() < 1e-4).all()
+    h = [0.0 for _ in range(35)]
+    h[1] = -2
+    print(nn_vec_to_fsrs7_params(torch.tensor(h)))
+    
 
     sampler = torch.distributions.studentT.StudentT(torch.full((35,), 1.0))
     for i in range(1000):
@@ -369,5 +392,7 @@ if __name__ == '__main__':
 
         assert w[27] <= w[28]
         assert w[29] <= w[30]
+        assert (FSRS_MIN <= w + 1e-4).all(), FSRS_MIN <= w + 1e-4
+        assert (w <= FSRS_MAX + 1e-4).all(), w <= FSRS_MAX + 1e-4
 
     print("Check complete.")

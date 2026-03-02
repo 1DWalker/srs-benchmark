@@ -4,6 +4,7 @@ import math
 import multiprocessing
 import lmdb
 import numpy as np
+from summary import decoder_ops
 from torch.nn.utils.rnn import pad_sequence
 from itertools import accumulate
 from pathlib import Path
@@ -128,18 +129,23 @@ def process(user_id, config):
             continue
 
         feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_rating, label_review_th, label_is_same_day, has_label = list(zip(*group_lists))
-        feature_review_th = pad_sequence(feature_review_th, batch_first=True, padding_value=int(2e9))
-        feature_elapsed_days_int = pad_sequence(feature_elapsed_days_int, batch_first=True, padding_value=0)
-        feature_elapsed_days_real = pad_sequence(feature_elapsed_days_real, batch_first=True, padding_value=0)
-        feature_rating = pad_sequence(feature_rating, batch_first=True, padding_value=0)
-        label_elapsed_days_int = pad_sequence(label_elapsed_days_int, batch_first=True, padding_value=0)
-        label_elapsed_days_real = pad_sequence(label_elapsed_days_real, batch_first=True, padding_value=0)
-        label_rating = pad_sequence(label_rating, batch_first=True, padding_value=0)
-        label_review_th = pad_sequence(
-            label_review_th, batch_first=True, padding_value=int(2e9)
-        )
-        label_is_same_day = pad_sequence(label_is_same_day, batch_first=True, padding_value=0)
-        has_label = pad_sequence(has_label, batch_first=True, padding_value=0)
+        grouped = list(zip(*group_lists))
+        (
+            feature_review_th,
+            feature_elapsed_days_int,
+            feature_elapsed_days_real,
+            feature_rating,
+            label_elapsed_days_int,
+            label_elapsed_days_real,
+            label_rating,
+            label_review_th,
+            label_is_same_day,
+            has_label,
+        ) = [
+            pad_sequence(seq, batch_first=True, padding_value=pad_val)
+            for seq, pad_val in zip(grouped, decoder_ops.PAD_VALS)
+        ]
+
         total_size += feature_rating.size(0) * feature_rating.size(1)
         result.append((feature_review_th, feature_elapsed_days_int, feature_elapsed_days_real, feature_rating, label_elapsed_days_int, label_elapsed_days_real, label_rating, label_review_th, label_is_same_day, has_label))
     

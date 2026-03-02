@@ -461,7 +461,7 @@ def main(config):
                     if step % 50 == 0:
                         log_model(log, model, device=config.DEVICE)
 
-                    if validate_iter:
+                    if validate_iter or (step + 1) % 1000 == 0:
                         save_model_path = (
                             f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_{step}.pth"
                         )
@@ -471,6 +471,7 @@ def main(config):
                         torch.save(optimizer.state_dict(), save_optim_path)
                         print("MODEL SAVED.")
 
+                    if validate_iter:
                         validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, log)
                         log["validation/validation_loss"] = validate_result.loss_weighted_review
                         log["validation/validation_loss_user"] = validate_result.loss_weighted_user

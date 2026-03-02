@@ -1,10 +1,10 @@
 DB_PATH = "compact_db"
-DB_SIZE = 40_000_000_000
+DB_SIZE = 44_000_000_000
 
 DATA_PATH = "../anki-revlogs-10k"
 
-USER_START = 1
-USER_END = 10000
+USER_START = 1000
+USER_END = 2000
 
 DTYPE = "float"
 PROCESSES = 5
