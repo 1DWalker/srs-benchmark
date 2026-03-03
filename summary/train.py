@@ -376,6 +376,8 @@ def main(config):
                             decode_max_L =  64
                         else:
                             decode_max_L = int(1e9)
+                    else:
+                        decode_max_L = int(1e9)
                     decode_batches = decoder_ops.get_data(summary_txn, user, config.DEVICE, max_L=decode_max_L, merge=config.MERGE_DECODE_BATCHES)
                     T = decoder_ops.extract_num_reviews(encode_batches)
                     if T > config.SKIP_LENGTH:
@@ -461,7 +463,7 @@ def main(config):
                     if step % 50 == 0:
                         log_model(log, model, device=config.DEVICE)
 
-                    if validate_iter or (step + 1) % 1000 == 0:
+                    if validate_iter or (step + 1) % 5000 == 0:
                         save_model_path = (
                             f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_{step}.pth"
                         )
