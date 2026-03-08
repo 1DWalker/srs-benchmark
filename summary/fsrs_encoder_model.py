@@ -7,17 +7,17 @@ BASE_DROPOUT = 0
 FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
 FIRST_REVIEW_DROPOUT = 0
 GLOBAL_ENCODER_DROPOUT = 0.1
-GLOBAL_ENCODER_CHANNEL_DROPOUT = 0.02
+GLOBAL_ENCODER_CHANNEL_DROPOUT = 0.01
 LAST_GLOBAL_NN_DROPOUT = 0
 
-ENCODER_N_HIDDEN = 16
-GLOBAL_FACTOR = 1
-ENCODER_FULL_BLOCKS = 3
+ENCODER_N_HIDDEN = 24
+GLOBAL_FACTOR = 2
+ENCODER_FULL_BLOCKS = 4
 FF_PER_BLOCK = 2
 N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * ENCODER_FULL_BLOCKS * FF_PER_BLOCK
 
-INTERMEDIATE_GLOBAL_LAYERS = 4
-LAST_GLOBAL_LAYERS = 32
+INTERMEDIATE_GLOBAL_LAYERS = 8
+LAST_GLOBAL_LAYERS = INTERMEDIATE_GLOBAL_LAYERS
 
 
 # ENCODER_N_HIDDEN = 2
@@ -210,13 +210,13 @@ class FFBlockWithEncoder(torch.nn.Module):
         enc_gate = self.global_gate_linear_combine(encoding_h)
         enc_lin = self.global_linear_combine(encoding_h)
 
-        # x = torch.utils.checkpoint.checkpoint(
-        #     self._core,
-        #     x,
-        #     enc_gate,
-        #     enc_lin,
-        # )
-        x = self._core(x, enc_gate, enc_lin)
+        x = torch.utils.checkpoint.checkpoint(
+            self._core,
+            x,
+            enc_gate,
+            enc_lin,
+        )
+        # x = self._core(x, enc_gate, enc_lin)
 
         return x_in + x
 
