@@ -6,17 +6,18 @@ import numpy as np
 BASE_DROPOUT = 0
 FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
 FIRST_REVIEW_DROPOUT = 0
-GLOBAL_ENCODER_DROPOUT = 0
-GLOBAL_ENCODER_CHANNEL_DROPOUT = 0.01
+GLOBAL_ENCODER_DROPOUT = 0.1
+GLOBAL_ENCODER_CHANNEL_DROPOUT = 0.02
 LAST_GLOBAL_NN_DROPOUT = 0
 
-ENCODER_N_HIDDEN = 24
-GLOBAL_FACTOR = 2
-ENCODER_FULL_BLOCKS = 4
-N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * (ENCODER_FULL_BLOCKS + 1)
+ENCODER_N_HIDDEN = 16
+GLOBAL_FACTOR = 1
+ENCODER_FULL_BLOCKS = 3
+FF_PER_BLOCK = 2
+N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * ENCODER_FULL_BLOCKS * FF_PER_BLOCK
 
-INTERMEDIATE_GLOBAL_LAYERS = 8
-LAST_GLOBAL_LAYERS = INTERMEDIATE_GLOBAL_LAYERS
+INTERMEDIATE_GLOBAL_LAYERS = 4
+LAST_GLOBAL_LAYERS = 32
 
 
 # ENCODER_N_HIDDEN = 2
@@ -71,7 +72,7 @@ class RNNBlock(torch.nn.Module):
             nn.LayerNorm(n_hidden),
             TimeShiftLerp(n_hidden=n_hidden),
             RNNWrapper(nn.LSTM(input_size=n_hidden, hidden_size=n_hidden, batch_first=True)),
-            nn.Linear(n_hidden, n_hidden),
+            nn.Linear(n_hidden, n_hidden, bias=False),
             *[nn.Dropout(p=dropout) for _ in range(1 if dropout > 0 else 0)],
         ))
         for name, param in self.named_parameters():
@@ -99,11 +100,12 @@ class FFBlock(torch.nn.Module):
         self.A = nn.Linear(n_hidden, self.n_act)
         self.act = nn.SiLU()
         self.gate_linear = nn.Linear(n_hidden, self.n_act)
-        self.B = nn.Linear(self.n_act, n_hidden)
+        self.B = nn.Linear(self.n_act, n_hidden, bias=False)
         self.dropout = nn.Dropout(p=dropout)
         self.dropout_channel = nn.Dropout(p=dropout_channel)
 
     def forward(self, x_in):
+        assert not x_in.isnan().any()
         x = self.start(x_in)
         gate = self.gate_linear(x)
         x = self.act(self.A(x))
@@ -149,19 +151,24 @@ class FFBlockWithEncoder(torch.nn.Module):
             *[TimeShiftLerp(n_hidden=n_hidden) for _ in range(1 if use_timeshift else 0)],
         )
         self.gate_linear_combine = nn.Linear(n_hidden, self.n_act)
-        self.encoding_gate_linear_combine = nn.Linear(n_encoding, self.n_act, bias=False)
+        # self.global_lora_dim = 2
+        # self.global_gate_linear_combine_lora = nn.Linear(n_encoding, self.global_lora_dim, bias=False)
+        # nn.init.orthogonal_(self.global_gate_linear_combine_lora.weight)
+        self.global_gate_linear_combine = nn.Linear(n_encoding, self.n_act, bias=False)
         with torch.no_grad():
             self.gate_linear_combine.weight.mul_(0.5)
-            self.encoding_gate_linear_combine.weight.mul_(0.5)
+            self.global_gate_linear_combine.weight.mul_(0.5)
 
         self.A_combine = nn.Linear(n_hidden, self.n_act)
-        self.encoding_linear_combine = nn.Linear(n_encoding, self.n_act, bias=False)
+        # self.global_linear_combine_lora = nn.Linear(n_encoding, self.global_lora_dim, bias=False)
+        # nn.init.orthogonal_(self.global_linear_combine_lora.weight)
+        self.global_linear_combine = nn.Linear(n_encoding, self.n_act, bias=False)
         with torch.no_grad():
             self.A_combine.weight.mul_(0.5)
-            self.encoding_linear_combine.weight.mul_(0.5)
+            self.global_linear_combine.weight.mul_(0.5)
         self.act = nn.SiLU()
         self.B = nn.Sequential(
-            nn.Linear(self.n_act, n_hidden),
+            nn.Linear(self.n_act, n_hidden, bias=False),
             *[nn.Dropout(p=dropout) for _ in range(1 if dropout > 0 else 0)],
         )
 
@@ -198,15 +205,18 @@ class FFBlockWithEncoder(torch.nn.Module):
 
     def forward(self, x_in, encoding_h):
         x = self.start(x_in)
-        enc_gate = self.encoding_gate_linear_combine(encoding_h)
-        enc_lin = self.encoding_linear_combine(encoding_h)
+        # enc_gate = self.global_gate_linear_combine(self.global_gate_linear_combine_lora(encoding_h))
+        # enc_lin = self.global_linear_combine(self.global_linear_combine_lora(encoding_h))
+        enc_gate = self.global_gate_linear_combine(encoding_h)
+        enc_lin = self.global_linear_combine(encoding_h)
 
-        x = torch.utils.checkpoint.checkpoint(
-            self._core,
-            x,
-            enc_gate,
-            enc_lin,
-        )
+        # x = torch.utils.checkpoint.checkpoint(
+        #     self._core,
+        #     x,
+        #     enc_gate,
+        #     enc_lin,
+        # )
+        x = self._core(x, enc_gate, enc_lin)
 
         return x_in + x
 
@@ -341,10 +351,9 @@ class EncoderModel(torch.nn.Module):
 
         self.encode_block = nn.Sequential(
             nn.Linear(self.n_features, self.n_hidden),
-            RNNBlock(n_hidden=self.n_hidden, dropout=self.dropout),
         )
         self.full_blocks = ENCODER_FULL_BLOCKS # 1 full block consists of LSTM - GLOBAL_FF - GLOBAL_FF 
-        self.FF_PER_BLOCK = 2
+        self.FF_PER_BLOCK = FF_PER_BLOCK
         self.intermediate_global_encoders = nn.ModuleList(
             [GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=GLOBAL_FACTOR * i * self.n_hidden, num_blocks=INTERMEDIATE_GLOBAL_LAYERS) for i in range(self.FF_PER_BLOCK * self.full_blocks)]
         )
@@ -396,9 +405,9 @@ class EncoderModel(torch.nn.Module):
 
     def run_ff(self, i, j, global_hidden, x_list, mask_list):
         new_x_list = []
-        global_hidden = self.intermediate_global_encoders[2 * i + j](x_list, mask_list, h_in=global_hidden)
+        global_hidden = self.intermediate_global_encoders[self.FF_PER_BLOCK * i + j](x_list, mask_list, h_in=global_hidden)
         for x in x_list:
-            new_x_list.append(self.intermediate_ffs[2 * i + j](x, encoding_h=global_hidden))
+            new_x_list.append(self.intermediate_ffs[self.FF_PER_BLOCK * i + j](x, encoding_h=global_hidden))
         return global_hidden, new_x_list
 
     def run_core(self, x_list, mask_list, log=None):

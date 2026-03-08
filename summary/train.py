@@ -81,7 +81,11 @@ def get_optimizer(config, model):
                 decay_params.append(param)
 
         lr = 16 * config.PEAK_LR / width
+        # if width < 16:
+        #     lr /= 10 / 1.5
+        #     print("Reducing LR for width:", width)
         print("Width:", width, "lr:", lr, len(decay_params), len(other_params))
+        print()
         param_groups.append(
             {
                 "params": decay_params,
@@ -119,7 +123,7 @@ class ValidateResult(NamedTuple):
     first_bce: float
     first_ce: float
 
-def validate(model, summary_txn, label_filter_txn, validate_users, config, log=None):
+def validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="eval", log=None):
     device = config.DEVICE
     torch.cuda.empty_cache()
     try:
@@ -135,7 +139,10 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, log=N
                 print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. Emptying cache.")
                 torch.cuda.empty_cache()
 
-            model.eval()
+            if model_mode == "eval":
+                model.eval()
+            else:
+                model.train()
             batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
             T = decoder_ops.extract_num_reviews(batches)
             splits = load_tensor(label_filter_txn, f"{user}_split", device=device).tolist()
@@ -226,7 +233,7 @@ def get_superiority(lagging_dict, now_dict):
             w += 1
     return w / max(1, n)
 
-def cosine_down(step, total_steps, base=1e-2):
+def cosine_down(step, total_steps, base=1e-3):
     return base + (1 - base) * (1 + np.cos(0.5 * np.pi * (1 + step / total_steps)))
 
 def make_iter_seed(base_seed: int, step: int) -> int:
@@ -245,7 +252,11 @@ def main(config):
     model = fsrs_encoder_model.Model().to(config.DEVICE)
     optimizer, peak_lr_first_param = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
-    encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder)
+    # encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder)
+    encoder_model_global_params = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad and "global" in name and "weight_linear" not in name and "value_linear" not in name:
+            encoder_model_global_params += param.numel()
     encoder_model_card_parallel_params = encoder_model_params - encoder_model_global_params
     # card_model_params = get_number_of_trainable_parameters(model.card_model)
     # curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
@@ -474,13 +485,16 @@ def main(config):
                         print("MODEL SAVED.")
 
                     if validate_iter:
-                        validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, log)
+                        validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="eval", log=log)
                         log["validation/validation_loss"] = validate_result.loss_weighted_review
                         log["validation/validation_loss_user"] = validate_result.loss_weighted_user
                         log["validation/cond_loss"] = validate_result.cond_loss
                         log["validation/first_bce"] = validate_result.first_bce
                         log["validation/first_ce"] = validate_result.first_ce
-                        validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config, log)
+                        validate_result_train_mode: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="train", log=log)
+                        log["validation_train_mode/validation_loss"] = validate_result_train_mode.loss_weighted_review
+                        log["validation_train_mode/validation_loss_user"] = validate_result_train_mode.loss_weighted_user
+                        validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config, model_mode="eval", log=log)
                         log["validation_overfit/validation_overfit_loss"] = validate_overfit_result.loss_weighted_review
                         log["validation_overfit/validation_overfit_loss_user"] = validate_overfit_result.loss_weighted_user
                         log["validation_overfit/cond_loss"] = validate_overfit_result.cond_loss
