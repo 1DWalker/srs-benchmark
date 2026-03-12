@@ -1,4 +1,4 @@
-from summary import fsrs_7, fsrs_7_truth
+from summary import fsrs_7, fsrs_7_custom, fsrs_7_truth
 import torch
 import torch.nn as nn
 import numpy as np
@@ -6,7 +6,7 @@ import numpy as np
 BASE_DROPOUT = 0
 FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
 FIRST_REVIEW_DROPOUT = 0
-GLOBAL_ENCODER_DROPOUT = 0.1
+GLOBAL_ENCODER_DROPOUT = 0.0
 GLOBAL_ENCODER_CHANNEL_DROPOUT = 0.01
 LAST_GLOBAL_NN_DROPOUT = 0
 
@@ -14,7 +14,7 @@ ENCODER_N_HIDDEN = 24
 GLOBAL_FACTOR = 2
 ENCODER_FULL_BLOCKS = 4
 FF_PER_BLOCK = 2
-N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * ENCODER_FULL_BLOCKS * FF_PER_BLOCK
+N_ENCODING = (FF_PER_BLOCK * ENCODER_FULL_BLOCKS + 1) * ENCODER_N_HIDDEN * GLOBAL_FACTOR
 
 INTERMEDIATE_GLOBAL_LAYERS = 8
 LAST_GLOBAL_LAYERS = INTERMEDIATE_GLOBAL_LAYERS
@@ -145,23 +145,17 @@ class FFBlockWithEncoder(torch.nn.Module):
     def __init__(self, n_hidden, n_encoding, use_timeshift, dropout=0):
         super().__init__()
         self.n_act = int(n_hidden * 2 / 3)
-        # self.n_act = n_hidden
         self.start = nn.Sequential(
             nn.LayerNorm(n_hidden),
             *[TimeShiftLerp(n_hidden=n_hidden) for _ in range(1 if use_timeshift else 0)],
         )
         self.gate_linear_combine = nn.Linear(n_hidden, self.n_act)
-        # self.global_lora_dim = 2
-        # self.global_gate_linear_combine_lora = nn.Linear(n_encoding, self.global_lora_dim, bias=False)
-        # nn.init.orthogonal_(self.global_gate_linear_combine_lora.weight)
         self.global_gate_linear_combine = nn.Linear(n_encoding, self.n_act, bias=False)
         with torch.no_grad():
             self.gate_linear_combine.weight.mul_(0.5)
             self.global_gate_linear_combine.weight.mul_(0.5)
 
         self.A_combine = nn.Linear(n_hidden, self.n_act)
-        # self.global_linear_combine_lora = nn.Linear(n_encoding, self.global_lora_dim, bias=False)
-        # nn.init.orthogonal_(self.global_linear_combine_lora.weight)
         self.global_linear_combine = nn.Linear(n_encoding, self.n_act, bias=False)
         with torch.no_grad():
             self.A_combine.weight.mul_(0.5)
@@ -172,26 +166,13 @@ class FFBlockWithEncoder(torch.nn.Module):
             *[nn.Dropout(p=dropout) for _ in range(1 if dropout > 0 else 0)],
         )
 
-    # def _core(self, x_in, encoding_h):
-    #     x = self.start(x_in)
-    #     gate = (
-    #         self.gate_linear_combine(x)
-    #         + self.encoding_gate_linear_combine(encoding_h)
-    #     )
-    #     x = (
-    #         self.A_combine(x)
-    #         + self.encoding_linear_combine(encoding_h)
-    #     )
-    #     x = self.act(x)
-    #     x = x * gate
-    #     assert not x.isnan().any()
-    #     x = self.B(x)
+        # cached values
+        self.register_buffer("_enc_gate", None, persistent=False)
+        self.register_buffer("_enc_lin", None, persistent=False)
 
-    #     return x
-
-    # def forward(self, x_in, encoding_h):
-    #     x = torch.utils.checkpoint.checkpoint(self._core, x_in, encoding_h)
-    #     return x_in + x
+    def set_encoding(self, encoding_h):
+        self._enc_gate = self.global_gate_linear_combine(encoding_h)
+        self._enc_lin = self.global_linear_combine(encoding_h)
 
     def _core(self, x, enc_gate, enc_lin):
         gate = self.gate_linear_combine(x) + enc_gate
@@ -205,10 +186,11 @@ class FFBlockWithEncoder(torch.nn.Module):
 
     def forward(self, x_in, encoding_h):
         x = self.start(x_in)
-        # enc_gate = self.global_gate_linear_combine(self.global_gate_linear_combine_lora(encoding_h))
-        # enc_lin = self.global_linear_combine(self.global_linear_combine_lora(encoding_h))
-        enc_gate = self.global_gate_linear_combine(encoding_h)
-        enc_lin = self.global_linear_combine(encoding_h)
+        if encoding_h is not None:
+            self.set_encoding(encoding_h)
+
+        enc_gate = self._enc_gate
+        enc_lin = self._enc_lin
 
         x = torch.utils.checkpoint.checkpoint(
             self._core,
@@ -366,13 +348,7 @@ class EncoderModel(torch.nn.Module):
             for i in range(self.full_blocks)
         ])
         self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=GLOBAL_FACTOR * self.FF_PER_BLOCK * self.full_blocks * self.n_hidden, num_blocks=LAST_GLOBAL_LAYERS)
-        self.n_full_global = (self.FF_PER_BLOCK * self.full_blocks + 1) * self.n_hidden * GLOBAL_FACTOR
 
-        self.fsrs_linear = nn.Linear(self.n_full_global, 35, bias=True)
-        torch.nn.init.zeros_(self.fsrs_linear.weight)
-        torch.nn.init.zeros_(self.fsrs_linear.bias)
-        with torch.no_grad():
-            self.fsrs_linear.bias[1:4].copy_(torch.tensor([-2.2, -0.5, -0.5]))
 
     def forward(
             self, 
@@ -423,11 +399,9 @@ class EncoderModel(torch.nn.Module):
                 for x in x_list:
                     card_max_stds.append(x.std(dim=-1).max().item())
 
-        x = self.fsrs_linear(self.last_global_encoder(x_list, mask_list, h_in=global_hidden, log=log))
-        x = fsrs_7.nn_vec_to_fsrs7_params(x)
         if log is not None:
             log["hidden/max_card_std"] = max(card_max_stds)
-        return x
+        return self.last_global_encoder(x_list, mask_list, h_in=global_hidden, log=log)
 
 class Config:
     def __init__(self):
@@ -440,31 +414,38 @@ class Config:
 class CardModel(torch.nn.Module):
     def __init__(self, n_encoding):
         super().__init__()
+        self.d_transition_model = DTransitionModel(n_encoding=n_encoding)
+        self.fsrs_linear = nn.Linear(N_ENCODING, 39)
+        torch.nn.init.zeros_(self.fsrs_linear.weight)
+        torch.nn.init.zeros_(self.fsrs_linear.bias)
+        with torch.no_grad():
+            self.fsrs_linear.bias[1:4].copy_(torch.tensor([-2.2, -0.5, -0.5]))
+
+    def encoding_to_fsrs(self, encoding_h):
+        x = self.fsrs_linear(encoding_h)
+        fsrs_params = fsrs_7_custom.nn_vec_to_fsrs7_params(x)
+        return fsrs_params
 
     def forward(self, encoding_h, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl):
+        fsrs_params = self.encoding_to_fsrs(encoding_h)
         B, L = feature_elapsed_days_real_bl.shape
-        # from time import time
-        # ts = time()
-        x_bl, state_bl2 = fsrs_7.forward(
-            parameters_p=encoding_h, 
+
+        self.d_transition_model.set_encoding(encoding_h=encoding_h)
+        def d_transition(
+            s_b,
+            d_b,
+            feature_elapsed_days_real_b, 
+            feature_rating_b
+        ):
+            return self.d_transition_model(None, s_b, d_b, feature_elapsed_days_real_b, feature_rating_b)
+
+        x_bl, state_bl2 = fsrs_7_custom.forward(
+            parameters_p=fsrs_params, 
             feature_elapsed_days_real_bl=feature_elapsed_days_real_bl,
             feature_rating_bl=feature_rating_bl,   
             label_elapsed_days_real_bl=label_elapsed_days_real_bl,
+            d_transition_func=d_transition,
         )
-        # print("Forward", time() - ts, x_bl.shape)
-        # x_bl, state_bl2 = fsrs_7.forward(
-        #     parameters_p=encoding_h.double(), 
-        #     feature_elapsed_days_real_bl=feature_elapsed_days_real_bl.double(),
-        #     feature_rating_bl=feature_rating_bl,   
-        #     label_elapsed_days_real_bl=label_elapsed_days_real_bl.double(),
-        # )
-        # fsrs = fsrs_7_truth.FSRS7(config=Config(), w=encoding_h.double().tolist()).to(torch.device("cuda"))
-        # sequences_lb2 = torch.stack((feature_elapsed_days_real_bl.double(), feature_rating_bl), dim=-1).transpose(0, 1)
-        # out2 = fsrs.batch_process(sequences_lb2, 0, 0, real_batch_size=B).unbind(dim=-1)[0]
-        # out1 = state_bl2.transpose(0, 1)
-        # error = (out1 - out2).max()
-        # print("done, error", error, error.type())
-        # print()
 
         eps = 1e-6
         x_bl4 = torch.full((B, L, 4), float("-inf"),
@@ -481,6 +462,82 @@ class FirstReviewModel(torch.nn.Module):
 
     def forward(self, encoding_bh):
         return self.pred
+
+class SDRatingElapsedModel(torch.nn.Module):
+    def __init__(self, n_encoding):
+        super().__init__()
+        self.n_hidden = 8
+        self.n_blocks = 4
+        self.encode = nn.Linear(7, self.n_hidden)
+        self.blocks = nn.ModuleList(
+            [FFBlockWithEncoder(n_hidden=self.n_hidden, n_encoding=n_encoding, use_timeshift=False, dropout=0) for _ in range(self.n_blocks)]
+        )
+        self.last = nn.Sequential(
+            nn.LayerNorm(self.n_hidden),
+            nn.Linear(self.n_hidden, 1),
+        )
+    
+    def set_encoding(self, encoding_h):
+        for block in self.blocks:
+            block.set_encoding(encoding_h)
+
+    def forward(
+            self, 
+            encoding_h,
+            s_b,
+            d_b,
+            feature_elapsed_days_real_b, 
+            feature_rating_b, 
+            ):
+        B = feature_elapsed_days_real_b.size(0)
+        feature_rating_onehot_b4 = torch.nn.functional.one_hot((feature_rating_b.long() - 1).clamp(min=0), num_classes=4).float()
+        x = torch.cat(
+            (
+                transform_elapsed_days_real(s_b).unsqueeze(-1),
+                torch.log(11 - d_b).unsqueeze(-1),
+                transform_elapsed_days_real(feature_elapsed_days_real_b).unsqueeze(-1), 
+                feature_rating_onehot_b4,
+            ), 
+            dim=-1,
+        )
+        x = self.encode(x)
+        for block in self.blocks:
+            x = block(x, encoding_h)
+        return self.last(x)
+
+class DTransitionModel(torch.nn.Module):
+    def __init__(self, n_encoding):
+        super().__init__()
+        self.core = SDRatingElapsedModel(n_encoding=n_encoding)
+
+    def set_encoding(self, encoding_h):
+        self.core.set_encoding(encoding_h)
+
+    def forward(
+            self, 
+            encoding_h,
+            s_b,
+            d_b,
+            feature_elapsed_days_real_b, 
+            feature_rating_b, 
+            ):
+        x = self.core(encoding_h, s_b, d_b, feature_elapsed_days_real_b, feature_rating_b)
+        return 1 + 9 * torch.sigmoid(x).squeeze(-1)
+
+# class DInitModel(torch.nn.Module):
+#     def __init__(self, n_encoding):
+#         super().__init__()
+#         self.linear = nn.Linear(n_encoding, 4)
+
+#     def forward(
+#             self, 
+#             s_b,
+#             d_b,
+#             feature_elapsed_days_real_b, 
+#             feature_rating_b, 
+#             ):
+#         x = self.core(s_b, d_b, feature_elapsed_days_real_b, feature_rating_b)
+#         return 1 + 9 * torch.sigmoid(x)
 
 class Model(torch.nn.Module):
     def __init__(self):

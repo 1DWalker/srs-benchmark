@@ -63,16 +63,18 @@ def get_optimizer(config, model):
     for width, named_parameters in params_by_width.items():
         decay_params = []
         combine_params = []
-        other_params = []
+        non_weight_params = []
+        exclude_params = []
         print("WIDTH:", width)
         for name, param in named_parameters:
-            if "weight" not in name:
-                print("Skip decay:", name, param.shape)
-                other_params.append(param)
-            elif np.array([x in name for x in exclude_names]).any():
-                other_params.append(param)
+            in_exclude_names = np.array([x in name for x in exclude_names]).any()
+            if in_exclude_names and "weight" not in name:
+                exclude_params.append(param)
                 found_exclude.add(name)
+                print("Exclude:", name, param.shape)
+            elif "weight" not in name:
                 print("Skip decay:", name, param.shape)
+                non_weight_params.append(param)
             elif "combine" in name:
                 print("Combine:", name)
                 combine_params.append(param)
@@ -84,7 +86,7 @@ def get_optimizer(config, model):
         # if width < 16:
         #     lr /= 10 / 1.5
         #     print("Reducing LR for width:", width)
-        print("Width:", width, "lr:", lr, len(decay_params), len(other_params))
+        print("Width:", width, "lr:", lr, len(decay_params), len(non_weight_params))
         print()
         param_groups.append(
             {
@@ -102,11 +104,18 @@ def get_optimizer(config, model):
         )
         param_groups.append(
             {
-                "params": other_params,
+                "params": non_weight_params,
                 "weight_decay": WEIGHT_DECAY / 10,
                 "lr": lr,
             }
         )
+        # param_groups.append(
+        #     {
+        #         "params": exclude_params,
+        #         "weight_decay": WEIGHT_DECAY / 100,
+        #         "lr": lr,
+        #     }
+        # )
 
     assert len(found_exclude) == len(exclude_names)
     return torch.optim.AdamW(
@@ -184,10 +193,11 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, model
                 print(f"User: {user}, RMSE: {rmse_raw:.6f}, LogLoss: {loss:.6f}, RMSE (bins): {rmse_bins:.6f}, AUC: {(-1 if auc is None else auc):.6f}, size: {loss_n}")
                 print(f"Cond CE: {cond_loss.item():.6f}, n: {int(cond_n)}")
                 print(f"First learn: LogLoss: {first_bce_loss:.3f}, CE: {first_ce_loss:.3f}")
-                for split_i, parameters in enumerate(encoding_s.cpu().numpy()):
+                for split_i, parameters in enumerate(encoding_s):
                     first_rating_dist = [round(x, 2) for x in decoder_ops.extract_first_review_dist(model.first_review_model, encoding_s[split_i]).cpu().tolist()]
-                    print(f"Split: {split_i}, first rating: {first_rating_dist}, params: {list(map(lambda x: round(float(x), 4), parameters.tolist()))}")
-                    # print(f"Split: {split_i}, first rating: {first_rating_dist}")
+                    # fsrs_params = model.card_model.encoding_to_fsrs(parameters).cpu().numpy()
+                    # print(f"Split: {split_i}, first rating: {first_rating_dist}, params: {list(map(lambda x: round(float(x), 4), fsrs_params.tolist()))}")
+                    print(f"Split: {split_i}, first rating: {first_rating_dist}")
     except Exception as e:
         print(e)
         raise e
@@ -249,12 +259,12 @@ def set_seed(seed):
 def main(config):
     seed = config.SEED + (len(config.TRAIN_MODE) if config.TRAIN_MODE != "WSD" else 0)
     set_seed(seed)
-    model = fsrs_encoder_model.Model().to(config.DEVICE)
+    model = Model().to(config.DEVICE)
     optimizer, peak_lr_first_param = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
     # encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder)
     encoder_model_global_params = 0
-    for name, param in model.named_parameters():
+    for name, param in model.encoder_model.named_parameters():
         if param.requires_grad and "global" in name and "weight_linear" not in name and "value_linear" not in name:
             encoder_model_global_params += param.numel()
     encoder_model_card_parallel_params = encoder_model_params - encoder_model_global_params
@@ -400,6 +410,8 @@ def main(config):
                             test_l = generate_subsplits(train_l, test_r, T)
                             train_r = test_l - 1
                             encoding = decoder_ops.encode_single(encode_batches, model.encoder_model, train_l + 1, train_r + 1, log=log)
+                            # fsrs_params = model.card_model.encoding_to_fsrs(encoding)
+                            fsrs_params = None
 
                             review_stats: decoder_ops.DecodeResult = decoder_ops.decode(decode_batches, model.card_model, encoding, min_review_th=test_l + 1, max_review_th=test_r + 1)
                             first_review_logits = decoder_ops.extract_first_review_dist_logits(model.first_review_model, encoding)
@@ -436,8 +448,8 @@ def main(config):
                                         log["superiority/bce_epoch_superiority"] = get_superiority(lagging_train_review_loss_bce_dict, train_review_loss_bce_dict)
                                         log["superiority/epoch_superiority"] = get_superiority(lagging_train_review_loss_dict, train_review_loss_dict)
                                 log["encoding/encoding_std"] = encoding.std()
-                                if encoding.size(0) <= 50:
-                                    for i, x in enumerate(encoding.tolist()):
+                                if fsrs_params is not None:
+                                    for i, x in enumerate(fsrs_params.tolist()):
                                         i_str = "0" * (2 - len(str(i))) + str(i)
                                         log[f"encoding_value/{i_str}"] = x
                                 
@@ -450,7 +462,8 @@ def main(config):
                                     print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
                                     print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n}")
                                     print(f"First -- loss: ce: {first_loss_ce_avg:.3f}, bce: {first_loss_bce_avg:.3f}, n: {first_n}")
-                                    print(f"encoding: {list(map(lambda x: round(float(x), 4), encoding.tolist()))}")
+                                    if fsrs_params is not None:
+                                        print(f"encoding: {list(map(lambda x: round(float(x), 4), fsrs_params.tolist()))}")
                                     print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits, dim=-1).cpu().tolist()]}")
                                     print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                     print(f"Elapsed: {time() - time_start:.3f}")
