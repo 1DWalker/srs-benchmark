@@ -6,7 +6,7 @@ BASE_DROPOUT = 0
 FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
 FIRST_REVIEW_DROPOUT = 0
 GLOBAL_ENCODER_DROPOUT = 0.1
-GLOBAL_ENCODER_CHANNEL_DROPOUT = 0.02
+GLOBAL_ENCODER_CHANNEL_DROPOUT = 0.01
 LAST_GLOBAL_NN_DROPOUT = 0
 
 # ENCODER_N_HIDDEN = 16
@@ -19,13 +19,14 @@ LAST_GLOBAL_NN_DROPOUT = 0
 ENCODER_N_HIDDEN = 24
 DECODER_N_HIDDEN = 16
 FORGETTING_CURVE_N_LAYERS = 3
-GLOBAL_FACTOR = 2
+GLOBAL_FACTOR = 3
 ENCODER_FULL_BLOCKS = 4
-FF_PER_BLOCK = 1
-N_ENCODING = (FF_PER_BLOCK * ENCODER_FULL_BLOCKS + 1) * ENCODER_N_HIDDEN * GLOBAL_FACTOR
+FF_PER_BLOCK = 2
+N_ENCODING = int((FF_PER_BLOCK * ENCODER_FULL_BLOCKS + 1) * ENCODER_N_HIDDEN * GLOBAL_FACTOR)
 
-INTERMEDIATE_GLOBAL_LAYERS = 4
-LAST_GLOBAL_LAYERS = 32
+INTERMEDIATE_GLOBAL_LAYERS = 8
+LAST_GLOBAL_LAYERS = 40
+EXCLUDE_LAST_DROPOUT = 4  # number of suffix layers to exclude from dropout
 
 def transform_elapsed_days_real(x):
     return ((x + 1e-5).log() + 1.3) / 5
@@ -244,9 +245,9 @@ class BlockWithEncoder(torch.nn.Module):
         return x
 
 class GlobalEncoder(torch.nn.Module):
-    def __init__(self, n_in, n_out, n_hidden_in, num_blocks=3):
+    def __init__(self, n_in, n_out, n_hidden_in, num_blocks=3, exclude_dropout=0):
         super().__init__()
-        self.n_proj = GLOBAL_FACTOR * n_in
+        self.n_proj = int(GLOBAL_FACTOR * n_in)
         self.n_hidden = self.n_proj + n_hidden_in
         self.norm = nn.LayerNorm(n_in)
         self.value_linear = nn.Linear(n_in, self.n_proj, bias=False)
@@ -262,8 +263,14 @@ class GlobalEncoder(torch.nn.Module):
             nn.Linear(3 * self.n_proj, self.n_proj, bias=False),
             nn.LayerNorm(self.n_proj),
         )
+        def dropout_multi(layer):
+            if layer + exclude_dropout < num_blocks:
+                return 1.0
+            else:
+                return 0.0
+
         self.core = nn.Sequential(
-            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=GLOBAL_ENCODER_DROPOUT, dropout_channel=GLOBAL_ENCODER_CHANNEL_DROPOUT) for _ in range(num_blocks)],
+            *[FFBlock(self.n_hidden, use_timeshift=False, dropout=GLOBAL_ENCODER_DROPOUT * dropout_multi(i), dropout_channel=GLOBAL_ENCODER_CHANNEL_DROPOUT * dropout_multi(i)) for i in range(num_blocks)],
         )
         self.out_norm = nn.LayerNorm(self.n_hidden)
 
@@ -336,17 +343,17 @@ class EncoderModel(torch.nn.Module):
         self.full_blocks = ENCODER_FULL_BLOCKS # 1 full block consists of LSTM - GLOBAL_FF - GLOBAL_FF 
         self.FF_PER_BLOCK = FF_PER_BLOCK
         self.intermediate_global_encoders = nn.ModuleList(
-            [GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=GLOBAL_FACTOR * i * self.n_hidden, num_blocks=INTERMEDIATE_GLOBAL_LAYERS) for i in range(self.FF_PER_BLOCK * self.full_blocks)]
+            [GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=int(GLOBAL_FACTOR * i * self.n_hidden), num_blocks=INTERMEDIATE_GLOBAL_LAYERS, exclude_dropout=1) for i in range(self.FF_PER_BLOCK * self.full_blocks)]
         )
         self.intermediate_ffs = nn.ModuleList([
-            FFBlockWithEncoder(self.n_hidden, n_encoding=GLOBAL_FACTOR * (i + 1) * self.n_hidden, use_timeshift=True, dropout=self.dropout)
+            FFBlockWithEncoder(self.n_hidden, n_encoding=int(GLOBAL_FACTOR * (i + 1) * self.n_hidden), use_timeshift=True, dropout=self.dropout)
             for i in range(self.FF_PER_BLOCK * self.full_blocks)
         ])
         self.intermediate_lstm = nn.ModuleList([
             RNNBlock(n_hidden=self.n_hidden, dropout=self.dropout)
             for i in range(self.full_blocks)
         ])
-        self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=GLOBAL_FACTOR * self.FF_PER_BLOCK * self.full_blocks * self.n_hidden, num_blocks=LAST_GLOBAL_LAYERS)
+        self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=int(GLOBAL_FACTOR * self.FF_PER_BLOCK * self.full_blocks * self.n_hidden), num_blocks=LAST_GLOBAL_LAYERS, exclude_dropout=EXCLUDE_LAST_DROPOUT)
 
 
     def forward(
@@ -381,8 +388,10 @@ class EncoderModel(torch.nn.Module):
     def run_ff(self, i, j, global_hidden, x_list, mask_list):
         new_x_list = []
         global_hidden = self.intermediate_global_encoders[self.FF_PER_BLOCK * i + j](x_list, mask_list, h_in=global_hidden)
+        intermediate_ff = self.intermediate_ffs[self.FF_PER_BLOCK * i + j]
+        intermediate_ff.set_encoding(encoding_h=global_hidden)
         for x in x_list:
-            new_x_list.append(self.intermediate_ffs[self.FF_PER_BLOCK * i + j](x, encoding_h=global_hidden))
+            new_x_list.append(intermediate_ff(x, encoding_h=None))
         return global_hidden, new_x_list
 
     def run_core(self, x_list, mask_list, log=None):
