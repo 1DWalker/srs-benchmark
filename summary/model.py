@@ -5,8 +5,8 @@ import numpy as np
 BASE_DROPOUT = 0
 FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
 FIRST_REVIEW_DROPOUT = 0
-GLOBAL_ENCODER_DROPOUT = 0.1
-GLOBAL_ENCODER_CHANNEL_DROPOUT = 0.02
+GLOBAL_ENCODER_DROPOUT = 0
+GLOBAL_ENCODER_CHANNEL_DROPOUT = 0
 LAST_GLOBAL_NN_DROPOUT = 0
 
 # ENCODER_N_HIDDEN = 16
@@ -16,16 +16,17 @@ LAST_GLOBAL_NN_DROPOUT = 0
 # ENCODER_FULL_BLOCKS = 2
 # N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * (ENCODER_FULL_BLOCKS + 1)
 
-ENCODER_N_HIDDEN = 24
-DECODER_N_HIDDEN = 16
-FORGETTING_CURVE_N_LAYERS = 3
+ENCODER_N_HIDDEN = 32
+DECODER_N_HIDDEN = 32
 GLOBAL_FACTOR = 2
-ENCODER_FULL_BLOCKS = 4
+FORGETTING_CURVE_N_LAYERS = 4
+ENCODER_FULL_BLOCKS = 6
+DECODER_N_BLOCKS = 6
 FF_PER_BLOCK = 1
 N_ENCODING = int((FF_PER_BLOCK * ENCODER_FULL_BLOCKS + 1) * ENCODER_N_HIDDEN * GLOBAL_FACTOR)
 
 INTERMEDIATE_GLOBAL_LAYERS = 4
-LAST_GLOBAL_LAYERS = 32
+LAST_GLOBAL_LAYERS = 20
 
 EXCLUDE_INTERMEDIATE_DROPOUT = 1
 EXCLUDE_LAST_DROPOUT = 4  # number of suffix layers to exclude from dropout
@@ -67,8 +68,9 @@ class RNNWrapper(torch.nn.Module):
         return self.module(inputs)[0]
 
 class RNNBlock(torch.nn.Module):
-    def __init__(self, n_hidden, dropout=0):
+    def __init__(self, n_hidden, dropout=0, use_checkpoint=True):
         super().__init__()
+        self.use_checkpoint = use_checkpoint
 
         self.seq = ResBlock(nn.Sequential(
             nn.LayerNorm(n_hidden),
@@ -87,14 +89,21 @@ class RNNBlock(torch.nn.Module):
                 end_index = len(param.data) // 2
                 param.data[start_index:end_index].fill_(1.0)
 
-    def forward(self, x):
+    def _core(self, x):
         return self.seq(x)
 
+    def forward(self, x):
+        if self.use_checkpoint and self.training:
+            return torch.utils.checkpoint.checkpoint(self._core, x)
+        else:
+            return self._core(x)
+
 class FFBlock(torch.nn.Module):
-    def __init__(self, n_hidden, use_timeshift, dropout=0, dropout_channel=0):
+    def __init__(self, n_hidden, use_timeshift, dropout=0, dropout_channel=0, use_checkpoint=False):
         super().__init__()
         self.n_act = int(n_hidden * 2 / 3)
-        # self.n_act = n_hidden
+        self.use_checkpoint = use_checkpoint
+
         self.start = nn.Sequential(
             nn.LayerNorm(n_hidden),
             *[TimeShiftLerp(n_hidden=n_hidden) for _ in range(1 if use_timeshift else 0)],
@@ -106,14 +115,23 @@ class FFBlock(torch.nn.Module):
         self.dropout = nn.Dropout(p=dropout)
         self.dropout_channel = nn.Dropout(p=dropout_channel)
 
-    def forward(self, x_in):
-        assert not x_in.isnan().any()
-        x = self.start(x_in)
+    def _core(self, x):
+        x = self.start(x)
         gate = self.gate_linear(x)
         x = self.act(self.A(x))
         x = x * gate
-        assert not x.isnan().any()
         x = self.B(x)
+        return x
+
+    def forward(self, x_in):
+        assert not x_in.isnan().any()
+
+        if self.use_checkpoint and self.training:
+            x = torch.utils.checkpoint.checkpoint(self._core, x_in)
+        else:
+            x = self._core(x_in)
+
+        assert not x.isnan().any()
         return self.dropout_channel(self.dropout(x) + x_in)
 
 # class FFBlock(torch.nn.Module):
@@ -440,7 +458,7 @@ class CardModel(torch.nn.Module):
         super().__init__()
         self.n_features = 5
         self.n_hidden = DECODER_N_HIDDEN
-        self.n_blocks = 2
+        self.n_blocks = DECODER_N_BLOCKS
         self.n_encoding = n_encoding
         self.dropout = BASE_DROPOUT
         self.encoder_linear = nn.Linear(n_encoding, self.n_hidden, bias=False)
@@ -469,7 +487,7 @@ class CardModel(torch.nn.Module):
         for block in self.blocks:
             x = block(x, encoding_h=encoding_h)
         x = self.last_rnn_block(x)
-        x = self.transition(x)
+        x = torch.utils.checkpoint.checkpoint(self.transition, x)
         return self.forgetting_curve_nn(x, label_elapsed_days_real_bl, encoding_h=encoding_h)
 
 class FirstReviewModel(torch.nn.Module):
