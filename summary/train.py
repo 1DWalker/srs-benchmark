@@ -268,6 +268,16 @@ def main(config):
         if param.requires_grad and "global" in name and "weight_linear" not in name and "value_linear" not in name:
             encoder_model_global_params += param.numel()
     encoder_model_card_parallel_params = encoder_model_params - encoder_model_global_params
+    decoder_model_global_params = 0
+    for name, param in model.card_model.named_parameters():
+        if param.requires_grad and "global" in name and "weight_linear" not in name and "value_linear" not in name:
+            decoder_model_global_params += param.numel()
+    decoder_model_params = get_number_of_trainable_parameters(model.card_model)
+    decoder_model_card_parallel_params = decoder_model_params - decoder_model_global_params
+    forgetting_curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
+    for name, param in model.card_model.forgetting_curve_nn.named_parameters():
+        if param.requires_grad and "global" in name and "weight_linear" not in name and "value_linear" not in name:
+            forgetting_curve_params -= param.numel()
     # card_model_params = get_number_of_trainable_parameters(model.card_model)
     # curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
     # print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}, total: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
@@ -329,7 +339,8 @@ def main(config):
     compressed_db_env = lmdb.open(config.SUMMARY_DB_PATH, readonly=True, lock=False)
     label_filter_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
 
-    print(f"encoder params total: {encoder_model_params}, parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}")
+    print(f"encoder params total: {encoder_model_params}, enc parallel: {encoder_model_card_parallel_params}, enc global: {encoder_model_global_params}")
+    print(f"decoder params total: {decoder_model_params}, dec parallel: {decoder_model_card_parallel_params}, dec global: {decoder_model_global_params}, forgetting curve: {forgetting_curve_params}")
     if config.USE_WANDB:
         wandb_config = {
             "peak_lr": config.PEAK_LR,
@@ -344,8 +355,10 @@ def main(config):
             "params_encoder_total": encoder_model_params,
             "params_encoder_parallel": encoder_model_card_parallel_params,
             "params_encoder_global": encoder_model_global_params,
-            # "params_card_model": card_model_params,
-            # "params_forgetting_curve": curve_params,
+            "params_decoder_total": decoder_model_params,
+            "params_decoder_parallel": decoder_model_card_parallel_params,
+            "params_decoder_global": decoder_model_global_params,
+            "params_forgetting_curve": forgetting_curve_params,
         }
         wandb_kwargs = dict(
             project=config.WANDB_PROJECT_NAME,
