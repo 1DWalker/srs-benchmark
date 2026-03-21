@@ -1,5 +1,6 @@
 from collections import defaultdict
 import hashlib
+import math
 from pathlib import Path
 from time import time
 from typing import Dict, NamedTuple
@@ -19,7 +20,7 @@ from utils import compact_lmdb, load_tensor, parse_toml
 WEIGHT_DECAY = 1e-2
 ADAMW_BETAS = (0.90, 0.999)
 ADAMW_EPS = 1e-8
-CLIP = 2
+CLIP = 8
 
 def log_model(log, model, device):
     with torch.no_grad():
@@ -175,7 +176,7 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, model
                 first_stats_accum = None
                 for i in range(encoding_s.size(0)):
                     encoding = encoding_s[i]
-                    first_stats = decoder_ops.first_decode(batches, model.first_review_model, encoding, splits[i], min(T, splits[i + 1] - 1))
+                    first_stats = decoder_ops.first_decode(batches, model.first_review_model, encoding, splits[i], min(T, splits[i + 1] - 1), T)
                     if first_stats_accum is None:
                         first_stats_accum = first_stats
                     else:
@@ -234,6 +235,47 @@ def generate_subsplits(l, r, T):
     floored_linspace = np.floor(linspace).astype(int)
     return np.random.choice(floored_linspace)
 
+def get_weights(n):
+    m = random.randint(100, int(math.floor(n * 5 / 6)))
+    acc = np.zeros(n)
+    for i in range(1, 6):
+        k = i / 6
+        low_r = math.ceil(m / k)
+        high_r = max(low_r, math.ceil((m + 1) / k) - 1)
+        assert math.floor((low_r - 1) * k) < m
+        assert math.floor(low_r * k) == m
+        assert math.floor(high_r * k) == m
+        assert math.floor((high_r + 1) * k) >= m + 1, f"{(high_r, k, m)}"
+        if low_r <= n:
+            high_r = min(high_r, n)
+            acc[m - 1] += high_r - low_r + 1
+            acc[low_r:(min(n, high_r + 1))] -= 1
+    
+    res = np.cumsum(acc)
+    res /= n
+    # print(m, n, m / n, res.sum())
+    return m - 1, res
+
+# def get_weights_monte(m, n):
+#     import math
+#     N = 1000000
+#     accum = n * [0]
+#     z = 0
+#     for _ in range(N):
+#         r = random.randint(1, n)
+#         tm = math.floor(random.randint(1, 5) * r / 6)
+#         if m == tm:
+#             for i in range(tm - 1, r):
+#                 accum[i] += 1
+#             z += 1
+        
+#     if z > 0:
+#         for i in range(len(accum)):
+#             accum[i] /= z
+    
+#     return np.array(accum)
+
+
 def get_superiority(lagging_dict, now_dict):
     n = 0
     w = 0
@@ -246,6 +288,9 @@ def get_superiority(lagging_dict, now_dict):
 def cosine_down(step, total_steps, base=1e-3):
     return base + (1 - base) * (1 + np.cos(0.5 * np.pi * (1 + step / total_steps)))
 
+def sqrt_down(step, total_steps):
+    return 1 - math.sqrt(step / total_steps)
+
 def make_iter_seed(base_seed: int, step: int) -> int:
     combined = f"{base_seed}_{step}".encode()
     digest = hashlib.sha256(combined).digest()
@@ -256,7 +301,32 @@ def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
+
 def main(config):
+    # n = 100
+    # for _ in range(10):
+    #     m = random.randint(1, n)
+    #     # m = 80
+    #     x = get_weights(m, n)
+    #     y = get_weights_monte(m, n)
+    #     print("M:", m)
+    #     print(x)
+    #     print(y)
+    #     x = x / x.max()
+    #     y = y / y.max()
+    #     print("----------------------------------------------------------------")
+    #     print(x)
+    #     print(y)
+    #     diff = np.abs(x - y)
+    #     print(diff)
+    #     if int(np.sum(x) > 0) + int(np.sum(y) > 0) == 1:
+    #         print("inequal")
+    #         exit()
+    #     if diff.max() > 1e-2:
+    #         print("diff")
+    #         exit()
+    # exit()
+
     seed = config.SEED + (len(config.TRAIN_MODE) if config.TRAIN_MODE != "WSD" else 0)
     set_seed(seed)
     model = Model().to(config.DEVICE)
@@ -419,16 +489,20 @@ def main(config):
                         print(f"Skipping: {user}, size: {T}")
                     else:
                         try:
-                            train_l, test_r = get_split(T)
-                            test_l = generate_subsplits(train_l, test_r, T)
+                            # train_l, test_r = get_split(T)
+                            train_l = 0
+                            test_l, weights = get_weights(T)
+                            weights = torch.tensor(weights, device=config.DEVICE)
+                            # test_l = generate_subsplits(train_l, test_r, T)
+                            test_r = T - 1
                             train_r = test_l - 1
                             encoding = decoder_ops.encode_single(encode_batches, model.encoder_model, train_l + 1, train_r + 1, log=log)
                             # fsrs_params = model.card_model.encoding_to_fsrs(encoding)
                             fsrs_params = None
 
-                            review_stats: decoder_ops.DecodeResult = decoder_ops.decode(decode_batches, model.card_model, encoding, min_review_th=test_l + 1, max_review_th=test_r + 1)
+                            review_stats: decoder_ops.DecodeResult = decoder_ops.decode(decode_batches, model.card_model, encoding, weights)
                             first_review_logits = decoder_ops.extract_first_review_dist_logits(model.first_review_model, encoding)
-                            first_stats: decoder_ops.DecodeResult = decoder_ops.first_logits(decode_batches, first_review_logits, min_review_th=test_l + 1, max_review_th=test_r + 1)
+                            first_stats: decoder_ops.DecodeResult = decoder_ops.first_logits(decode_batches, first_review_logits, weights)
                             review_loss_ce_avg = review_stats.ce_loss_sum / (1e-7 + review_stats.loss_n)
                             review_loss_bce_avg = review_stats.bce_loss_sum / (1e-7 + review_stats.loss_n)
                             review_n = review_stats.loss_n
@@ -436,9 +510,9 @@ def main(config):
                             first_loss_bce_avg = first_stats.bce_loss_sum / (1e-7 + first_stats.loss_n)
                             first_n = first_stats.loss_n
 
-                            ce_avg = (review_stats.ce_loss_sum + first_stats.ce_loss_sum) / (1e-7 + review_n + first_n)
-                            bce_avg = (review_stats.bce_loss_sum + first_stats.bce_loss_sum) / (1e-7 + review_n + first_n)
-                            tot_loss = bce_avg + 1e-1 * ce_avg
+                            ce_sum = review_stats.ce_loss_sum + first_stats.ce_loss_sum
+                            bce_sum = review_stats.bce_loss_sum + first_stats.bce_loss_sum
+                            tot_loss = bce_sum + 1e-1 * ce_sum
 
                             if user in train_review_loss_dict:
                                 lagging_train_review_loss_dict[user] = train_review_loss_dict[user]
@@ -449,7 +523,7 @@ def main(config):
                             train_first_loss_dict[user] = first_loss_ce_avg.item()
                             train_first_loss_bce_dict[user] = first_loss_bce_avg.item()
 
-                            if review_n < 100:
+                            if False and T * review_n < 100:
                                 print("Skipping: label sizes are too small:", review_n.item())
                             elif review_loss_ce_avg.requires_grad:
                                 if step % 10 == 0 and step - config.START_STEP >= len(train_users):
@@ -473,12 +547,12 @@ def main(config):
                                 if step % 10 == 0:
                                     print()
                                     print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
-                                    print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n}")
-                                    print(f"First -- loss: ce: {first_loss_ce_avg:.3f}, bce: {first_loss_bce_avg:.3f}, n: {first_n}")
+                                    print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n:.2f}")
+                                    print(f"First -- loss: ce: {first_loss_ce_avg:.3f}, bce: {first_loss_bce_avg:.3f}, n: {first_n:.2f}")
                                     if fsrs_params is not None:
                                         print(f"encoding: {list(map(lambda x: round(float(x), 4), fsrs_params.tolist()))}")
                                     print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits, dim=-1).cpu().tolist()]}")
-                                    print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
+                                    print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n:.2f}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                     print(f"Elapsed: {time() - time_start:.3f}")
                                     time_start = time()
                                 optimizer.step()

@@ -150,9 +150,7 @@ def combine_decode_results(a: DecodeResult, b: DecodeResult) -> DecodeResult:
         loss_n = a.loss_n + b.loss_n,
     )
 
-def first_logits(batches, first_review_logits_4, min_review_th, max_review_th):
-    assert min_review_th > 0
-    assert max_review_th < 1e7
+def first_logits(batches, first_review_logits_4, weights):
     first_ce_tot = 0
     first_bce_tot = 0
     first_n = 0
@@ -163,19 +161,19 @@ def first_logits(batches, first_review_logits_4, min_review_th, max_review_th):
         first_rating_b = feature_rating_bl[:, 0]
         B = first_rating_b.size(0)
         first_feature_review_th_b = feature_review_th_bl[:, 0]
-        first_rating_mask_b = (min_review_th <= first_feature_review_th_b) * (first_feature_review_th_b <= max_review_th)
-        first_n += first_rating_mask_b.sum()
+        first_rating_weight_b = weights[(first_feature_review_th_b - 1).clamp(0, weights.size(0) - 1)]
+        first_n += first_rating_weight_b.sum()
         first_ce_loss = F.cross_entropy(first_review_logits_4.unsqueeze(0).expand(B, 4), first_rating_b.long() - 1, reduction='none')
-        assert first_ce_loss.shape == first_rating_mask_b.shape
-        first_ce_tot += (first_ce_loss * first_rating_mask_b).sum()
+        assert first_ce_loss.shape == first_rating_weight_b.shape
+        first_ce_tot += (first_ce_loss * first_rating_weight_b).sum()
 
         first_fail_logit = first_review_logits_4[0]
         first_pass_logit = torch.logsumexp(first_review_logits_4[1:], dim=-1)
         first_logits_binary = first_pass_logit - first_fail_logit
         first_target_bce = (first_rating_b > 1).float()
         first_bce_loss = F.binary_cross_entropy_with_logits(first_logits_binary.expand(B), first_target_bce, reduction='none')
-        assert first_bce_loss.shape == first_rating_mask_b.shape
-        first_bce_tot += (first_bce_loss * first_rating_mask_b).sum()
+        assert first_bce_loss.shape == first_rating_weight_b.shape
+        first_bce_tot += (first_bce_loss * first_rating_weight_b).sum()
     
     return DecodeResult(
         ce_loss_sum=first_ce_tot,
@@ -189,11 +187,13 @@ def extract_first_review_dist_logits(first_review_model, encoding_h):
 def extract_first_review_dist(first_review_model, encoding_h):
     return F.softmax(first_review_model(encoding_h.unsqueeze(0)).squeeze(0), dim=-1)
 
-def first_decode(batches, first_review_model, encoding_h, min_review_th, max_review_th):
+def first_decode(batches, first_review_model, encoding_h, min_review_th, max_review_th, T):
     first_review_logits_4 = first_review_model(encoding_h.unsqueeze(0)).squeeze(0)
-    return first_logits(batches, first_review_logits_4, min_review_th, max_review_th)
+    weights = torch.zeros(T, device=encoding_h.device)
+    weights[(min_review_th - 1):max_review_th] = 1
+    return first_logits(batches, first_review_logits_4, weights)
 
-def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
+def decode(batches, decoder_model, encoding_h, weights):
     review_ce_tot = 0
     review_bce_tot = 0
     review_n = 0
@@ -208,13 +208,13 @@ def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
             label_elapsed_days_real_bl=label_elapsed_days_real_bl,
         )
         assert not logits_bl4.isnan().any()
-        label_mask_bl = has_label_bl * (min_review_th <= label_review_th_bl) * (label_review_th_bl <= max_review_th)
+        label_weight_bl = has_label_bl * weights[(label_review_th_bl - 1).clamp(0, weights.size(0) - 1)]
 
         # CE loss
         loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
         loss_bl = loss_fn(logits_bl4.transpose(1, 2), (label_rating_bl - 1).clamp(0).long())
-        review_ce_tot += (loss_bl * label_mask_bl).sum()
-        review_n += label_mask_bl.sum()
+        review_ce_tot += (loss_bl * label_weight_bl).sum()
+        review_n += label_weight_bl.sum()
 
         # BCE loss
         label_pass_bl = (label_rating_bl > 1).float()
@@ -224,7 +224,7 @@ def decode(batches, decoder_model, encoding_h, min_review_th, max_review_th):
         )
         loss_binary_fn = torch.nn.BCEWithLogitsLoss(reduction="none")
         loss_binary_bl = loss_binary_fn(logit_pass_bl, label_pass_bl)
-        review_bce_tot += (loss_binary_bl * label_mask_bl).sum()
+        review_bce_tot += (loss_binary_bl * label_weight_bl).sum()
 
     return DecodeResult(
         ce_loss_sum=review_ce_tot,

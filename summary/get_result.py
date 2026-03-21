@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import queue
 import lmdb
-from summary import decoder_ops
+from summary import decoder_ops, fsrs_encoder_model
 from summary.model import Model
 import torch
 from tqdm import tqdm
@@ -79,7 +79,7 @@ def worker_job(config, job_queue, writer_queue, progress_queue):
                         first_stats_accum = None
                         for i in range(encoding_s.size(0)):
                             encoding = encoding_s[i]
-                            first_stats = decoder_ops.first_decode(batches, model.first_review_model, encoding, splits[i], min(T, splits[i + 1] - 1))
+                            first_stats = decoder_ops.first_decode(batches, model.first_review_model, encoding, splits[i], min(T, splits[i + 1] - 1), T)
                             if first_stats_accum is None:
                                 first_stats_accum = first_stats
                             else:

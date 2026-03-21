@@ -5,7 +5,7 @@ import numpy as np
 BASE_DROPOUT = 0
 FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
 FIRST_REVIEW_DROPOUT = 0
-GLOBAL_ENCODER_DROPOUT = 0
+GLOBAL_ENCODER_DROPOUT = 0.5
 GLOBAL_ENCODER_CHANNEL_DROPOUT = 0
 LAST_GLOBAL_NN_DROPOUT = 0
 
@@ -16,20 +16,20 @@ LAST_GLOBAL_NN_DROPOUT = 0
 # ENCODER_FULL_BLOCKS = 2
 # N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * (ENCODER_FULL_BLOCKS + 1)
 
-ENCODER_N_HIDDEN = 32
-DECODER_N_HIDDEN = 32
+ENCODER_N_HIDDEN = 48
+DECODER_N_HIDDEN = 48
 GLOBAL_FACTOR = 1
-FORGETTING_CURVE_N_LAYERS = 4
-ENCODER_FULL_BLOCKS = 6
-DECODER_N_BLOCKS = 6
+FORGETTING_CURVE_N_LAYERS = 3
+ENCODER_FULL_BLOCKS = 3
+DECODER_N_BLOCKS = 2
 FF_PER_BLOCK = 1
 N_ENCODING = int(3 * (FF_PER_BLOCK * ENCODER_FULL_BLOCKS + 1) * ENCODER_N_HIDDEN * GLOBAL_FACTOR)
 
-INTERMEDIATE_GLOBAL_LAYERS = 4
-LAST_GLOBAL_LAYERS = 20
+INTERMEDIATE_GLOBAL_LAYERS = 3
+LAST_GLOBAL_LAYERS = 8
 
 EXCLUDE_INTERMEDIATE_DROPOUT = 1
-EXCLUDE_LAST_DROPOUT = 4  # number of suffix layers to exclude from dropout
+EXCLUDE_LAST_DROPOUT = 1  # number of suffix layers to exclude from dropout
 
 def transform_elapsed_days_real(x):
     return ((x + 1e-5).log() + 1.3) / 5
@@ -94,7 +94,7 @@ class RNNBlock(torch.nn.Module):
 
     def forward(self, x):
         if self.use_checkpoint and self.training:
-            return torch.utils.checkpoint.checkpoint(self._core, x)
+            return torch.utils.checkpoint.checkpoint(self._core, x, use_reentrant=False)
         else:
             return self._core(x)
 
@@ -127,7 +127,7 @@ class FFBlock(torch.nn.Module):
         assert not x_in.isnan().any()
 
         if self.use_checkpoint and self.training:
-            x = torch.utils.checkpoint.checkpoint(self._core, x_in)
+            x = torch.utils.checkpoint.checkpoint(self._core, x_in, use_reentrant=False)
         else:
             x = self._core(x_in)
 
@@ -219,6 +219,7 @@ class FFBlockWithEncoder(torch.nn.Module):
             x,
             enc_gate,
             enc_lin,
+            use_reentrant=False,
         )
         # x = self._core(x, enc_gate, enc_lin)
 
@@ -288,7 +289,7 @@ class GlobalEncoder(torch.nn.Module):
                 return 0.0
 
         self.core = nn.Sequential(
-            *[FFBlock(self.n_hidden, use_timeshift=False, n_factor=2 / 3, dropout=GLOBAL_ENCODER_DROPOUT * dropout_multi(i), dropout_channel=GLOBAL_ENCODER_CHANNEL_DROPOUT * dropout_multi(i)) for i in range(num_blocks)],
+            *[FFBlock(self.n_hidden, use_timeshift=False, n_factor=1, dropout=GLOBAL_ENCODER_DROPOUT * dropout_multi(i), dropout_channel=GLOBAL_ENCODER_CHANNEL_DROPOUT * dropout_multi(i)) for i in range(num_blocks)],
         )
         self.out_norm = nn.LayerNorm(self.n_hidden)
 
@@ -394,7 +395,7 @@ class EncoderModel(torch.nn.Module):
             ), 
             dim=-1,
         )
-        return self.encode_block(x)
+        return torch.utils.checkpoint.checkpoint(self.encode_block, x, use_reentrant=False)
 
     def run_intermediate_lstm(self, i, x_list):
         new_x_list = []
@@ -447,7 +448,7 @@ class ForgettingCurveNN(torch.nn.Module):
         for block in self.blocks:
             x = block(x, encoding_h=encoding_h)
         x = self.norm(x)
-        x = self.forgetting_curve_last_linear(x)
+        x = torch.utils.checkpoint.checkpoint(self.forgetting_curve_last_linear, x, use_reentrant=False)
         return x
 
 class CardModel(torch.nn.Module):
@@ -480,11 +481,11 @@ class CardModel(torch.nn.Module):
             ),
             dim=-1,
         )
-        x = self.feature_linear(x) + self.global_encoder_linear(encoding_h)
+        x = torch.utils.checkpoint.checkpoint(self.feature_linear, x, use_reentrant=False) + self.global_encoder_linear(encoding_h)
         for block in self.blocks:
             x = block(x, encoding_h=encoding_h)
         x = self.last_rnn_block(x)
-        x = torch.utils.checkpoint.checkpoint(self.transition, x)
+        x = torch.utils.checkpoint.checkpoint(self.transition, x, use_reentrant=False)
         return self.forgetting_curve_nn(x, label_elapsed_days_real_bl, encoding_h=encoding_h)
 
 class FirstReviewModel(torch.nn.Module):
