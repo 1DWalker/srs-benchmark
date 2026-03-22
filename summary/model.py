@@ -5,7 +5,7 @@ import numpy as np
 BASE_DROPOUT = 0
 FORGETTING_CURVE_DROPOUT = 1 - (1 - BASE_DROPOUT) ** 2
 FIRST_REVIEW_DROPOUT = 0
-GLOBAL_ENCODER_DROPOUT = 0.5
+GLOBAL_ENCODER_DROPOUT = 0.1
 GLOBAL_ENCODER_CHANNEL_DROPOUT = 0
 LAST_GLOBAL_NN_DROPOUT = 0
 
@@ -16,20 +16,20 @@ LAST_GLOBAL_NN_DROPOUT = 0
 # ENCODER_FULL_BLOCKS = 2
 # N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * (ENCODER_FULL_BLOCKS + 1)
 
-ENCODER_N_HIDDEN = 48
+ENCODER_N_HIDDEN = 32
 DECODER_N_HIDDEN = 48
 GLOBAL_FACTOR = 1
 FORGETTING_CURVE_N_LAYERS = 3
 ENCODER_FULL_BLOCKS = 3
 DECODER_N_BLOCKS = 2
 FF_PER_BLOCK = 1
-N_ENCODING = int(3 * (FF_PER_BLOCK * ENCODER_FULL_BLOCKS + 1) * ENCODER_N_HIDDEN * GLOBAL_FACTOR)
+N_ENCODING = int(3 * ENCODER_N_HIDDEN * GLOBAL_FACTOR)
 
 INTERMEDIATE_GLOBAL_LAYERS = 3
-LAST_GLOBAL_LAYERS = 8
+LAST_GLOBAL_LAYERS = 10
 
 EXCLUDE_INTERMEDIATE_DROPOUT = 1
-EXCLUDE_LAST_DROPOUT = 1  # number of suffix layers to exclude from dropout
+EXCLUDE_LAST_DROPOUT = 0  # number of suffix layers to exclude from dropout
 
 def transform_elapsed_days_real(x):
     return ((x + 1e-5).log() + 1.3) / 5
@@ -360,18 +360,15 @@ class EncoderModel(torch.nn.Module):
         )
         self.full_blocks = ENCODER_FULL_BLOCKS # 1 full block consists of LSTM - GLOBAL_FF - GLOBAL_FF 
         self.FF_PER_BLOCK = FF_PER_BLOCK
-        self.intermediate_global_encoders = nn.ModuleList(
-            [GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=int(3 * GLOBAL_FACTOR * i * self.n_hidden), num_blocks=INTERMEDIATE_GLOBAL_LAYERS, exclude_dropout=EXCLUDE_INTERMEDIATE_DROPOUT) for i in range(self.FF_PER_BLOCK * self.full_blocks)]
-        )
         self.intermediate_ffs = nn.ModuleList([
-            FFBlockWithEncoder(self.n_hidden, n_encoding=int(3 * GLOBAL_FACTOR * (i + 1) * self.n_hidden), use_timeshift=True, dropout=self.dropout)
+            FFBlock(self.n_hidden, use_timeshift=True, dropout=self.dropout)
             for i in range(self.FF_PER_BLOCK * self.full_blocks)
         ])
         self.intermediate_lstm = nn.ModuleList([
             RNNBlock(n_hidden=self.n_hidden, dropout=self.dropout)
             for i in range(self.full_blocks)
         ])
-        self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=int(3 * GLOBAL_FACTOR * self.FF_PER_BLOCK * self.full_blocks * self.n_hidden), num_blocks=LAST_GLOBAL_LAYERS, exclude_dropout=EXCLUDE_LAST_DROPOUT)
+        self.last_global_encoder = GlobalEncoder(n_in=self.n_hidden, n_out=self.n_hidden, n_hidden_in=0, num_blocks=LAST_GLOBAL_LAYERS, exclude_dropout=EXCLUDE_LAST_DROPOUT)
 
 
     def forward(
@@ -405,11 +402,9 @@ class EncoderModel(torch.nn.Module):
 
     def run_ff(self, i, j, global_hidden, x_list, mask_list):
         new_x_list = []
-        global_hidden = self.intermediate_global_encoders[self.FF_PER_BLOCK * i + j](x_list, mask_list, h_in=global_hidden)
         intermediate_ff = self.intermediate_ffs[self.FF_PER_BLOCK * i + j]
-        intermediate_ff.set_encoding(encoding_h=global_hidden)
         for x in x_list:
-            new_x_list.append(intermediate_ff(x, encoding_h=None))
+            new_x_list.append(intermediate_ff(x))
         return global_hidden, new_x_list
 
     def run_core(self, x_list, mask_list, log=None):
@@ -436,7 +431,7 @@ class ForgettingCurveNN(torch.nn.Module):
         self.n_hidden = n_input        
         self.n_layers = FORGETTING_CURVE_N_LAYERS
         self.blocks = nn.ModuleList(
-            [FFBlockWithEncoder(self.n_hidden, n_encoding=n_encoding, use_timeshift=False, dropout=FORGETTING_CURVE_DROPOUT) for _ in range(self.n_layers)],
+            [FFBlock(self.n_hidden, use_timeshift=False, dropout=FORGETTING_CURVE_DROPOUT) for _ in range(self.n_layers)],
         )
         self.norm = nn.LayerNorm(self.n_hidden)
         self.forgetting_curve_last_linear = nn.Linear(self.n_hidden, 4)
@@ -446,7 +441,7 @@ class ForgettingCurveNN(torch.nn.Module):
     def forward(self, x, label_elapsed_days_real_bl, encoding_h):
         x = torch.cat([x, transform_elapsed_days_real(label_elapsed_days_real_bl).unsqueeze(-1)], dim=-1)
         for block in self.blocks:
-            x = block(x, encoding_h=encoding_h)
+            x = block(x)
         x = self.norm(x)
         x = torch.utils.checkpoint.checkpoint(self.forgetting_curve_last_linear, x, use_reentrant=False)
         return x
