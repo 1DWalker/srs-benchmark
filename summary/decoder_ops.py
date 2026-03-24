@@ -99,7 +99,7 @@ def get_data(txn, user_id, device, max_L=10**9, merge=False):
 def extract_num_reviews(batches):
     return sum(map(lambda batch: (batch[0] < int(1e8)).sum().item(), batches))
 
-def encode_single(batches, encoder_model: EncoderModel, min_review_th, max_review_th, log=None):
+def encode_single(batches, encoder_model: EncoderModel, min_review_th, max_review_th, compress_encoding=False, log=None):
     assert min_review_th > 0
     assert max_review_th < 1e7
     device = batches[0][0].device
@@ -133,10 +133,10 @@ def encode_single(batches, encoder_model: EncoderModel, min_review_th, max_revie
         x_list.append(x_sbl)
         mask_list.append(mask_bl)
 
-    return encoder_model.run_core(x_list, mask_list, log=log)
+    return encoder_model.run_core(x_list, mask_list, compress_encoding=compress_encoding, log=log)
 
-def encode(batches, encoder_model, min_review_th_s, max_review_th_s, log=None):
-    return torch.stack([encode_single(batches, encoder_model, min_review_th_s[i].item(), max_review_th_s[i].item(), log=log) for i in range(min_review_th_s.size(0))])
+def encode(batches, encoder_model, min_review_th_s, max_review_th_s, compress_encoding=False, log=None):
+    return torch.stack([encode_single(batches, encoder_model, min_review_th_s[i].item(), max_review_th_s[i].item(), compress_encoding=compress_encoding, log=log) for i in range(min_review_th_s.size(0))])
 
 class DecodeResult(NamedTuple):
     ce_loss_sum: torch.Tensor
@@ -245,7 +245,7 @@ def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_revie
     cond_loss_tot = 0
     cond_n = 0
 
-    H, P = encoding_hp.shape
+    H = encoding_hp.size(0)
     min_review_th_list = []
     max_review_th_list = []
     for split_i in range(len(splits_list) - 1):

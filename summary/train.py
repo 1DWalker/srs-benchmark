@@ -17,7 +17,7 @@ from summary import decoder_ops, fsrs_encoder_model
 from summary.model import Model
 from utils import compact_lmdb, load_tensor, parse_toml
 
-WEIGHT_DECAY = 1e-2
+WEIGHT_DECAY = 1e-3
 ADAMW_BETAS = (0.90, 0.999)
 ADAMW_EPS = 1e-8
 CLIP = 8
@@ -153,6 +153,8 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, model
                 model.eval()
             else:
                 model.train()
+
+            compress_encoding = model_mode == "train_compress"
             batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
             T = decoder_ops.extract_num_reviews(batches)
             splits = load_tensor(label_filter_txn, f"{user}_split", device=device).tolist()
@@ -166,7 +168,7 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, model
 
                 max_review_th_s = torch.tensor(max_review_th, device=device)
                 min_review_th_s = torch.ones_like(max_review_th_s)
-                encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s)
+                encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s, compress_encoding=compress_encoding)
                 loss, loss_n, cond_loss, cond_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_s, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
                 tot_loss += loss * loss_n
                 tot_loss_n += loss_n
@@ -497,6 +499,8 @@ def main(config):
                             test_r = T - 1
                             train_r = test_l - 1
                             encoding = decoder_ops.encode_single(encode_batches, model.encoder_model, train_l + 1, train_r + 1, log=log)
+                            if len(encoding.shape) == 2 and random.random() < 0.05:
+                                encoding = encoding.mean(dim=0)
                             # fsrs_params = model.card_model.encoding_to_fsrs(encoding)
                             fsrs_params = None
 
@@ -544,7 +548,7 @@ def main(config):
                                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                                 log["grad_norm"] = grad_norm
 
-                                if step % 10 == 0:
+                                if step % 50 == 0:
                                     print()
                                     print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
                                     print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n:.2f}")
@@ -586,14 +590,45 @@ def main(config):
 
                     if validate_iter:
                         validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="eval", log=log)
-                        log["validation/validation_loss"] = validate_result.loss_weighted_review
-                        log["validation/validation_loss_user"] = validate_result.loss_weighted_user
-                        log["validation/cond_loss"] = validate_result.cond_loss
-                        log["validation/first_bce"] = validate_result.first_bce
-                        log["validation/first_ce"] = validate_result.first_ce
+                        log["validation_eval_mode/validation_loss"] = validate_result.loss_weighted_review
+                        log["validation_eval_mode/validation_loss_user"] = validate_result.loss_weighted_user
                         validate_result_train_mode: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="train", log=log)
                         log["validation_train_mode/validation_loss"] = validate_result_train_mode.loss_weighted_review
                         log["validation_train_mode/validation_loss_user"] = validate_result_train_mode.loss_weighted_user
+                        validate_result_train_mode_compress: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="train_compress", log=log)
+                        log["validation_train_mode_compress/validation_loss_compress"] = validate_result_train_mode_compress.loss_weighted_review
+                        log["validation_train_mode_compress/validation_loss_user_compress"] = validate_result_train_mode_compress.loss_weighted_user
+                        best_validate_loss_weighted_review = min(
+                            validate_result.loss_weighted_review,
+                            validate_result_train_mode_compress.loss_weighted_review,
+                            validate_result_train_mode.loss_weighted_review,
+                        )
+                        best_validate_loss_weighted_user = min(
+                            validate_result.loss_weighted_user,
+                            validate_result_train_mode_compress.loss_weighted_user,
+                            validate_result_train_mode.loss_weighted_user,
+                        )
+                        best_cond_loss = min(
+                            validate_result.cond_loss,
+                            validate_result_train_mode_compress.cond_loss,
+                            validate_result_train_mode.cond_loss,
+                        )
+                        best_first_bce = min(
+                            validate_result.first_bce,
+                            validate_result_train_mode_compress.first_bce,
+                            validate_result_train_mode.first_bce,
+                        )
+                        best_first_ce = min(
+                            validate_result.first_ce,
+                            validate_result_train_mode_compress.first_ce,
+                            validate_result_train_mode.first_ce,
+                        )
+
+                        log["validation/validation_loss"] = best_validate_loss_weighted_review
+                        log["validation/validation_loss_user"] = best_validate_loss_weighted_user
+                        log["validation/cond_loss"] = best_cond_loss
+                        log["validation/first_bce"] = best_first_bce
+                        log["validation/first_ce"] = best_first_ce
                         validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config, model_mode="eval", log=log)
                         log["validation_overfit/validation_overfit_loss"] = validate_overfit_result.loss_weighted_review
                         log["validation_overfit/validation_overfit_loss_user"] = validate_overfit_result.loss_weighted_user
