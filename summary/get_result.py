@@ -73,7 +73,7 @@ def worker_job(config, job_queue, writer_queue, progress_queue):
 
                         max_review_th_s = torch.tensor(max_review_th, device=device)
                         min_review_th_s = torch.ones_like(max_review_th_s)
-                        encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s)
+                        encoding_s = decoder_ops.encode(batches, model.encoder_model, min_review_th_s=min_review_th_s, max_review_th_s=max_review_th_s, compress_encoding=True)
                         loss, loss_n, cond_loss, cond_n, rmse_raw, rmse_bins, auc = decoder_ops.decode_full(batches, model.card_model, encoding_s, splits, equalize_review_ths, rmse_bins, device=device, equalize_test_reviews=True)
 
                         first_stats_accum = None
