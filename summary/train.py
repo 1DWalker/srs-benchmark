@@ -287,10 +287,8 @@ def get_superiority(lagging_dict, now_dict):
             w += 1
     return w / max(1, n)
 
-def cosine_down(step, total_steps, base=1e-3):
-    return base + (1 - base) * (1 + np.cos(0.5 * np.pi * (1 + step / total_steps)))
-
-def sqrt_down(step, total_steps):
+def decay_down(step, total_steps, base=1e-3):
+    # return base + (1 - base) * (1 + np.cos(0.5 * np.pi * (1 + step / total_steps)))
     return 1 - math.sqrt(step / total_steps)
 
 def make_iter_seed(base_seed: int, step: int) -> int:
@@ -369,7 +367,7 @@ def main(config):
         )
         main_scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0)
         decay_scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimizer, lr_lambda=lambda t: cosine_down(t, decay_steps)
+            optimizer, lr_lambda=lambda t: decay_down(t, decay_steps)
         )
         scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer,
@@ -378,7 +376,7 @@ def main(config):
         )
     elif config.TRAIN_MODE == "D":
         scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimizer, lr_lambda=lambda t: cosine_down(t, config.TOTAL_STEPS)
+            optimizer, lr_lambda=lambda t: decay_down(t, config.TOTAL_STEPS)
         )
     else:
         raise ValueError(f"Invalid train mode: {config.TRAIN_MODE}")
@@ -548,7 +546,7 @@ def main(config):
                                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                                 log["grad_norm"] = grad_norm
 
-                                if step % 50 == 0:
+                                if step % 10 == 0:
                                     print()
                                     print(f"Indices:", train_l, test_l, test_r, train_r - train_l + 1, T, "User:", user)
                                     print(f"Review -- loss: ce: {review_loss_ce_avg:.3f}, bce: {review_loss_bce_avg:.3f}, n: {review_n:.2f}")
