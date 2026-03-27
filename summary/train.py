@@ -303,33 +303,9 @@ def set_seed(seed):
 
 
 def main(config):
-    # n = 100
-    # for _ in range(10):
-    #     m = random.randint(1, n)
-    #     # m = 80
-    #     x = get_weights(m, n)
-    #     y = get_weights_monte(m, n)
-    #     print("M:", m)
-    #     print(x)
-    #     print(y)
-    #     x = x / x.max()
-    #     y = y / y.max()
-    #     print("----------------------------------------------------------------")
-    #     print(x)
-    #     print(y)
-    #     diff = np.abs(x - y)
-    #     print(diff)
-    #     if int(np.sum(x) > 0) + int(np.sum(y) > 0) == 1:
-    #         print("inequal")
-    #         exit()
-    #     if diff.max() > 1e-2:
-    #         print("diff")
-    #         exit()
-    # exit()
-
     seed = config.SEED + (len(config.TRAIN_MODE) if config.TRAIN_MODE != "WSD" else 0)
     set_seed(seed)
-    model = Model().to(config.DEVICE)
+    model = fsrs_encoder_model.Model().to(config.DEVICE)
     optimizer, peak_lr_first_param = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
     # encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder)
@@ -344,13 +320,10 @@ def main(config):
             decoder_model_global_params += param.numel()
     decoder_model_params = get_number_of_trainable_parameters(model.card_model)
     decoder_model_card_parallel_params = decoder_model_params - decoder_model_global_params
-    forgetting_curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
-    for name, param in model.card_model.forgetting_curve_nn.named_parameters():
-        if param.requires_grad and "global" in name and "weight_linear" not in name and "value_linear" not in name:
-            forgetting_curve_params -= param.numel()
-    # card_model_params = get_number_of_trainable_parameters(model.card_model)
-    # curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
-    # print(f"Number of trainable parameters: {encoder_model_params + card_model_params}, Encoder: parallel: {encoder_model_card_parallel_params}, global: {encoder_model_global_params}, total: {encoder_model_params}, Card: {card_model_params}, Forgetting curve: {curve_params}")
+    # forgetting_curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
+    # for name, param in model.card_model.forgetting_curve_nn.named_parameters():
+    #     if param.requires_grad and "global" in name and "weight_linear" not in name and "value_linear" not in name:
+    #         forgetting_curve_params -= param.numel()
 
     if config.TRAIN_MODE == "WSD":
         start_factor = max(1e-8, config.WARMUP_START_LR / config.PEAK_LR)
@@ -385,7 +358,22 @@ def main(config):
         model_path = f"{config.LOAD_MODEL_FOLDER}/{config.LOAD_MODEL_NAME}.pth"
         optim_path = f"{config.LOAD_MODEL_FOLDER}/{config.LOAD_MODEL_NAME}_optim.pth"
         print("Loading model:", model_path)
-        model.load_state_dict(torch.load(model_path, weights_only=True))
+        loaded_state = torch.load(model_path, weights_only=True)
+        model_state = model.state_dict()
+        for name, param in loaded_state.items():
+            if name in model_state:
+                if model.is_copy_exclude_params(name):
+                    print("exclude:", name)
+                else:
+                    print("copy:", name)
+                pass
+            else:
+                # print("missing:", name)
+                pass
+            pass
+        exit()        
+
+        model.load_state_dict(loaded_state)
         optimizer_state = torch.load(optim_path, weights_only=True)
         if config.TRAIN_MODE == "WSD":
             for init_group, load_group in zip(optimizer.state_dict()["param_groups"], optimizer_state["param_groups"]):
@@ -410,7 +398,7 @@ def main(config):
     label_filter_env = lmdb.open(config.LABEL_FILTER_DB_PATH, readonly=True, lock=False)
 
     print(f"encoder params total: {encoder_model_params}, enc parallel: {encoder_model_card_parallel_params}, enc global: {encoder_model_global_params}")
-    print(f"decoder params total: {decoder_model_params}, dec parallel: {decoder_model_card_parallel_params}, dec global: {decoder_model_global_params}, forgetting curve: {forgetting_curve_params}")
+    # print(f"decoder params total: {decoder_model_params}, dec parallel: {decoder_model_card_parallel_params}, dec global: {decoder_model_global_params}, forgetting curve: {forgetting_curve_params}")
     if config.USE_WANDB:
         wandb_config = {
             "peak_lr": config.PEAK_LR,
@@ -499,8 +487,8 @@ def main(config):
                             encoding = decoder_ops.encode_single(encode_batches, model.encoder_model, train_l + 1, train_r + 1, log=log)
                             if len(encoding.shape) == 2 and random.random() < 0.05:
                                 encoding = encoding.mean(dim=0)
-                            # fsrs_params = model.card_model.encoding_to_fsrs(encoding)
-                            fsrs_params = None
+                            fsrs_params = model.card_model.encoding_to_fsrs(encoding)
+                            # fsrs_params = None
 
                             review_stats: decoder_ops.DecodeResult = decoder_ops.decode(decode_batches, model.card_model, encoding, weights)
                             first_review_logits = decoder_ops.extract_first_review_dist_logits(model.first_review_model, encoding)

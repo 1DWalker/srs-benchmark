@@ -30,9 +30,8 @@ class CardModel(torch.nn.Module):
         return fsrs_params
 
     def forward(self, encoding_h, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl):
-        # if len(encoding_h.shape) == 2:
-        #     print("reduce", encoding_h.shape)
-        #     encoding_h = encoding_h.mean(dim=0)
+        if len(encoding_h.shape) == 2:
+            encoding_h = encoding_h.mean(dim=0)
         fsrs_params = self.encoding_to_fsrs(encoding_h)
         B, L = feature_elapsed_days_real_bl.shape
 
