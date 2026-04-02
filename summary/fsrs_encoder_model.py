@@ -17,21 +17,19 @@ class CardModel(torch.nn.Module):
         super().__init__()
         self.d_transition_model = DTransitionModel(n_encoding=n_encoding)
         self.fsrs_linear = nn.Linear(n_encoding, 35)
-        torch.nn.init.zeros_(self.fsrs_linear.weight)
         torch.nn.init.zeros_(self.fsrs_linear.bias)
+        torch.nn.init.zeros_(self.fsrs_linear.weight)
         with torch.no_grad():
             self.fsrs_linear.bias[1:4].copy_(torch.tensor([-2.2, -0.5, -0.5]))
 
     def encoding_to_fsrs(self, encoding_h):
+        if len(encoding_h.shape) == 2:
+            encoding_h = encoding_h.mean(dim=0)
         x = self.fsrs_linear(encoding_h)
-        print(x)
         fsrs_params = FSRS.nn_vec_to_fsrs7_params(x)
-        print(fsrs_params, fsrs_params.shape)
         return fsrs_params
 
     def forward(self, encoding_h, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl):
-        if len(encoding_h.shape) == 2:
-            encoding_h = encoding_h.mean(dim=0)
         fsrs_params = self.encoding_to_fsrs(encoding_h)
         B, L = feature_elapsed_days_real_bl.shape
 
@@ -67,6 +65,61 @@ class FirstReviewModel(torch.nn.Module):
     def forward(self, encoding_bh):
         return self.pred
 
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.n_encoding = model.N_ENCODING
+        self.encoder_model = model.EncoderModel(n_encoding=self.n_encoding)
+        self.card_model = CardModel(n_encoding=self.n_encoding)
+        self.first_review_model = FirstReviewModel(n_encoding=self.n_encoding)
+
+    def get_excluded_params(self):
+        return [] 
+
+    def is_copy_exclude_param(self, x):
+        start_layer = 6
+        if "global_encoder" not in x:
+            return False
+        if "global_encoder.norm" in x or "value_linear" in x or "weight_linear" in x or "in_norm" in x:
+            return False
+        vote = 0
+        for ex_l in range(start_layer):
+            if f"core.layers.{ex_l}." in x:
+                vote += 1
+        for ex_l in range(start_layer - 1):
+            if x.endswith(f"core.queries.{ex_l}"):
+                vote += 1
+            if f"core.norms.{ex_l}." in x:
+                vote += 1
+        return vote == 0
+    
+    def is_frozen_param(self, x):
+        exclude = ["fsrs_linear", "d_transition"]
+        for s in exclude:
+            if s in x:
+                return False
+        return not self.is_copy_exclude_param(x)
+
+
+class DTransitionModel(torch.nn.Module):
+    def __init__(self, n_encoding):
+        super().__init__()
+        self.core = SDRatingElapsedModel(n_encoding=n_encoding)
+
+    def set_encoding(self, encoding_h):
+        self.core.set_encoding(encoding_h)
+
+    def forward(
+            self, 
+            encoding_h,
+            s_b,
+            d_b,
+            feature_elapsed_days_real_b, 
+            feature_rating_b, 
+            ):
+        x = self.core(encoding_h, s_b, d_b, feature_elapsed_days_real_b, feature_rating_b)
+        return 1 + 9 * torch.sigmoid(x).squeeze(-1)
+    
 class SDRatingElapsedModel(torch.nn.Module):
     def __init__(self, n_encoding):
         super().__init__()
@@ -81,10 +134,6 @@ class SDRatingElapsedModel(torch.nn.Module):
             nn.Linear(self.n_hidden, 1),
         )
     
-    def set_encoding(self, encoding_h):
-        for block in self.blocks:
-            block.set_encoding(encoding_h)
-
     def forward(
             self, 
             encoding_h,
@@ -106,50 +155,5 @@ class SDRatingElapsedModel(torch.nn.Module):
         )
         x = self.encode(x)
         for block in self.blocks:
-            x = block(x, encoding_h)
+            x = block(x)
         return self.last(x)
-
-class DTransitionModel(torch.nn.Module):
-    def __init__(self, n_encoding):
-        super().__init__()
-        self.core = SDRatingElapsedModel(n_encoding=n_encoding)
-
-    def set_encoding(self, encoding_h):
-        self.core.set_encoding(encoding_h)
-
-    def forward(
-            self, 
-            encoding_h,
-            s_b,
-            d_b,
-            feature_elapsed_days_real_b, 
-            feature_rating_b, 
-            ):
-        x = self.core(encoding_h, s_b, d_b, feature_elapsed_days_real_b, feature_rating_b)
-        return 1 + 9 * torch.sigmoid(x).squeeze(-1)
-
-# class DInitModel(torch.nn.Module):
-#     def __init__(self, n_encoding):
-#         super().__init__()
-#         self.linear = nn.Linear(n_encoding, 4)
-
-#     def forward(
-#             self, 
-#             s_b,
-#             d_b,
-#             feature_elapsed_days_real_b, 
-#             feature_rating_b, 
-#             ):
-#         x = self.core(s_b, d_b, feature_elapsed_days_real_b, feature_rating_b)
-#         return 1 + 9 * torch.sigmoid(x)
-
-class Model(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.n_encoding = model.N_ENCODING
-        self.encoder_model = model.EncoderModel(n_encoding=self.n_encoding)
-        self.card_model = CardModel(n_encoding=self.n_encoding)
-        self.first_review_model = FirstReviewModel(n_encoding=self.n_encoding)
-
-    def get_excluded_params(self):
-        return [] 
