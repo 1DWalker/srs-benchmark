@@ -13,7 +13,7 @@ import wandb
 from rwkv.utils import get_number_of_trainable_parameters
 import random
 
-from summary import decoder_ops, fsrs_encoder_model
+from summary import decoder_ops, dev, fsrs_encoder_model, fsrs_encoder_model_curve, fsrs_encoder_model_r, fsrs_encoder_model_s
 from summary.model import Model
 from utils import compact_lmdb, load_tensor, parse_toml
 
@@ -198,9 +198,9 @@ def validate(model, summary_txn, label_filter_txn, validate_users, config, model
                 print(f"First learn: LogLoss: {first_bce_loss:.3f}, CE: {first_ce_loss:.3f}")
                 for split_i, parameters in enumerate(encoding_s):
                     first_rating_dist = [round(x, 2) for x in decoder_ops.extract_first_review_dist(model.first_review_model, encoding_s[split_i]).cpu().tolist()]
+                    print(f"Split: {split_i}, first rating: {first_rating_dist}")
                     # fsrs_params = model.card_model.encoding_to_fsrs(parameters).cpu().numpy()
                     # print(f"Split: {split_i}, first rating: {first_rating_dist}, params: {list(map(lambda x: round(float(x), 4), fsrs_params.tolist()))}")
-                    print(f"Split: {split_i}, first rating: {first_rating_dist}")
     except Exception as e:
         print(e)
         raise e
@@ -303,9 +303,14 @@ def set_seed(seed):
 
 
 def main(config):
+    # print("Sleeping for some time.")
+    # import time as ts
+    # ts.sleep(60 * 60 * 2.5)
+    # print("Resume!")
     seed = config.SEED + (len(config.TRAIN_MODE) if config.TRAIN_MODE != "WSD" else 0)
     set_seed(seed)
-    model = fsrs_encoder_model.Model().to(config.DEVICE)
+    # model = fsrs_encoder_model_r.Model().to(config.DEVICE)
+    model = dev.Model().to(config.DEVICE)
     optimizer, peak_lr_first_param = get_optimizer(config, model)
     encoder_model_params = get_number_of_trainable_parameters(model.encoder_model)
     # encoder_model_global_params = get_number_of_trainable_parameters(model.encoder_model.intermediate_global_encoders) + get_number_of_trainable_parameters(model.encoder_model.last_global_encoder)
@@ -320,6 +325,7 @@ def main(config):
             decoder_model_global_params += param.numel()
     decoder_model_params = get_number_of_trainable_parameters(model.card_model)
     decoder_model_card_parallel_params = decoder_model_params - decoder_model_global_params
+    print("parallel:", decoder_model_card_parallel_params)
     # forgetting_curve_params = get_number_of_trainable_parameters(model.card_model.forgetting_curve_nn)
     # for name, param in model.card_model.forgetting_curve_nn.named_parameters():
     #     if param.requires_grad and "global" in name and "weight_linear" not in name and "value_linear" not in name:
@@ -359,26 +365,23 @@ def main(config):
         optim_path = f"{config.LOAD_MODEL_FOLDER}/{config.LOAD_MODEL_NAME}_optim.pth"
         print("Loading model:", model_path)
         loaded_state = torch.load(model_path, weights_only=True)
-        model_state = model.state_dict()
-        for name, param in loaded_state.items():
-            if name in model_state:
-                if model.is_copy_exclude_params(name):
-                    print("exclude:", name)
-                else:
-                    print("copy:", name)
-                pass
-            else:
-                # print("missing:", name)
-                pass
-            pass
-        exit()        
 
-        model.load_state_dict(loaded_state)
-        optimizer_state = torch.load(optim_path, weights_only=True)
-        if config.TRAIN_MODE == "WSD":
-            for init_group, load_group in zip(optimizer.state_dict()["param_groups"], optimizer_state["param_groups"]):
-                load_group["lr"] = init_group["lr"]
-        optimizer.load_state_dict(optimizer_state)
+        model.load_state_dict(loaded_state, strict=True)
+        for name, param in model.named_parameters():
+            if model.is_frozen_param(name):
+                param.requires_grad = False
+                print("Freeze:", name)
+            else:
+                print("Train:", name)
+
+        try:
+            optimizer_state = torch.load(optim_path, weights_only=True)
+            if config.TRAIN_MODE == "WSD":
+                for init_group, load_group in zip(optimizer.state_dict()["param_groups"], optimizer_state["param_groups"]):
+                    load_group["lr"] = init_group["lr"]
+            optimizer.load_state_dict(optimizer_state)
+        except FileNotFoundError:
+            print("WARN: No optimizer file found.")
         # for init_group, load_group in zip(optimizer.state_dict()["param_groups"], optimizer_state["param_groups"]):
         #     print(init_group["lr"])
         # exit()
@@ -416,7 +419,7 @@ def main(config):
             "params_decoder_total": decoder_model_params,
             "params_decoder_parallel": decoder_model_card_parallel_params,
             "params_decoder_global": decoder_model_global_params,
-            "params_forgetting_curve": forgetting_curve_params,
+            # "params_forgetting_curve": forgetting_curve_params,
         }
         wandb_kwargs = dict(
             project=config.WANDB_PROJECT_NAME,
@@ -486,9 +489,9 @@ def main(config):
                             train_r = test_l - 1
                             encoding = decoder_ops.encode_single(encode_batches, model.encoder_model, train_l + 1, train_r + 1, log=log)
                             if len(encoding.shape) == 2 and random.random() < 0.05:
-                                encoding = encoding.mean(dim=0)
-                            fsrs_params = model.card_model.encoding_to_fsrs(encoding)
-                            # fsrs_params = None
+                                encoding = encoding.mean(dim=0, keepdim=True)
+                            # fsrs_params = model.card_model.encoding_to_fsrs(encoding)
+                            fsrs_params = None
 
                             review_stats: decoder_ops.DecodeResult = decoder_ops.decode(decode_batches, model.card_model, encoding, weights)
                             first_review_logits = decoder_ops.extract_first_review_dist_logits(model.first_review_model, encoding)
@@ -544,6 +547,8 @@ def main(config):
                                     print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits, dim=-1).cpu().tolist()]}")
                                     print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n:.2f}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                     print(f"Elapsed: {time() - time_start:.3f}")
+                                    # with torch.no_grad():
+                                    #     mo/model.card_model.print_curve(encoding)
                                     time_start = time()
                                 optimizer.step()
                                 optimizer.zero_grad()
@@ -575,47 +580,52 @@ def main(config):
                         print("MODEL SAVED.")
 
                     if validate_iter:
-                        validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="eval", log=log)
-                        log["validation_eval_mode/validation_loss"] = validate_result.loss_weighted_review
-                        log["validation_eval_mode/validation_loss_user"] = validate_result.loss_weighted_user
-                        validate_result_train_mode: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="train", log=log)
-                        log["validation_train_mode/validation_loss"] = validate_result_train_mode.loss_weighted_review
-                        log["validation_train_mode/validation_loss_user"] = validate_result_train_mode.loss_weighted_user
+                        # validate_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="eval", log=log)
+                        # log["validation_eval_mode/validation_loss"] = validate_result.loss_weighted_review
+                        # log["validation_eval_mode/validation_loss_user"] = validate_result.loss_weighted_user
+                        # validate_result_train_mode: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="train", log=log)
+                        # log["validation_train_mode/validation_loss"] = validate_result_train_mode.loss_weighted_review
+                        # log["validation_train_mode/validation_loss_user"] = validate_result_train_mode.loss_weighted_user
                         validate_result_train_mode_compress: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_users, config, model_mode="train_compress", log=log)
                         log["validation_train_mode_compress/validation_loss_compress"] = validate_result_train_mode_compress.loss_weighted_review
                         log["validation_train_mode_compress/validation_loss_user_compress"] = validate_result_train_mode_compress.loss_weighted_user
-                        best_validate_loss_weighted_review = min(
-                            validate_result.loss_weighted_review,
-                            validate_result_train_mode_compress.loss_weighted_review,
-                            validate_result_train_mode.loss_weighted_review,
-                        )
-                        best_validate_loss_weighted_user = min(
-                            validate_result.loss_weighted_user,
-                            validate_result_train_mode_compress.loss_weighted_user,
-                            validate_result_train_mode.loss_weighted_user,
-                        )
-                        best_cond_loss = min(
-                            validate_result.cond_loss,
-                            validate_result_train_mode_compress.cond_loss,
-                            validate_result_train_mode.cond_loss,
-                        )
-                        best_first_bce = min(
-                            validate_result.first_bce,
-                            validate_result_train_mode_compress.first_bce,
-                            validate_result_train_mode.first_bce,
-                        )
-                        best_first_ce = min(
-                            validate_result.first_ce,
-                            validate_result_train_mode_compress.first_ce,
-                            validate_result_train_mode.first_ce,
-                        )
+                        # best_validate_loss_weighted_review = min(
+                        #     validate_result.loss_weighted_review,
+                        #     validate_result_train_mode.loss_weighted_review,
+                        #     validate_result_train_mode_compress.loss_weighted_review,
+                        # )
+                        # best_validate_loss_weighted_user = min(
+                        #     validate_result.loss_weighted_user,
+                        #     validate_result_train_mode.loss_weighted_user,
+                        #     validate_result_train_mode_compress.loss_weighted_user,
+                        # )
+                        # best_cond_loss = min(
+                        #     validate_result.cond_loss,
+                        #     validate_result_train_mode.cond_loss,
+                        #     validate_result_train_mode_compress.cond_loss,
+                        # )
+                        # best_first_bce = min(
+                        #     validate_result.first_bce,
+                        #     validate_result_train_mode.first_bce,
+                        #     validate_result_train_mode_compress.first_bce,
+                        # )
+                        # best_first_ce = min(
+                        #     validate_result.first_ce,
+                        #     validate_result_train_mode.first_ce,
+                        #     validate_result_train_mode_compress.first_ce,
+                        # )
+                        best_validate_loss_weighted_review = validate_result_train_mode_compress.loss_weighted_review
+                        best_validate_loss_weighted_user = validate_result_train_mode_compress.loss_weighted_user
+                        best_cond_loss = validate_result_train_mode_compress.cond_loss
+                        best_first_bce = validate_result_train_mode_compress.first_bce
+                        best_first_ce = validate_result_train_mode_compress.first_ce
 
                         log["validation/validation_loss"] = best_validate_loss_weighted_review
                         log["validation/validation_loss_user"] = best_validate_loss_weighted_user
                         log["validation/cond_loss"] = best_cond_loss
                         log["validation/first_bce"] = best_first_bce
                         log["validation/first_ce"] = best_first_ce
-                        validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config, model_mode="eval", log=log)
+                        validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config, model_mode="train_compress", log=log)
                         log["validation_overfit/validation_overfit_loss"] = validate_overfit_result.loss_weighted_review
                         log["validation_overfit/validation_overfit_loss_user"] = validate_overfit_result.loss_weighted_user
                         log["validation_overfit/cond_loss"] = validate_overfit_result.cond_loss
