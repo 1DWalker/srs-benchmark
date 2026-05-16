@@ -21,13 +21,17 @@ from tqdm.auto import tqdm  # type: ignore
 
 from config import Config, create_parser
 from features import create_features
+from parallel.config import (
+    LMDB_PATH,
+    LMDB_SIZE,
+    USER_IDS,
+    USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
+)
 from models.model_factory import create_model
 from parallel.tensors import UserTensorBlob
 from utils import get_bin
 
 
-LMDB_PATH = Path("parallel_db")
-LMDB_SIZE = 50_000_000_000
 SECONDS_PER_DAY = 86_400
 BATCH_LOADER_SEED = 2023
 BATCH_ORDER_EPOCHS = 100
@@ -55,6 +59,39 @@ def save_user_blob(
     buffer = BytesIO()
     torch.save(blob.to_dict(), buffer)
     txn.put(f"{user_id}_packed".encode(), buffer.getvalue())
+
+
+def load_user_blob_bytes(blob_bytes: bytes) -> UserTensorBlob:
+    buffer = BytesIO(blob_bytes)
+    tensors = torch.load(buffer, weights_only=True, map_location="cpu")
+    return UserTensorBlob.from_dict(tensors)
+
+
+def save_metadata_tensor(
+    txn: lmdb.Transaction,
+    key: str,
+    tensor: torch.Tensor,
+) -> None:
+    buffer = BytesIO()
+    torch.save(tensor, buffer)
+    txn.put(key.encode(), buffer.getvalue())
+
+
+def get_max_train_split_length(blob: UserTensorBlob) -> int:
+    if blob.train_split_lengths.numel() == 0:
+        return 0
+    return int(blob.train_split_lengths.max().item())
+
+
+def save_global_metadata(user_max_train_split_lengths: list[int]) -> None:
+    env = _open_lmdb_env(LMDB_PATH, LMDB_SIZE)
+    with env.begin(write=True) as txn:
+        save_metadata_tensor(
+            txn,
+            USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
+            torch.tensor(user_max_train_split_lengths, dtype=torch.int32),
+        )
+    env.close()
 
 
 def stop_executor_now(executor: ProcessPoolExecutor, futures: list) -> None:
@@ -277,7 +314,10 @@ def process_user(user_id: int) -> int:
     user_keys = get_user_keys(user_id)
     with lmdb_env.begin(write=False) as txn:
         if all(txn.get(key.encode()) is not None for key in user_keys):
-            return user_id
+            blob_bytes = txn.get(f"{user_id}_packed".encode())
+            if blob_bytes is None:
+                return 0
+            return get_max_train_split_length(load_user_blob_bytes(blob_bytes))
 
     df = load_user_parquet(worker_config.data_path, user_id)
     try:
@@ -288,10 +328,11 @@ def process_user(user_id: int) -> int:
         raise
 
     with lmdb_env.begin(write=True) as txn:
-        save_user_blob(txn, user_id, pack_user_tensors(df, benchmark_tensors))
+        blob = pack_user_tensors(df, benchmark_tensors)
+        save_user_blob(txn, user_id, blob)
         txn.put(f"{user_id}_done".encode(), b"true")
 
-    return user_id
+    return get_max_train_split_length(blob)
 
 
 def main() -> None:
@@ -300,8 +341,7 @@ def main() -> None:
     parser = create_parser()
     args, _ = parser.parse_known_args()
     config = Config(args)
-    # user_ids = list(range(1, 10_001))
-    user_ids = list(range(1, 3001))
+    user_ids = USER_IDS
 
     executor = ProcessPoolExecutor(
         max_workers=config.num_processes,
@@ -309,14 +349,19 @@ def main() -> None:
         initargs=(LMDB_PATH, LMDB_SIZE, config),
     )
     futures = []
+    user_max_train_split_lengths = [0 for _ in user_ids]
     try:
         futures = [
             executor.submit(process_user, user_id)
             for user_id in user_ids
         ]
+        future_to_index = {
+            future: idx
+            for idx, future in enumerate(futures)
+        }
 
         for future in tqdm(as_completed(futures), total=len(futures), smoothing=0.03):
-            future.result()
+            user_max_train_split_lengths[future_to_index[future]] = future.result()
     except KeyboardInterrupt:
         stop_executor_now(executor, futures)
         os._exit(130)
@@ -325,6 +370,7 @@ def main() -> None:
         raise
     else:
         executor.shutdown()
+        save_global_metadata(user_max_train_split_lengths)
 
 
 if __name__ == "__main__":
