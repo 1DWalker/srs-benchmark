@@ -4,6 +4,7 @@ import multiprocessing as mp
 import os
 import signal
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from io import BytesIO
 from pathlib import Path
 from typing import NamedTuple
 
@@ -21,7 +22,7 @@ from tqdm.auto import tqdm  # type: ignore
 from config import Config, create_parser
 from features import create_features
 from models.model_factory import create_model
-from rwkv.utils import save_tensor
+from parallel.tensors import UserTensorBlob
 from utils import get_bin
 
 
@@ -29,6 +30,7 @@ LMDB_PATH = Path("parallel_db")
 LMDB_SIZE = 50_000_000_000
 SECONDS_PER_DAY = 86_400
 BATCH_LOADER_SEED = 2023
+BATCH_ORDER_EPOCHS = 100
 
 lmdb_env: lmdb.Environment | None = None
 worker_config: Config | None = None
@@ -39,9 +41,20 @@ class BenchmarkTensors(NamedTuple):
     rmse_bins: torch.Tensor
     split: torch.Tensor
     batch_order: torch.Tensor
+    batch_order_epochs: torch.Tensor
     train_index: torch.Tensor
     train_batch_lengths: torch.Tensor
     train_split_lengths: torch.Tensor
+
+
+def save_user_blob(
+    txn: lmdb.Transaction,
+    user_id: int,
+    blob: UserTensorBlob,
+) -> None:
+    buffer = BytesIO()
+    torch.save(blob.to_dict(), buffer)
+    txn.put(f"{user_id}_packed".encode(), buffer.getvalue())
 
 
 def stop_executor_now(executor: ProcessPoolExecutor, futures: list) -> None:
@@ -92,17 +105,38 @@ def load_user_parquet(data_path: Path, user_id: int) -> pd.DataFrame:
     return pd.read_parquet(data_path / "revlogs" / f"{user_id=}")
 
 
-def save_user_tensors(txn: lmdb.Transaction, user_id: int, df: pd.DataFrame) -> None:
-    ratings = torch.tensor(df["rating"].to_numpy(), dtype=torch.int8)
-    elapsed_days_int = torch.tensor(df["elapsed_days"].to_numpy(), dtype=torch.int32)
-    elapsed_days_real = torch.tensor(
-        df["elapsed_seconds"].to_numpy() / SECONDS_PER_DAY,
-        dtype=torch.float32,
-    )
+def build_raw_tensors(df: pd.DataFrame) -> dict[str, torch.Tensor]:
+    return {
+        "ratings": torch.tensor(df["rating"].to_numpy(), dtype=torch.int8),
+        "elapsed_days_int": torch.tensor(
+            df["elapsed_days"].to_numpy(),
+            dtype=torch.int32,
+        ),
+        "elapsed_days_real": torch.tensor(
+            df["elapsed_seconds"].to_numpy() / SECONDS_PER_DAY,
+            dtype=torch.float32,
+        ),
+    }
 
-    save_tensor(txn, f"{user_id}_ratings", ratings)
-    save_tensor(txn, f"{user_id}_elapsed_days_int", elapsed_days_int)
-    save_tensor(txn, f"{user_id}_elapsed_days_real", elapsed_days_real)
+
+def pack_user_tensors(
+    df: pd.DataFrame,
+    benchmark_tensors: BenchmarkTensors,
+) -> UserTensorBlob:
+    raw_tensors = build_raw_tensors(df)
+    return UserTensorBlob(
+        ratings=raw_tensors["ratings"],
+        elapsed_days_int=raw_tensors["elapsed_days_int"],
+        elapsed_days_real=raw_tensors["elapsed_days_real"],
+        test_index=benchmark_tensors.test_index,
+        rmse_bins=benchmark_tensors.rmse_bins,
+        split=benchmark_tensors.split,
+        batch_order=benchmark_tensors.batch_order,
+        batch_order_epochs=benchmark_tensors.batch_order_epochs,
+        train_index=benchmark_tensors.train_index,
+        train_batch_lengths=benchmark_tensors.train_batch_lengths,
+        train_split_lengths=benchmark_tensors.train_split_lengths,
+    )
 
 
 def empty_benchmark_tensors() -> BenchmarkTensors:
@@ -112,10 +146,25 @@ def empty_benchmark_tensors() -> BenchmarkTensors:
         rmse_bins=torch.tensor([], dtype=torch.int8),
         split=empty_int32,
         batch_order=empty_int32,
+        batch_order_epochs=torch.tensor(BATCH_ORDER_EPOCHS, dtype=torch.int32),
         train_index=empty_int32,
         train_batch_lengths=empty_int32,
         train_split_lengths=empty_int32,
     )
+
+
+def build_batch_order(batch_count: int) -> np.ndarray:
+    if batch_count == 0:
+        return np.array([], dtype=np.int32)
+
+    generator = torch.Generator()
+    generator.manual_seed(BATCH_LOADER_SEED)
+    return np.concatenate(
+        [
+            torch.randperm(batch_count, generator=generator).numpy()
+            for _ in range(BATCH_ORDER_EPOCHS)
+        ]
+    ).astype(np.int32)
 
 
 def get_training_layout(
@@ -144,10 +193,7 @@ def get_training_layout(
         batch_lengths.append(end - start)
     batch_lengths_array = np.array(batch_lengths, dtype=np.int32)
 
-    generator = torch.Generator()
-    generator.manual_seed(BATCH_LOADER_SEED)
-    batch_order = torch.randperm(len(batch_lengths), generator=generator).numpy()
-    batch_order = batch_order.astype(np.int32)
+    batch_order = build_batch_order(len(batch_lengths))
 
     return train_index, batch_lengths_array, batch_order
 
@@ -208,6 +254,7 @@ def build_benchmark_tensors(df: pd.DataFrame, config: Config) -> BenchmarkTensor
         rmse_bins=torch.tensor(rmse_bins, dtype=torch.int8),
         split=torch.tensor(split_test_ranges, dtype=torch.int32),
         batch_order=torch.tensor(batch_order_array, dtype=torch.int32),
+        batch_order_epochs=torch.tensor(BATCH_ORDER_EPOCHS, dtype=torch.int32),
         train_index=torch.tensor(train_indices_array, dtype=torch.int32),
         train_batch_lengths=torch.tensor(train_batch_lengths_array, dtype=torch.int32),
         train_split_lengths=torch.tensor(train_split_lengths, dtype=torch.int32),
@@ -216,16 +263,7 @@ def build_benchmark_tensors(df: pd.DataFrame, config: Config) -> BenchmarkTensor
 
 def get_user_keys(user_id: int) -> list[str]:
     return [
-        f"{user_id}_ratings",
-        f"{user_id}_elapsed_days_int",
-        f"{user_id}_elapsed_days_real",
-        f"{user_id}_test_index",
-        f"{user_id}_rmse_bins",
-        f"{user_id}_split",
-        f"{user_id}_batch_order",
-        f"{user_id}_train_index",
-        f"{user_id}_train_batch_lengths",
-        f"{user_id}_train_split_lengths",
+        f"{user_id}_packed",
         f"{user_id}_done",
     ]
 
@@ -237,9 +275,9 @@ def process_user(user_id: int) -> int:
         raise RuntimeError("Worker config was not initialized.")
 
     user_keys = get_user_keys(user_id)
-    # with lmdb_env.begin(write=False) as txn:
-    #     if all(txn.get(key.encode()) is not None for key in user_keys):
-    #         return user_id
+    with lmdb_env.begin(write=False) as txn:
+        if all(txn.get(key.encode()) is not None for key in user_keys):
+            return user_id
 
     df = load_user_parquet(worker_config.data_path, user_id)
     try:
@@ -250,22 +288,7 @@ def process_user(user_id: int) -> int:
         raise
 
     with lmdb_env.begin(write=True) as txn:
-        save_user_tensors(txn, user_id, df)
-        save_tensor(txn, f"{user_id}_test_index", benchmark_tensors.test_index)
-        save_tensor(txn, f"{user_id}_rmse_bins", benchmark_tensors.rmse_bins)
-        save_tensor(txn, f"{user_id}_split", benchmark_tensors.split)
-        save_tensor(txn, f"{user_id}_batch_order", benchmark_tensors.batch_order)
-        save_tensor(txn, f"{user_id}_train_index", benchmark_tensors.train_index)
-        save_tensor(
-            txn,
-            f"{user_id}_train_batch_lengths",
-            benchmark_tensors.train_batch_lengths,
-        )
-        save_tensor(
-            txn,
-            f"{user_id}_train_split_lengths",
-            benchmark_tensors.train_split_lengths,
-        )
+        save_user_blob(txn, user_id, pack_user_tensors(df, benchmark_tensors))
         txn.put(f"{user_id}_done".encode(), b"true")
 
     return user_id
@@ -278,7 +301,7 @@ def main() -> None:
     args, _ = parser.parse_known_args()
     config = Config(args)
     # user_ids = list(range(1, 10_001))
-    user_ids = list(range(1, 2))
+    user_ids = list(range(1, 3001))
 
     executor = ProcessPoolExecutor(
         max_workers=config.num_processes,
