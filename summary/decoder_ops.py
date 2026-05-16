@@ -136,7 +136,7 @@ def encode_single(batches, encoder_model: EncoderModel, min_review_th, max_revie
     return encoder_model.run_core(x_list, mask_list, compress_encoding=compress_encoding, log=log)
 
 def encode(batches, encoder_model, min_review_th_s, max_review_th_s, compress_encoding=False, log=None):
-    return torch.stack([encode_single(batches, encoder_model, min_review_th_s[i].item(), max_review_th_s[i].item(), compress_encoding=compress_encoding, log=log) for i in range(min_review_th_s.size(0))])
+    return torch.stack([encode_single(batches, encoder_model, min_review_th_s[i].item(), max_review_th_s[i].item(), compress_encoding=compress_encoding, log=log) for i in range(min_review_th_s.size(0))], dim=0)
 
 class DecodeResult(NamedTuple):
     ce_loss_sum: torch.Tensor
@@ -193,7 +193,7 @@ def first_decode(batches, first_review_model, encoding_h, min_review_th, max_rev
     weights[(min_review_th - 1):max_review_th] = 1
     return first_logits(batches, first_review_logits_4, weights)
 
-def decode(batches, decoder_model, encoding_h, weights):
+def decode(batches, decoder_model, encoding_h, weights, log={}):
     review_ce_tot = 0
     review_bce_tot = 0
     review_n = 0
@@ -204,8 +204,11 @@ def decode(batches, decoder_model, encoding_h, weights):
         logits_bl4 = decoder_model(
             encoding_h=encoding_h,
             feature_elapsed_days_real_bl=feature_elapsed_days_real_bl, 
+            feature_elapsed_days_int_bl=feature_elapsed_days_int_bl, 
             feature_rating_bl=feature_rating_bl, 
             label_elapsed_days_real_bl=label_elapsed_days_real_bl,
+            label_elapsed_days_int_bl=label_elapsed_days_int_bl,
+            log=log,
         )
         assert not logits_bl4.isnan().any()
         label_weight_bl = has_label_bl * weights[(label_review_th_bl - 1).clamp(0, weights.size(0) - 1)]
@@ -232,7 +235,7 @@ def decode(batches, decoder_model, encoding_h, weights):
         loss_n=review_n,
     )
 
-def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_review_ths, rmse_bins, device, equalize_test_reviews):
+def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_review_ths, rmse_bins, device, equalize_test_reviews, log={}):
     assert len(splits_list) == encoding_hp.size(0) + 1
 
     rmse_bins_dict = dict(zip(equalize_review_ths, rmse_bins))
@@ -262,8 +265,11 @@ def decode_full(batches, decoder_model, encoding_hp, splits_list, equalize_revie
             logits_bl4 = decoder_model(
                 encoding_h=encoding_hp[h],
                 feature_elapsed_days_real_bl=feature_elapsed_days_real_bl, 
+                feature_elapsed_days_int_bl=feature_elapsed_days_int_bl, 
                 feature_rating_bl=feature_rating_bl, 
                 label_elapsed_days_real_bl=label_elapsed_days_real_bl,
+                label_elapsed_days_int_bl=label_elapsed_days_int_bl,
+                log=log,
             )
             logits_bl4_list.append(logits_bl4)
         logits_hbl4 = torch.stack(logits_bl4_list, dim=0)

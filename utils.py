@@ -416,6 +416,8 @@ def parse_toml():
                 args["DTYPE"] = torch.bfloat16
             elif args["DTYPE"] in ("float", "float32"):
                 args["DTYPE"] = torch.float32
+            elif args["DTYPE"] == "double":
+                args["DTYPE"] = torch.double
             else:
                 raise ValueError("Not currently supported:", args["DTYPE"])
         if "DEVICE" in args:

@@ -79,7 +79,7 @@ def weighted_avg_and_std(values, weights):
 
 
 if __name__ == "__main__":
-    dev_mode_name = "FSRS-6-dev"
+    dev_mode_name = "LogisticRegression31"
     dev_file = pathlib.Path(f"./result/{dev_mode_name}.jsonl")
     if dev_file.exists():
         with open(dev_file, "r") as f:
@@ -104,47 +104,64 @@ if __name__ == "__main__":
     models = (
         [
             (dev_mode_name, None, None),
-            ("RWKV-P", 2762884, "[Yes](#features-note)"),
-            ("RWKV", 2762884, "[Yes](#features-note)"),
+            # ("RWKV-P", 2762884, "[Yes](#features-note)"),
+            # ("RWKV", 2762884, "[Yes](#features-note)"),
+            # (
+            #     "LSTM-short-secs-duration-equalize_test_with_non_secs",
+            #     8869,
+            #     "FIL, G, SR, AT",
+            # ),
+            # ("RWKV-short-secs", 2762884, "[Yes](#features-note)"),
+            # ("FSRS-7-LSTM-encoder-small-train", 0, "---"),
+            # ("FSRS-7-LSTM-encoder-d", 0, "---"),
+            # ("LSTM-encoder", 0, "---"),
+            ("FSRS-7-curve", 0, "---"),
+            ("FSRS-7-baseline", 0, "---"),
+            # ("average-baseline", 0, "---"),
             (
-                "LSTM-short-secs-duration-equalize_test_with_non_secs",
+                "LSTM-short-secs-duration",
                 8869,
                 "FIL, G, SR, AT",
             ),
-            ("MOVING-AVG", 0, "---"),
-            ("FSRS-6-short-recency", 21, "IL, G, SR"),
-            ("FSRS-rs-short", 21, "IL, G, SR"),
-            ("FSRS-6-short", 21, "IL, G, SR"),
-            ("GRU-P-short", 297, "IL, G, SR"),
-            ("FSRS-6-short-preset", 21, "IL, G, SR"),
-            ("GRU-P", 297, "IL, G"),
-            ("FSRS-6-binary-short", 17, "IL, G, SR"),
-            ("FSRS-5-short", 19, "IL, G, SR"),
-            ("FSRS-6-short-deck", 21, "IL, G, SR"),
-            ("FSRS-4.5", 17, "IL, G"),
-            ("FSRSv4", 17, "IL, G"),
-            ("FSRS-6-S0-short", 4, "IL, G, SR"),
-            ("DASH", 9, "IL, G"),
-            ("DASH[MCM]", 9, "IL, G"),
-            ("GRU", 39, "IL, G"),
-            ("DASH-short", 9, "IL, G, SR"),
-            ("DASH[ACT-R]", 5, "IL, G"),
-            ("FSRSv2", 14, "IL, G"),
-            ("FSRSv3", 13, "IL, G"),
-            ("FSRS-6-default-short", 0, "IL, G, SR"),
-            ("ACT-R", 5, "IL"),
-            ("FSRSv1", 7, "IL, G"),
-            ("AVG", 0, "---"),
-            ("Anki", 7, "IL, G"),
-            ("HLR", 3, "IL, G"),
-            ("HLR-short", 3, "IL, G, SR"),
-            ("SM2-trainable", 6, "IL, G"),
-            ("Anki-default", 0, "IL, G"),
-            ("SM2-short", 0, "IL, G, SR"),
-            ("SM2", 0, "IL, G"),
-            ("Ebisu-v2", 0, "IL, G"),
-            ("Transformer", 127, "IL, G"),
-            ("RMSE-BINS-EXPLOIT", 0, "IL, G"),
+            # (
+            #     "LSTM-short-secs",
+            #     8869,
+            #     "FIL, G, SR, AT",
+            # ),
+            # ("MOVING-AVG", 0, "---"),
+            # ("FSRS-6-short-recency", 21, "IL, G, SR"),
+            # ("FSRS-rs-short", 21, "IL, G, SR"),
+            # ("FSRS-6-short", 21, "IL, G, SR"),
+            # ("GRU-P-short", 297, "IL, G, SR"),
+            # ("FSRS-6-short-preset", 21, "IL, G, SR"),
+            # ("GRU-P", 297, "IL, G"),
+            # ("FSRS-6-binary-short", 17, "IL, G, SR"),
+            # ("FSRS-5-short", 19, "IL, G, SR"),
+            # ("FSRS-6-short-deck", 21, "IL, G, SR"),
+            # ("FSRS-4.5", 17, "IL, G"),
+            # ("FSRSv4", 17, "IL, G"),
+            # ("FSRS-6-S0-short", 4, "IL, G, SR"),
+            # ("DASH", 9, "IL, G"),
+            # ("DASH[MCM]", 9, "IL, G"),
+            # ("GRU", 39, "IL, G"),
+            # ("DASH-short", 9, "IL, G, SR"),
+            # ("DASH[ACT-R]", 5, "IL, G"),
+            # ("FSRSv2", 14, "IL, G"),
+            # ("FSRSv3", 13, "IL, G"),
+            # ("FSRS-6-default-short", 0, "IL, G, SR"),
+            # ("ACT-R", 5, "IL"),
+            # ("FSRSv1", 7, "IL, G"),
+            # ("AVG", 0, "---"),
+            # ("Anki", 7, "IL, G"),
+            # ("HLR", 3, "IL, G"),
+            # ("HLR-short", 3, "IL, G, SR"),
+            # ("SM2-trainable", 6, "IL, G"),
+            # ("Anki-default", 0, "IL, G"),
+            # ("SM2-short", 0, "IL, G, SR"),
+            # ("SM2", 0, "IL, G"),
+            # ("Ebisu-v2", 0, "IL, G"),
+            # ("Transformer", 127, "IL, G"),
+            # ("RMSE-BINS-EXPLOIT", 0, "IL, G"),
         ]
         if not args.secs
         else [
@@ -195,10 +212,10 @@ if __name__ == "__main__":
             for result in data:
                 if common_set and result["user"] not in common_set:
                     continue
-                # if result["size"] > 1000:
+                # if not (result["user"] > 0 and result["user"] <= 100):
                 #     continue
                 m.append(result["metrics"])
-                sizes.append(result["size"])
+                sizes.append(result.get("size", -1))
                 if "parameters" in result:
                     if isinstance(result["parameters"], list):
                         parameters.append(result["parameters"])
@@ -213,7 +230,8 @@ if __name__ == "__main__":
                 ("users", np.ones_like(sizes)),
             ):
                 print(f"Weighted average by {scale}:")
-                for metric in ("LogLoss", "RMSE(bins)", "AUC", "MBE"):
+                # for metric in ("LogLoss", "RMSE(bins)", "AUC", "MBE", "CE | passed review", "First BCE", "First CE"):
+                for metric in ("LogLoss", "AUC"):
                     metrics_list = [item.get(metric) for item in m]
                     if all(v is None for v in metrics_list):
                         print(f"{model} {metric} (mean±std): N/A")
@@ -233,10 +251,10 @@ if __name__ == "__main__":
 
             # print(f"LogLoss 99%: {round(np.percentile(np.array([item['LogLoss'] for item in m]), 99), 4)}")
             # print(f"RMSE(bins) 99%: {round(np.percentile(np.array([item['RMSE(bins)'] for item in m]), 99), 4)}")
-            if len(parameters) > 0:
-                print(
-                    f"parameters: {np.median(parameters, axis=0).round(6).tolist()}\n"
-                )
+            # if len(parameters) > 0:
+                # print(
+                #     f"parameters: {np.median(parameters, axis=0).round(6).tolist()}\n"
+                # )
                 # print(f"parameters: {np.std(parameters, axis=0).round(2).tolist()}\n")
 
     else:

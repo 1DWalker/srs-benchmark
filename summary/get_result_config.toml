@@ -2,10 +2,12 @@ SUMMARY_DB_PATH = "compact_db"
 LABEL_FILTER_DB_PATH = "label_filter_db"
 
 USER_START = 1
-USER_END = 100
+USER_END = 1000
 
-MODEL_PATH = "pretrain/lstm_encoder/lstm_encoder_big_decay_19999.pth"
-OUT_NAME = "LSTM-encoder"
+# MODEL_PATH = "pretrain/lstm_encoder/LSTM encoder attention res sqrt decay_29999.pth"
+# OUT_NAME = "LSTM-encoder"
+MODEL_PATH = "pretrain/lstm_encoder/FSRS baseline_199999.pth"
+OUT_NAME = "LogisticRegression31"
 
 DEVICE = "cuda"
 

@@ -4,54 +4,6 @@ import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
 
-class BetaSoftplus(nn.Module):
-    def __init__(self, n_hidden, beta_init=1.0, threshold=20.0):
-        super().__init__()
-        theta_init = torch.log(torch.exp(torch.tensor(beta_init)) - 1.0)
-        self.theta = nn.Parameter(torch.full((n_hidden,), theta_init))
-        self.threshold = threshold
-
-    @property
-    def beta(self):
-        return torch.nn.functional.softplus(self.theta)
-
-    def forward(self, x):
-        beta = self.beta
-        out = torch.where(
-            beta * x > self.threshold,
-            x,
-            (1.0 / beta) * torch.log1p(torch.exp(beta * x))
-        )
-        return out
-        # # normalize so that f(0) = 0
-        # return out - (torch.log(torch.tensor(2.0, device=x.device, dtype=x.dtype)) / beta)
-
-def beta_softplus(x, beta):
-    return torch.where(
-        beta * x > 20.0,
-        x,
-        (1.0 / beta) * torch.log1p(torch.exp(beta * x))
-    )
-    
-class CustomAct(torch.nn.Module):
-    def __init__(self, n_encoding):
-        super().__init__()
-        self.n_relu_poly = n_encoding
-        self.poly_deg = nn.Parameter(torch.zeros((self.n_relu_poly)))
-        self.n_sigmoid = 0
-        self.n_softplus = 0
-        self.beta_softplus = BetaSoftplus(self.n_softplus)
-        self.sizes = [self.n_relu_poly, self.n_sigmoid, self.n_softplus]
-        assert np.sum(np.array(self.sizes)) == n_encoding
-    
-    def forward(self, x):
-        x_poly, x_sigmoid, x_softplus = x.split(self.sizes, dim=-1)
-        x_poly = F.relu(x_poly) ** (2 * torch.sigmoid(self.poly_deg))
-        x_poly = torch.where(x_poly >= 0, F.relu(x_poly) ** (2 * torch.sigmoid(self.poly_deg)), 0.01 * x_poly)
-        x_sigmoid = torch.sigmoid(x_sigmoid)
-        x_softplus = self.beta_softplus(x_softplus)
-        return torch.cat((x_poly, x_sigmoid, x_softplus), dim=-1)
-
 def find_streak(mask):
     succ_cumsum = mask.cumsum(dim=-1)
     succ_cumsum_at_fail = succ_cumsum * (1 - mask)
@@ -66,9 +18,9 @@ class CardModel(torch.nn.Module):
         # self.act = CustomAct(self.n_feature)
         self.feat_deg = nn.Parameter(torch.ones(self.n_feature))
         # self.n_input = 32
-        self.n_hidden = 35
+        self.n_hidden = 39
         self.enc_scale = nn.Linear(n_encoding, self.n_hidden + self.n_feature)
-        self.enc_post_act_scale = nn.Linear(n_encoding, 1)
+        self.enc_curve = nn.Linear(n_encoding, 8)
         self.enc_deg = nn.Linear(n_encoding, 1)
         self.scale = nn.Linear(self.n_hidden + self.n_feature, 1, bias=False)
         self.elapsed_nn_last = nn.Linear(8, 1)
@@ -101,8 +53,7 @@ class CardModel(torch.nn.Module):
         """
         B, L = feature_rating_bl.shape
 
-        # same_day = (feature_elapsed_days_real_bl < 1).float()
-        same_day = (feature_elapsed_days_int_bl == 0).float()
+        same_day = (feature_elapsed_days_real_bl < 1).float()
         feature_rating_is_hard = (feature_rating_bl == 2).float()
         feature_rating_is_better_than_hard = (feature_rating_bl > 2).float()
         feature_rating_onehot_bl4 = torch.nn.functional.one_hot((feature_rating_bl.long() - 1).clamp(min=0), num_classes=4).float()
@@ -141,69 +92,36 @@ class CardModel(torch.nn.Module):
         num_same_day = torch.cumsum(same_day, dim=-1)
         num_non_same_day = torch.cumsum(1.0 - same_day, dim=-1)
         num_pass = torch.cumsum((feature_rating_bl > 1).float(), dim=-1)
+        num_fail = torch.cumsum((feature_rating_bl == 1).float(), dim=-1)
         has_passed = (num_pass > 0).float()
 
         elapsed_given_succ = torch.where(success_bl.bool(), feature_elapsed_days_real_bl, torch.zeros_like(success_bl))
         elapsed_given_succ_premax = torch.cummax(elapsed_given_succ, dim=-1).values
 
-        times = feature_elapsed_days_real_bl.cumsum(dim=-1)
-        first_or_lapse_time = torch.where((is_first_review_bl.bool() | (1 - success_bl).bool()), times, torch.zeros_like(times))
-        time_since_first_or_lapse = times - torch.cummax(first_or_lapse_time, dim=-1).values
-        
-        label_is_same_day = (label_elapsed_days_int_bl == 0).float()
+        cumulative_time = feature_elapsed_days_real_bl.cumsum(dim=-1)
+        cumulative_time_only_succ = (feature_elapsed_days_real_bl * success_bl).cumsum(dim=-1)
 
-        # [0, 2, 3, 4, 10, 11, 15, 22, 18, 19], device=x_blh.device), True)
-        deg_1_in_blh = torch.concat(
-            (
-                torch.ones_like(feature_rating_bl).unsqueeze(-1),
-                feature_rating_onehot_bl3,
-                (feature_rating_is_hard * is_first_review_bl).unsqueeze(-1),
-                (feature_rating_is_better_than_hard * is_first_review_bl).unsqueeze(-1),
-                (1 + num_same_day_fail).log().unsqueeze(-1),
-                (1 + num_non_same_day_pass * (1 - label_is_same_day)).log().unsqueeze(-1),
-                (1 + num_non_same_day_fail * (1 - label_is_same_day)).log().unsqueeze(-1),
-                (1 + num_same_day_pass).log().unsqueeze(-1),
-                # (1 + pass_streak).log().unsqueeze(-1),
-                # (1 + fail_streak).log().unsqueeze(-1),
-            ),
-            dim=-1
-        )
-        # [0, 2, 3, 4, 10, 11, 15, 22, 1, 6, 7, 8, 12, 13, 16, 20, 21, 27, 29, 30, 31], device=x_blh.device), True)
+        first_or_lapse_time = torch.where((is_first_review_bl.bool() | (1 - success_bl).bool()), cumulative_time, torch.zeros_like(cumulative_time))
+        time_since_first_or_lapse = cumulative_time - torch.cummax(first_or_lapse_time, dim=-1).values
+
+        label_is_same_day = (label_elapsed_days_int_bl == 0).float()
+        
         deg_0_in_blh = torch.concat(
             (
                 torch.ones_like(feature_rating_bl).unsqueeze(-1),
                 feature_rating_onehot_bl3,
                 first_rating_onehot_bl3,
                 first_rating_onehot_bl3 * is_first_review_bl.unsqueeze(-1),  
-                (1 + num_same_day_fail).log().unsqueeze(-1),
-                (1 + num_non_same_day_pass * (1 - label_is_same_day)).log().unsqueeze(-1),
                 model.transform_elapsed_days_real(feature_elapsed_days_real_bl).unsqueeze(-1),
-                (1 + num_non_same_day_fail).log().unsqueeze(-1),
-                (1 + num_non_same_day_pass).log().unsqueeze(-1),
-                (1 + num_same_day_pass * label_is_same_day).log().unsqueeze(-1),
                 has_passed.unsqueeze(-1),
                 model.transform_elapsed_days_real(time_since_first_or_lapse).unsqueeze(-1),
-                label_is_same_day.unsqueeze(-1),
-                model.transform_elapsed_days_real(times).unsqueeze(-1),
-                ((first_rating_bl > 1) * (1 + num_same_day_fail).log()).unsqueeze(-1),
-                ((first_rating_bl > 1) * (1 + num_non_same_day_fail).log()).unsqueeze(-1),
-                ((first_rating_bl > 1) * (1 + num_same_day).log()).unsqueeze(-1),
-                ((first_rating_bl > 1) * (1 + num_non_same_day).log()).unsqueeze(-1),
+                model.transform_elapsed_days_real(cumulative_time).unsqueeze(-1),
+                model.transform_elapsed_days_real(cumulative_time_only_succ).unsqueeze(-1),
+                ((first_rating_bl > 1) * (1 + num_fail).log()).unsqueeze(-1),
+                ((first_rating_bl > 1) * (1 + num_pass).log()).unsqueeze(-1),
+                (1 + num_fail).log().unsqueeze(-1),
+                (1 + num_pass).log().unsqueeze(-1),
                 streak_score.unsqueeze(-1),
-                # (1 + pass_streak).log().unsqueeze(-1),
-                # (1 + fail_streak).log().unsqueeze(-1),
-                # (1 + first_success_idx * (1 - has_passed)).log().unsqueeze(-1)
-            ),
-            dim=-1
-        )
-        all_blh = torch.concat(
-            (
-                # torch.ones_like(feature_rating_bl).unsqueeze(-1),
-                feature_rating_onehot_bl4,
-                first_rating_onehot_bl4,
-                first_rating_onehot_bl4 * is_first_review_bl.unsqueeze(-1),
-                model.transform_elapsed_days_real(feature_elapsed_days_real_bl).unsqueeze(-1),
-                is_first_review_bl.unsqueeze(-1),
                 (1 + num_same_day_fail).log().unsqueeze(-1),
                 (1 + num_non_same_day_fail).log().unsqueeze(-1),
                 (1 + num_same_day_fail * label_is_same_day).log().unsqueeze(-1),
@@ -216,23 +134,53 @@ class CardModel(torch.nn.Module):
                 (1 + num_non_same_day).log().unsqueeze(-1),
                 (1 + num_same_day * label_is_same_day).log().unsqueeze(-1),
                 (1 + num_non_same_day * (1 - label_is_same_day)).log().unsqueeze(-1),
-                has_passed.unsqueeze(-1),
-                model.transform_elapsed_days_real(elapsed_given_succ_premax).unsqueeze(-1),
-                model.transform_elapsed_days_real(time_since_first_or_lapse).unsqueeze(-1),
                 label_is_same_day.unsqueeze(-1),
-                model.transform_elapsed_days_real(label_elapsed_days_real_bl).unsqueeze(-1),
-                model.transform_elapsed_days_real(times).unsqueeze(-1),
                 ((first_rating_bl > 1) * (1 + num_same_day_fail).log()).unsqueeze(-1),
                 ((first_rating_bl > 1) * (1 + num_non_same_day_fail).log()).unsqueeze(-1),
+                ((first_rating_bl > 1) * (1 + num_same_day_pass).log()).unsqueeze(-1),
+                ((first_rating_bl > 1) * (1 + num_non_same_day_pass).log()).unsqueeze(-1),
                 ((first_rating_bl > 1) * (1 + num_same_day).log()).unsqueeze(-1),
                 ((first_rating_bl > 1) * (1 + num_non_same_day).log()).unsqueeze(-1),
-                streak_score.unsqueeze(-1),
-                # (1 + pass_streak).log().unsqueeze(-1),
-                # (1 + fail_streak).log().unsqueeze(-1),
-                # (1 + first_success_idx).log().unsqueeze(-1)
             ),
             dim=-1
         )
+        # all_blh = torch.concat(
+        #     (
+        #         # torch.ones_like(feature_rating_bl).unsqueeze(-1),
+        #         feature_rating_onehot_bl4,
+        #         first_rating_onehot_bl4,
+        #         first_rating_onehot_bl4 * is_first_review_bl.unsqueeze(-1),
+        #         model.transform_elapsed_days_real(feature_elapsed_days_real_bl).unsqueeze(-1),
+        #         is_first_review_bl.unsqueeze(-1),
+        #         (1 + num_same_day_fail).log().unsqueeze(-1),
+        #         (1 + num_non_same_day_fail).log().unsqueeze(-1),
+        #         (1 + num_same_day_fail * label_is_same_day).log().unsqueeze(-1),
+        #         (1 + num_non_same_day_fail * (1 - label_is_same_day)).log().unsqueeze(-1),
+        #         (1 + num_same_day_pass).log().unsqueeze(-1),
+        #         (1 + num_non_same_day_pass).log().unsqueeze(-1),
+        #         (1 + num_same_day_pass * label_is_same_day).log().unsqueeze(-1),
+        #         (1 + num_non_same_day_pass * (1 - label_is_same_day)).log().unsqueeze(-1),
+        #         (1 + num_same_day).log().unsqueeze(-1),
+        #         (1 + num_non_same_day).log().unsqueeze(-1),
+        #         (1 + num_same_day * label_is_same_day).log().unsqueeze(-1),
+        #         (1 + num_non_same_day * (1 - label_is_same_day)).log().unsqueeze(-1),
+        #         has_passed.unsqueeze(-1),
+        #         model.transform_elapsed_days_real(elapsed_given_succ_premax).unsqueeze(-1),
+        #         model.transform_elapsed_days_real(time_since_first_or_lapse).unsqueeze(-1),
+        #         label_is_same_day.unsqueeze(-1),
+        #         model.transform_elapsed_days_real(label_elapsed_days_real_bl).unsqueeze(-1),
+        #         model.transform_elapsed_days_real(times).unsqueeze(-1),
+        #         ((first_rating_bl > 1) * (1 + num_same_day_fail).log()).unsqueeze(-1),
+        #         ((first_rating_bl > 1) * (1 + num_non_same_day_fail).log()).unsqueeze(-1),
+        #         ((first_rating_bl > 1) * (1 + num_same_day).log()).unsqueeze(-1),
+        #         ((first_rating_bl > 1) * (1 + num_non_same_day).log()).unsqueeze(-1),
+        #         streak_score.unsqueeze(-1),
+        #         # (1 + pass_streak).log().unsqueeze(-1),
+        #         # (1 + fail_streak).log().unsqueeze(-1),
+        #         # (1 + first_success_idx).log().unsqueeze(-1)
+        #     ),
+        #     dim=-1
+        # )
         v_bl = model.transform_elapsed_days_real(label_elapsed_days_real_bl)
         # v_bl = self.elapsed_nn(v_bl.unsqueeze(-1)).squeeze(-1)
         factor_H = self.enc_scale(encoding_h) * self.scale.weight.squeeze(0)
@@ -240,13 +188,49 @@ class CardModel(torch.nn.Module):
             log["factor"].append(factor_H)
         y_blH = torch.cat(
             (
-                deg_1_in_blh * v_bl.unsqueeze(-1),
                 deg_0_in_blh,
-                self.feature_lin(all_blh).clamp(min=0, max=1),
+                # self.feature_lin(all_blh).clamp(min=0, max=1),
             )
             , dim=-1
         )
-        out_bl = torch.einsum('blh,h->bl', y_blH, factor_H)
+        s_bl = torch.einsum('blh,h->bl', y_blH, factor_H).exp().clamp(1e-8)
+        curve_mins = torch.tensor([
+            0.01,    # 27
+            0.01,    # 28 (depends on w27)
+            0.5,     # 29
+            0.5,     # 30 (depends on w29)
+            0.01,    # 31
+            0.01,     # 32
+            0.1,     # 33
+            0.1      # 34
+        ], device=s_bl.device)
+
+        curve_maxs = torch.tensor([
+            0.95,   # 27
+            0.95,   # 28
+            0.99,   # 29
+            0.99,   # 30
+            1.0,    # 31
+            1.0,    # 32
+            1.0,    # 33
+            1.0     # 34
+        ], device=s_bl.device)
+
+        def _bounded(x, lo, hi, default):
+            mid = torch.log((default - lo) / (hi - default))
+            return lo + (hi - lo) * torch.sigmoid(x + mid)
+
+        curve_h = _bounded(self.enc_curve(encoding_h), curve_mins, curve_maxs, (curve_mins + curve_maxs) / 2)
+        decay, base, base_weight, s_exp = curve_h.chunk(4, dim=-1)
+
+        t_over_s = (label_elapsed_days_real_bl / s_bl).unsqueeze(-1)
+        factor = base ** (1 / -decay) - 1
+        R = (1 + factor * t_over_s) ** -decay
+        weight = base_weight * s_bl.unsqueeze(-1) ** s_exp
+        return self.to_four_pred(1e-5 + (1 - 2e-5) * ((weight * R).sum(-1) / weight.sum(-1)))
+
+
+
         return self.to_four_pred(torch.sigmoid(out_bl))
 
         in_blh = torch.concat(

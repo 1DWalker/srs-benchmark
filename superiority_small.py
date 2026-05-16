@@ -18,6 +18,7 @@ if __name__ == "__main__":
         models = [
             "RWKV-P-short-secs",
             "RWKV-short-secs",
+            "LSTM-encoder",
             "LSTM-short-secs-duration",
             "MOVING-AVG-short-secs",
             "GRU-P-short-secs",
@@ -62,6 +63,8 @@ if __name__ == "__main__":
         for result in data:
             logloss = result["metrics"]["LogLoss"]
             user = result["user"]
+            if user > 1000:
+                continue
             dictionary_logloss.update({user: logloss})
             if model == models[0]:
                 sizes.append(result["size"])

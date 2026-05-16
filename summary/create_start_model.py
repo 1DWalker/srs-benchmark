@@ -1,13 +1,13 @@
 from pathlib import Path
 
-from summary import fsrs_encoder_model, fsrs_encoder_model_curve
+from summary import dev, fsrs_encoder_model, fsrs_encoder_model_curve, fsrs_encoder_model_s
 import torch
 from utils import parse_toml
 
 def main(config):
     model_path = f"{config.LOAD_MODEL_FOLDER}/{config.LOAD_MODEL_NAME}.pth"
     # optim_path = f"{config.LOAD_MODEL_FOLDER}/{config.LOAD_MODEL_NAME}_optim.pth"
-    model = fsrs_encoder_model.Model()
+    model = dev.Model()
     filtered_state = {}
     model_state = model.state_dict()
     loaded_state = torch.load(model_path, weights_only=True)

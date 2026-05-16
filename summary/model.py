@@ -11,13 +11,6 @@ GLOBAL_ENCODER_CHANNEL_DROPOUT = 0
 GLOBAL_ENCODER_SAMPLES = 128
 LAST_GLOBAL_NN_DROPOUT = 0
 
-# ENCODER_N_HIDDEN = 16
-# DECODER_N_HIDDEN = 24
-# FORGETTING_CURVE_N_LAYERS = 4
-# GLOBAL_FACTOR = 4
-# ENCODER_FULL_BLOCKS = 2
-# N_ENCODING = ENCODER_N_HIDDEN * GLOBAL_FACTOR * (ENCODER_FULL_BLOCKS + 1)
-
 ENCODER_N_HIDDEN = 32
 DECODER_N_HIDDEN = 48
 GLOBAL_FACTOR = 1
@@ -64,7 +57,7 @@ class FullAttentionResidualsSequential(nn.Module):
     def forward(self, x_in):
         states = [x_in]
         x = x_in
-        for layer, query, norm in zip(self.layers, self.queries, self.norms):
+        for layer_i, (layer, query, norm) in enumerate(zip(self.layers, self.queries, self.norms)):
             out = layer(x)
             states.append(out)
             x = self.full_attention(states, query, norm)
@@ -537,3 +530,9 @@ class Model(torch.nn.Module):
 
     def get_excluded_params(self):
         return ["forgetting_curve_last_linear", "first_review_last_linear"] 
+
+    def is_copy_exclude_param(self, x):
+        return False
+
+    def is_frozen_param(self, x):
+        return False

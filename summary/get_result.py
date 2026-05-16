@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import queue
 import lmdb
-from summary import decoder_ops, fsrs_encoder_model
+from summary import decoder_ops, dev, fsrs_encoder_model, fsrs_encoder_model_curve, fsrs_encoder_model_r, fsrs_encoder_model_s
 from summary.model import Model
 import torch
 from tqdm import tqdm
@@ -40,7 +40,9 @@ def to_json(user_id, loss, loss_n, cond_loss, cond_n, first_bce, first_ce, first
 @torch.inference_mode()
 def worker_job(config, job_queue, writer_queue, progress_queue):
     device = config.DEVICE
-    model = Model().to(device)
+    model = dev_31.Model().to(device)
+    # model = fsrs_encoder_model_s.Model().to(device)
+    # model = Model().to(device)
     model.load_state_dict(torch.load(config.MODEL_PATH, weights_only=True))
 
     summary_env = lmdb.open(config.SUMMARY_DB_PATH, readonly=True, lock=False)
@@ -59,7 +61,8 @@ def worker_job(config, job_queue, writer_queue, progress_queue):
                         print(f"Reserved: {reserved / (1024 ** 3):.3f} GB. Emptying cache.")
                         torch.cuda.empty_cache()
                     
-                    model.eval()
+                    # model.eval()
+                    model.train()
                     batches = decoder_ops.get_data(summary_txn, user, config.DEVICE)
                     T = decoder_ops.extract_num_reviews(batches)
                     splits = load_tensor(label_filter_txn, f"{user}_split", device=device).tolist()
@@ -137,7 +140,7 @@ def main(config):
     print("Unprocessed users length:", len(unprocessed_users))
 
     job_queue = mp.Queue()
-    for user_id in users:
+    for user_id in unprocessed_users:
         job_queue.put(user_id)
 
     with mp.Manager() as manager:

@@ -25,6 +25,8 @@ CLIP = 8
 def log_model(log, model, device):
     with torch.no_grad():
         for name, param in model.named_parameters():
+            if param.numel() == 0:
+                continue
             log[f"model/{name}.data.mean"] = param.mean().item()
             if param.numel() > 1:
                 log[f"model/{name}.data.std"] = param.std().item()
@@ -61,12 +63,15 @@ def get_optimizer(config, model):
         else:
             params_by_width[width].append((name, param))
 
+    param_configs = []
     for width, named_parameters in params_by_width.items():
         decay_params = []
         combine_params = []
         non_weight_params = []
         exclude_params = []
-        print("WIDTH:", width)
+        lr = 16 * config.PEAK_LR / max(16, width)
+        print("Width:", width, "lr:", lr, len(decay_params), len(non_weight_params))
+        print()
         for name, param in named_parameters:
             in_exclude_names = np.array([x in name for x in exclude_names]).any()
             if in_exclude_names and "weight" not in name:
@@ -76,49 +81,34 @@ def get_optimizer(config, model):
             elif "weight" not in name:
                 print("Skip decay:", name, param.shape)
                 non_weight_params.append(param)
+                param_configs.append((param, WEIGHT_DECAY / 10, lr))
             elif "combine" in name:
                 print("Combine:", name)
                 combine_params.append(param)
+                param_configs.append((param, WEIGHT_DECAY, lr / 2))
             else:
                 print("Decay:", name, param.shape)
                 decay_params.append(param)
-
-        lr = 16 * config.PEAK_LR / width
-        # if width < 16:
-        #     lr /= 10 / 1.5
-        #     print("Reducing LR for width:", width)
-        print("Width:", width, "lr:", lr, len(decay_params), len(non_weight_params))
-        print()
-        param_groups.append(
-            {
-                "params": decay_params,
-                "weight_decay": WEIGHT_DECAY,
-                "lr": lr,
-            }
-        )
-        param_groups.append(
-            {
-                "params": combine_params,
-                "weight_decay": WEIGHT_DECAY,
-                "lr": lr / 2,
-            }
-        )
-        param_groups.append(
-            {
-                "params": non_weight_params,
-                "weight_decay": WEIGHT_DECAY / 10,
-                "lr": lr,
-            }
-        )
-        # param_groups.append(
-        #     {
-        #         "params": exclude_params,
-        #         "weight_decay": WEIGHT_DECAY / 100,
-        #         "lr": lr,
-        #     }
-        # )
+                param_configs.append((param, WEIGHT_DECAY, lr))
+                # if "x_flat" in name or "x_scale" in name:
+                #     print("FOUND", name)
+                #     param_configs.append((param, 0.001, lr))
+                # else:
 
     assert len(found_exclude) == len(exclude_names)
+    groups = defaultdict(list)
+
+    for p, wd, lr in param_configs:
+        groups[(wd, lr)].append(p)
+
+    param_groups = []
+    for (wd, lr), params in groups.items():
+        param_groups.append({
+            "params": params,
+            "weight_decay": wd,
+            "lr": lr,
+        })
+
     return torch.optim.AdamW(
         param_groups,
         eps=ADAMW_EPS,
@@ -480,6 +470,9 @@ def main(config):
                         print(f"Skipping: {user}, size: {T}")
                     else:
                         try:
+                            # with torch.no_grad():
+                            #     model.card_model.x_flat.weight.copy_(dev.proj(model.card_model.x_flat.weight))
+                            #     model.card_model.x_scale.weight.copy_(dev.proj(model.card_model.x_scale.weight))
                             # train_l, test_r = get_split(T)
                             train_l = 0
                             test_l, weights = get_weights(T)
@@ -503,9 +496,14 @@ def main(config):
                             first_loss_bce_avg = first_stats.bce_loss_sum / (1e-7 + first_stats.loss_n)
                             first_n = first_stats.loss_n
 
+                            l1_penalty = review_stats.loss_n * (model.card_model.feature_lin.weight.abs().sum())
+                            l1_penalty_avg = l1_penalty / review_stats.loss_n
+                            l1_factor = 1e-5 * (1e-3 / 1e-5) * min(1, step / 30000)
+                            # l1_penalty = 0
+                            # l1_penalty_avg = 0
                             ce_sum = review_stats.ce_loss_sum + first_stats.ce_loss_sum
                             bce_sum = review_stats.bce_loss_sum + first_stats.bce_loss_sum
-                            tot_loss = bce_sum + 1e-1 * ce_sum
+                            tot_loss = bce_sum + 1e-1 * ce_sum + l1_factor * l1_penalty
 
                             if user in train_review_loss_dict:
                                 lagging_train_review_loss_dict[user] = train_review_loss_dict[user]
@@ -528,6 +526,7 @@ def main(config):
                                         log["superiority/bce_epoch_superiority"] = get_superiority(lagging_train_review_loss_bce_dict, train_review_loss_bce_dict)
                                         log["superiority/epoch_superiority"] = get_superiority(lagging_train_review_loss_dict, train_review_loss_dict)
                                 log["encoding/encoding_std"] = encoding.std()
+                                log["l1"] = l1_penalty_avg
                                 if fsrs_params is not None:
                                     for i, x in enumerate(fsrs_params.tolist()):
                                         i_str = "0" * (2 - len(str(i))) + str(i)
@@ -547,6 +546,25 @@ def main(config):
                                     print(f"First rating dist: {[round(x, 2) for x in torch.nn.functional.softmax(first_review_logits, dim=-1).cpu().tolist()]}")
                                     print(f"{step} {epoch}, user: {user}, loss_ce: {review_loss_ce_avg.item():.3f}, loss_bce: {review_loss_bce_avg.item():.3f}, n: {review_n:.2f}, grad norm: {grad_norm:.3f}, lr: {current_lr:.3e}")
                                     print(f"Elapsed: {time() - time_start:.3f}")
+                                    torch.set_printoptions(sci_mode=False)
+                                    print("L1", l1_penalty_avg)
+                                    with torch.no_grad():
+                                        card_model = model.card_model
+                                        # for i in range(card_model.n_feature):
+                                        #     print()
+                                        #     print("neuron:", i)
+                                        #     # print(f"poly: {(2 * torch.sigmoid(card_model.act.poly_deg[i])).item():.3f}")
+                                        #     print("bias:", card_model.feature_lin.bias[i])
+                                        #     print("flat:", card_model.feature_lin.weight[i])
+                                        card_model = model.card_model
+                                        for i in range(card_model.n_feature):
+                                            print()
+                                            print("neuron:", i)
+                                            print("bias:", card_model.feature_lin.bias[i])
+                                            print("flat:", card_model.feature_lin.weight[i])
+                                            factor = 1 / torch.abs(card_model.feature_lin.weight[i]).max()
+                                            print("bias:", card_model.feature_lin.bias[i] * factor)
+                                            print("flat:", card_model.feature_lin.weight[i] * factor)
                                     # with torch.no_grad():
                                     #     mo/model.card_model.print_curve(encoding)
                                     time_start = time()
@@ -625,12 +643,12 @@ def main(config):
                         log["validation/cond_loss"] = best_cond_loss
                         log["validation/first_bce"] = best_first_bce
                         log["validation/first_ce"] = best_first_ce
-                        validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config, model_mode="train_compress", log=log)
-                        log["validation_overfit/validation_overfit_loss"] = validate_overfit_result.loss_weighted_review
-                        log["validation_overfit/validation_overfit_loss_user"] = validate_overfit_result.loss_weighted_user
-                        log["validation_overfit/cond_loss"] = validate_overfit_result.cond_loss
-                        log["validation_overfit/first_bce"] = validate_overfit_result.first_bce
-                        log["validation_overfit/first_ce"] = validate_overfit_result.first_ce
+                        # validate_overfit_result: ValidateResult = validate(model, summary_txn, label_filter_txn, validate_overfit_users, config, model_mode="train_compress", log=log)
+                        # log["validation_overfit/validation_overfit_loss"] = validate_overfit_result.loss_weighted_review
+                        # log["validation_overfit/validation_overfit_loss_user"] = validate_overfit_result.loss_weighted_user
+                        # log["validation_overfit/cond_loss"] = validate_overfit_result.cond_loss
+                        # log["validation_overfit/first_bce"] = validate_overfit_result.first_bce
+                        # log["validation_overfit/first_ce"] = validate_overfit_result.first_ce
 
                     if config.USE_WANDB:
                         wandb.log(log, step=step, commit=True)

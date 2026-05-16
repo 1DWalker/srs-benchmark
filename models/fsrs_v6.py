@@ -106,6 +106,7 @@ class FSRS6(FSRS5):
             torch.arange(real_batch_size, device=self.config.device),
         ].transpose(0, 1)
         retentions = self.forgetting_curve(delta_ts, stabilities, -self.w[20])
+        retentions = torch.full_like(retentions, 0.9)
         output = {
             "retentions": retentions,
             "stabilities": stabilities,

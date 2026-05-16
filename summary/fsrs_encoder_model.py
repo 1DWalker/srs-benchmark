@@ -22,25 +22,18 @@ class CardModel(torch.nn.Module):
         with torch.no_grad():
             self.fsrs_linear.bias[1:4].copy_(torch.tensor([-2.2, -0.5, -0.5]))
 
-    def encoding_to_fsrs(self, encoding_h):
+    def encoding_to_fsrs(self, encoding_h, log={}):
         if len(encoding_h.shape) == 2:
             encoding_h = encoding_h.mean(dim=0)
         x = self.fsrs_linear(encoding_h)
         fsrs_params = FSRS.nn_vec_to_fsrs7_params(x)
+        if "factor" in log:
+            log["factor"].append(x)
         return fsrs_params
 
-    def forward(self, encoding_h, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl):
-        fsrs_params = self.encoding_to_fsrs(encoding_h)
+    def forward(self, encoding_h, feature_elapsed_days_real_bl, feature_elapsed_days_int_bl, feature_rating_bl, label_elapsed_days_real_bl, label_elapsed_days_int_bl, log):
+        fsrs_params = self.encoding_to_fsrs(encoding_h, log)
         B, L = feature_elapsed_days_real_bl.shape
-
-        # self.d_transition_model.set_encoding(encoding_h=encoding_h)
-        # def d_transition(
-        #     s_b,
-        #     d_b,
-        #     feature_elapsed_days_real_b, 
-        #     feature_rating_b
-        # ):
-        #     return self.d_transition_model(None, s_b, d_b, feature_elapsed_days_real_b, feature_rating_b)
 
         x_bl, state_bl2 = FSRS.forward(
             parameters_p=fsrs_params, 
@@ -146,7 +139,7 @@ class SDRatingElapsedModel(torch.nn.Module):
         feature_rating_onehot_b4 = torch.nn.functional.one_hot((feature_rating_b.long() - 1).clamp(min=0), num_classes=4).float()
         x = torch.cat(
             (
-                transform_elapsed_days_real(s_b).unsqueeze(-1),
+                model.transform_elapsed_days_real(s_b).unsqueeze(-1),
                 torch.log(11 - d_b).unsqueeze(-1),
                 transform_elapsed_days_real(feature_elapsed_days_real_b).unsqueeze(-1), 
                 feature_rating_onehot_b4,

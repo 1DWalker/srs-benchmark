@@ -16,8 +16,8 @@ class CardModel(torch.nn.Module):
     def __init__(self, n_encoding):
         super().__init__()
         self.fsrs_linear = nn.Linear(n_encoding, 35)
-        torch.nn.init.zeros_(self.fsrs_linear.weight)
         torch.nn.init.zeros_(self.fsrs_linear.bias)
+        torch.nn.init.zeros_(self.fsrs_linear.weight)
         with torch.no_grad():
             self.fsrs_linear.bias[1:4].copy_(torch.tensor([-2.2, -0.5, -0.5]))
         self.curve_n_hidden = 18
@@ -32,7 +32,7 @@ class CardModel(torch.nn.Module):
         S = torch.tensor([60 * MINUTE, 1.0, 30], device=encoding_h.device)
         D = torch.tensor([1.0, 7.0, 10.0], device=encoding_h.device)
         grid_s, grid_d = torch.meshgrid(S, D, indexing='ij')
-        decay, base, weight, swp = self.fcnn.get_curve(curve_encoding_h, grid_s, grid_d)
+        decay, base, weight = self.fcnn.get_curve(curve_encoding_h, grid_s, grid_d)
         for j, d in enumerate(D):
             print(f"\n=== D = {d.item():.3f} ===")
             for i, s in enumerate(S):
@@ -40,7 +40,13 @@ class CardModel(torch.nn.Module):
                 print(f"    Decay : {[f'{x:.3f}' for x in decay[i, j].tolist()]}")
                 print(f"    Base  : {[f'{x:.3f}' for x in base[i, j].tolist()]}")
                 print(f"    Weight: {[f'{x:.3f}' for x in weight[i, j].tolist()]}")
-                print(f"    Swp   : {[f'{x:.3f}' for x in swp[i, j].tolist()]}")
+
+    def run_curve(self, encoding_h, s_b, d_b):
+        if len(encoding_h.shape) == 2:
+            encoding_h = encoding_h.mean(dim=0)
+        curve_encoding_h = self.curve_nn_encode(encoding_h)
+        return self.fcnn.get_curve(curve_encoding_h, s_b, d_b)
+
 
     def encoding_to_fsrs(self, encoding_h):
         if len(encoding_h.shape) == 2:
@@ -99,7 +105,7 @@ class FCNN(nn.Module):
             *[model.FFBlock(n_hidden=self.n_hidden, use_timeshift=False, dropout=0, use_checkpoint=False) for _ in range(self.n_blocks)],
             nn.LayerNorm(self.n_hidden),
         )
-        self.proj = nn.Linear(self.n_hidden, 4 * self.n_curves)
+        self.proj = nn.Linear(self.n_hidden, 3 * self.n_curves)
         torch.nn.init.zeros_(self.proj.bias)
         with torch.no_grad():
             self.proj.weight.multiply_(0.1)
@@ -111,13 +117,6 @@ class FCNN(nn.Module):
         mid = np.log((def_log - lo_log) / (hi_log - def_log))
         out_log = lo_log + (hi_log - lo_log) * torch.sigmoid(x + mid)
         return torch.exp(out_log)
-    # def bounded_exp(self, x, lo, hi, default):
-    #     lo_log = np.log(lo)
-    #     hi_log = np.log(hi)
-    #     def_log = torch.log(default)
-    #     mid = torch.log((def_log - lo_log) / (hi_log - def_log))
-    #     out_log = lo_log + (hi_log - lo_log) * torch.sigmoid(x + mid)
-    #     return torch.exp(out_log)
 
     def get_curve(
             self, 
@@ -135,27 +134,11 @@ class FCNN(nn.Module):
         x_bh = self.encode(x_b2) + encoding_bh
         x_bh = self.core(x_bh)
         out = self.proj(x_bh)
-        decay, base, weight, swp = out.chunk(4, dim=-1)
-        """
-            w[27] = w[27].clamp(0.01, 0.25)  # decay 1
-            w[28] = w[28].clamp(w[27], 0.95)  # decay 2
-            w[29] = w[29].clamp(0.5, 0.85)  # base 1
-            w[30] = w[30].clamp(w[29], 0.99)  # base 2
-            w[31] = w[31].clamp(0.01, 1)  # weight 1
-            w[32] = w[32].clamp(0.1, 1)  # weight 2
-            w[33] = w[33].clamp(0, 0.9)  # S weight power 1
-            w[34] = w[34].clamp(0.1, 1.1)  # S weight power 2
-        """
-        device = x_bh.device
-        # decay = self.bounded_exp(decay, 0.01, 0.95, torch.tensor([0.0723, 0.1634], device=device))
-        # base = self.bounded_exp(base, 0.1, 0.99, torch.tensor([0.5, 0.95], device=device))
-        # weight = self.bounded_exp(weight, 0.01, 1, torch.tensor([0.22, 0.62], device=device))
-        # swp = self.bounded_exp(swp, 0.1, 1.1, torch.tensor([0.13, 0.38], device=device))
+        decay, base, weight = out.chunk(3, dim=-1)
         decay = self.bounded_exp(decay, 0.01, 0.95, 0.2)
-        base = self.bounded_exp(base, 0.1, 0.99, 0.9)
-        weight = self.bounded_exp(weight, 0.01, 1, 0.5)
-        swp = self.bounded_exp(swp, 0.1, 1.1, 0.5)
-        return decay, base, weight, swp
+        base = self.bounded_exp(base, 0.3, 0.99, 0.8)
+        weight = torch.softmax(weight, dim=-1)
+        return decay, base, weight
 
     def forward(
             self, 
@@ -164,14 +147,11 @@ class FCNN(nn.Module):
             s_b,
             d_b,
         ):
-        decay, base, base_weight, swp = self.get_curve(encoding_bh, s_b, d_b)
+        decay, base, weight = self.get_curve(encoding_bh, s_b, d_b)
         t_over_s = (t_b.clamp_min(1e-5) / s_b).unsqueeze(-1)
         factor = base ** (1 / -decay) - 1
         R = (1 + factor * t_over_s) ** -decay
-        weight = base_weight * s_b.unsqueeze(-1) ** swp
-        return 1e-5 + (1 - 2e-5) * ((weight * R).sum(-1) / weight.sum(-1))
-
-
+        return 1e-5 + (1 - 2e-5) * (weight * R).sum(-1)
 
 # class SDRatingElapsedModel(torch.nn.Module):
 #     def __init__(self, n_encoding):
@@ -210,40 +190,6 @@ class FCNN(nn.Module):
 #         for block in self.blocks:
 #             x = block(x)
 #         return self.last(x)
-
-# class DTransitionModel(torch.nn.Module):
-#     def __init__(self, n_encoding):
-#         super().__init__()
-#         self.core = SDRatingElapsedModel(n_encoding=n_encoding)
-
-#     def set_encoding(self, encoding_h):
-#         self.core.set_encoding(encoding_h)
-
-#     def forward(
-#             self, 
-#             encoding_h,
-#             s_b,
-#             d_b,
-#             feature_elapsed_days_real_b, 
-#             feature_rating_b, 
-#             ):
-#         x = self.core(encoding_h, s_b, d_b, feature_elapsed_days_real_b, feature_rating_b)
-#         return 1 + 9 * torch.sigmoid(x).squeeze(-1)
-
-# class DInitModel(torch.nn.Module):
-#     def __init__(self, n_encoding):
-#         super().__init__()
-#         self.linear = nn.Linear(n_encoding, 4)
-
-#     def forward(
-#             self, 
-#             s_b,
-#             d_b,
-#             feature_elapsed_days_real_b, 
-#             feature_rating_b, 
-#             ):
-#         x = self.core(s_b, d_b, feature_elapsed_days_real_b, feature_rating_b)
-#         return 1 + 9 * torch.sigmoid(x)
 
 class Model(torch.nn.Module):
     def __init__(self):

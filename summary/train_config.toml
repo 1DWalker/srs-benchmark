@@ -1,7 +1,7 @@
 SUMMARY_DB_PATH = "compact_db"
 LABEL_FILTER_DB_PATH = "label_filter_db"
 
-SEED = 112
+SEED = 111
 
 TRAIN_USER_START = 5001
 TRAIN_USER_END = 10000
@@ -20,25 +20,30 @@ DTYPE = "float"
 WARMUP_START_LR = 0
 PEAK_LR = 3e-3
 
+# for FSRS
+USE_MAX_SEQ_LEN = true
+MERGE_DECODE_BATCHES = false
+
 TRAIN_MODE = "WSD" # options are "WSD", "D"
 START_STEP = 0
 START_SCHEDULER_AT_START_STEP = true
-WARMUP_STEPS = 30
-TOTAL_STEPS = 200
+WARMUP_STEPS = 6000
+TOTAL_STEPS = 100000
 VALIDATE_STEPS = 5000
 
-LOAD_MODEL = false
+LOAD_MODEL = true
 LOAD_MODEL_FOLDER = "pretrain/lstm_encoder"
-LOAD_MODEL_NAME = "lstm_encoder_big_nodropout_214999"
+# LOAD_MODEL_NAME = "LSTM encoder attention res cosine decay_29999"
+LOAD_MODEL_NAME = "dev_0"
 SAVE_MODEL_FOLDER = "pretrain/lstm_encoder"
-SAVE_MODEL_PREFIX = "lstm_encoder_big_nodropout_decay"
+SAVE_MODEL_PREFIX = "dev"
 
-USE_WANDB = false
+USE_WANDB = true
 WANDB_PROJECT_NAME = "LSTM encoder"
-WANDB_RUN_NAME = "small"  # Human-readable name shown in UI and the ID
+WANDB_RUN_NAME = "ff fsrs curve 3"  # Human-readable name shown in UI and the ID
 WANDB_RESUME_MODE = "never"   # "never" | "allow" | "must" | "auto"
 
 # Skip batches of a certain length of longer
-SKIP_LENGTH = 600_000
+SKIP_LENGTH = 700_000
 # Clear the CUDA cache if the reserved memory is over a certain amount
-THRESHOLD_RESERVED_GB = 7.0
+THRESHOLD_RESERVED_GB = 7.6

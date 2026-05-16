@@ -401,6 +401,7 @@ if __name__ == "__main__":
         unprocessed_users.append(user_id_value)
 
     unprocessed_users.sort()
+    unprocessed_users = [1]
 
     cuda_device_ids = None
     if config.cuda_device_ids:
