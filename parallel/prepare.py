@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
+import signal
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+
+
+if __name__ == "__mp_main__":
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 import lmdb
 import numpy as np
@@ -25,6 +31,29 @@ lmdb_env: lmdb.Environment | None = None
 worker_config: Config | None = None
 
 
+def stop_executor_now(executor: ProcessPoolExecutor, futures: list) -> None:
+    for future in futures:
+        future.cancel()
+
+    kill_workers = getattr(executor, "kill_workers", None)
+    if kill_workers is not None:
+        kill_workers()
+        return
+
+    terminate_workers = getattr(executor, "terminate_workers", None)
+    if terminate_workers is not None:
+        terminate_workers()
+        return
+
+    processes = getattr(executor, "_processes", None)
+    executor.shutdown(wait=False, cancel_futures=True)
+    if processes is None:
+        return
+    for process in processes.values():
+        if process.is_alive():
+            process.terminate()
+
+
 def _open_lmdb_env(
     lmdb_path: Path,
     lmdb_size: int,
@@ -41,6 +70,7 @@ def init_worker(
     config: Config,
 ) -> None:
     global lmdb_env, worker_config
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     lmdb_env = _open_lmdb_env(lmdb_path, lmdb_size)
     worker_config = config
 
@@ -89,7 +119,7 @@ def build_benchmark_tensors(
     rmse_bins = np.concatenate(rmse_bins)
     assert np.array_equal(np.sort(test_indices), test_indices)
     test_index_tensor = torch.tensor(test_indices, dtype=torch.int32)
-    rmse_bins_tensor = torch.tensor(rmse_bins, dtype=torch.int32)
+    rmse_bins_tensor = torch.tensor(rmse_bins, dtype=torch.int8)
     split_tensor = torch.tensor(split_test_ranges, dtype=torch.int32)
     return test_index_tensor, rmse_bins_tensor, split_tensor
 
@@ -161,8 +191,9 @@ def main() -> None:
         for future in tqdm(as_completed(futures), total=len(futures), smoothing=0.03):
             future.result()
     except KeyboardInterrupt:
-        for future in futures:
-            future.cancel()
+        stop_executor_now(executor, futures)
+        os._exit(130)
+    except BaseException:
         executor.shutdown(wait=False, cancel_futures=True)
         raise
     else:
