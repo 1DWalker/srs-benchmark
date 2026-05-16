@@ -9,12 +9,13 @@ from tqdm import tqdm
 from parallel.config import (
     LMDB_PATH,
     LMDB_SIZE,
+    DEVICE,
 )
-from parallel.tensors import UserTensorBlob
+from parallel.tensors import ConcatTensors, UserTensorBlob
 
 def load_blob_bytes(blob_bytes: bytes) -> UserTensorBlob:
     buffer = BytesIO(blob_bytes)
-    tensors = torch.load(buffer, weights_only=True, map_location="cpu")
+    tensors = torch.load(buffer, weights_only=True, map_location=DEVICE)
     return UserTensorBlob.from_dict(tensors)
 
 def load_metadata_tensor(txn: lmdb.Transaction, key: str) -> torch.Tensor:
@@ -38,14 +39,21 @@ def load_user_blob(txn: lmdb.Transaction, user_id: int) -> UserTensorBlob:
 def run(
     env: lmdb.Environment,
     users: list[int],
-) -> list[UserTensorBlob]:
+) -> None:
     with env.begin(write=False) as txn:
         blobs = [
             load_user_blob(txn, user_id)
-            for user_id in tqdm(users, total=len(users), smoothing=0.03)
+            for user_id in tqdm(users, total=len(users), smoothing=0.03, desc="Loading user data")
         ]
 
     print(blobs)
+
+    data = ConcatTensors(blobs)
+    print(data)
+
+    # evaluate
+    with torch.no_grad():
+        pass
 
 def main() -> None:
     env = lmdb.open(
@@ -55,7 +63,8 @@ def main() -> None:
         lock=False,
     )
 
-    run(env, [3, 4])
+    # run(env, list(range(1, 1001)))
+    run(env, [3, 4, 5])
 
     # with env.begin(write=False) as txn:
     #     user_max_train_split_lengths = load_metadata_tensor(
