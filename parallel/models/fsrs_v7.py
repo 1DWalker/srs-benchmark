@@ -158,8 +158,7 @@ def fsrs7_step(l: int, p: FSRS7Buffer, feature_elapsed, feature_rating, stabilit
     return new_s, new_d
 
 
-@torch.jit.script
-def forward(parameters_bp, feature_elapsed_days_real_bl, feature_rating_bl, label_elapsed_days_real_bl):
+def forward(parameters_bp, feature_elapsed_days_real_bl, feature_rating_bl, seq_lens):
     p: FSRS7Buffer = build_params_buffer(parameters_bp)
 
     B, L = feature_elapsed_days_real_bl.shape
@@ -174,13 +173,16 @@ def forward(parameters_bp, feature_elapsed_days_real_bl, feature_rating_bl, labe
         feature_elapsed_days_real_bl.transpose(0, 1),
         feature_rating_bl.long().transpose(0, 1),
     ):
+        if l == L:
+            break
         stability, difficulty = fsrs7_step(l, p, feature_elapsed, feature_rating, stability, difficulty)
         outputs.append(stability)
         l += 1
 
     output_tensor = torch.stack(outputs, dim=-1)
-
-    return forgetting_curve(p, label_elapsed_days_real_bl, output_tensor), output_tensor
+    review_s = output_tensor[torch.arange(B), seq_lens - 2]
+    review_elapsed = feature_elapsed_days_real_bl[torch.arange(B), seq_lens - 1]
+    return forgetting_curve(p, review_elapsed, review_s)
 
 
 FSRS7_DEFAULT_35 = torch.tensor(
@@ -220,7 +222,44 @@ FSRS7_DEFAULT_35 = torch.tensor(
         0.6232,
         0.1362,
         0.3862,
-    ]
+    ] 
+    # [
+    #     0.041,
+    #     2.4175,
+    #     4.1283,
+    #     11.9709,  # Initial S
+    #     5.6385,
+    #     0.4468,
+    #     3.262,  # Difficulty
+    #     2.3054,
+    #     0.1688,
+    #     1.3325,
+    #     0.3524,
+    #     0.0049,
+    #     0.7503,
+    #     0.0896,
+    #     0.6625,
+    #     1.3,  # Stability (long-term)
+    #     0.882,
+    #     0.3072,
+    #     3.5875,
+    #     0.303,
+    #     0.0107,
+    #     0.2279,
+    #     2.6413,
+    #     0.5594,
+    #     1.3,  # Stability (short-term)
+    #     2.5,
+    #     1.0,  # Long-short term transition function
+    #     0.0723,
+    #     0.1634,
+    #     0.5,
+    #     0.9555,
+    #     0.2245,
+    #     0.6232,
+    #     0.1362,
+    #     0.3862,
+    # ]
 )
 
 FSRS_MIN = torch.tensor(

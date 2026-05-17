@@ -69,7 +69,7 @@ class UserTensorBlob:
         return cls(**tensors)
 
 
-class ConcatTensors:
+class Data:
     def __init__(self, user_data_list: list[UserTensorBlob]) -> None:
         self.review_data = ReviewData(
             rating=torch.concat([user_data.rating for user_data in user_data_list], dim=-1),

@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 
 import lmdb
+from sklearn.metrics import log_loss
 import torch
 from tqdm import tqdm
 
@@ -13,7 +14,8 @@ from parallel.config import (
     N_SPLITS,
     TEST_BATCH_SIZE_MAX,
 )
-from parallel.tensors import ConcatTensors, ParamKey, ReviewData, UserTensorBlob
+from parallel.models import fsrs_v7
+from parallel.tensors import Data, ParamKey, ReviewData, UserTensorBlob
 
 def load_blob_bytes(blob_bytes: bytes) -> UserTensorBlob:
     buffer = BytesIO(blob_bytes)
@@ -41,40 +43,54 @@ def predict(review_data: ReviewData, index, params):
     assert index.size(0) == params.size(0)
     seq_lens = review_data.seq_len[index]
     max_seq_len = seq_lens.max()
-    print(seq_lens)
-    print(max_seq_len)
-    pass
+    card_start_index = index - seq_lens + 1
+    data_len = review_data.elapsed_days_real.size(0)
+    take_indices = (card_start_index.unsqueeze(-1) + torch.arange(max_seq_len.item(), device=index.device).repeat(index.size(0), 1)).clamp_max(data_len - 1)
+
+    # TODO possible bug from overlap, if it hits 0 elapsed time
+    rating_bl = review_data.rating[take_indices]
+    elapsed_time_real_bl = review_data.elapsed_days_real[take_indices]
+
+    # fsrs_params = fsrs_v7.nn_vec_to_fsrs7_params(params)
+    fsrs_params = fsrs_v7.FSRS7_DEFAULT_35.to(params.device).unsqueeze(0).expand(params.size(0), -1)
+    return fsrs_v7.forward(fsrs_params, elapsed_time_real_bl, rating_bl, seq_lens)
     
 
-def evaluate_on_test_set(fsrs_params: torch.Tensor, data: ConcatTensors):
+def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("eval on test")
     param_keys = data.get_test_index_param_key()
 
     test_seq_len = data.review_data.seq_len[data.test_index]
-    sorted_test_index_permutation = torch.argsort(test_seq_len)
-    # sorted_test_index = data.test_index[sorted_test_index_permutation]
-    # sorted_param_key = ParamKey(
-    #     user_index=unsorted_param_key.user_index[sorted_test_index_permutation],
-    #     split_index=unsorted_param_key.split_index[sorted_test_index_permutation],
-    # )
-    restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
-    restore_test_index_permutation[sorted_test_index_permutation] = torch.arange(
-        sorted_test_index_permutation.numel(),
-        device=sorted_test_index_permutation.device,
-    )
+    sorted_test_index_permutation = torch.argsort(test_seq_len, stable=True)
     print("sort done")
 
     def ceil_div(a: int, b: int) -> int:
         return (a + b - 1) // b
 
+    # TODO use the same load balancing as training
     N = data.test_index.size(0)
     num_batches = ceil_div(N, TEST_BATCH_SIZE_MAX)
     batch_size = ceil_div(N, num_batches)
+    gather_p = []
     for perm_slice in sorted_test_index_permutation.split(batch_size):
-        batch = test_seq_len[perm_slice]
-        batch_fsrs_params = fsrs_params[param_keys.user_index[batch], param_keys.split_index[batch]]
-        p = predict(data.review_data, batch, batch_fsrs_params)
+        batch_fsrs_params = fsrs_params[param_keys.user_index[perm_slice], param_keys.split_index[perm_slice]]
+        p = predict(data.review_data, data.test_index[perm_slice], batch_fsrs_params)
+        gather_p.append(p)
     
+    # TODO reduce memory by removing the inverse perm tensor
+    restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
+    restore_test_index_permutation[sorted_test_index_permutation] = torch.arange(
+        sorted_test_index_permutation.numel(),
+        device=sorted_test_index_permutation.device,
+    )
+    gather_p = torch.cat(gather_p, dim=-1)[restore_test_index_permutation]
+
+    p_by_user = gather_p.split(data.test_index_lens)
+    label_by_user = (data.review_data.rating[data.test_index] > 1).split(data.test_index_lens)
+
+    for user, pred, label in tqdm(zip(users, p_by_user, label_by_user), smoothing=0.03):
+        logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
+        print(f"User: {user}, logloss={logloss:.3f}")
 
 def run(
     env: lmdb.Environment,
@@ -85,19 +101,19 @@ def run(
             load_user_blob(txn, user_id)
             for user_id in tqdm(users, total=len(users), smoothing=0.03, desc="Loading user data")
         ]
+        data = Data(blobs)
+        del blobs
 
     # TODO sort users by train split length
     # TODO train
 
-    print(blobs)
 
     fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
-    data = ConcatTensors(blobs)
     print(data)
 
     # evaluate
     with torch.no_grad():
-        evaluate_on_test_set(fsrs_params, data)
+        evaluate_on_test_set(fsrs_params, users, data)
 
 def main() -> None:
     env = lmdb.open(
