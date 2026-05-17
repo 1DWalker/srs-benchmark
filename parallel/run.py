@@ -10,8 +10,9 @@ from parallel.config import (
     LMDB_PATH,
     LMDB_SIZE,
     DEVICE,
+    TEST_PARALLEL,
 )
-from parallel.tensors import ConcatTensors, UserTensorBlob
+from parallel.tensors import ConcatTensors, ReviewData, UserTensorBlob
 
 def load_blob_bytes(blob_bytes: bytes) -> UserTensorBlob:
     buffer = BytesIO(blob_bytes)
@@ -35,6 +36,19 @@ def load_user_blob(txn: lmdb.Transaction, user_id: int) -> UserTensorBlob:
         raise LookupError(f"Packed blob not found for user {user_id}.")
     return load_blob_bytes(blob_bytes)
 
+def predict(review_data: ReviewData, index, param_key, params):
+    pass
+    
+
+def evaluate_on_test_set(fsrs_params: torch.Tensor, data: ConcatTensors):
+    # get the right params for each test index
+    # test_p = predict(data.review_data, data.test_index, data.test_index_param_key, fsrs_params)
+    param_key = data.get_test_index_param_key()
+    parallel_n = TEST_PARALLEL
+
+    print("eval on test")
+
+    print("sort done")
 
 def run(
     env: lmdb.Environment,
@@ -48,12 +62,13 @@ def run(
 
     print(blobs)
 
+    fsrs_params = torch.randn((len(users), 2, 35))
     data = ConcatTensors(blobs)
     print(data)
 
     # evaluate
     with torch.no_grad():
-        pass
+        evaluate_on_test_set(fsrs_params, data)
 
 def main() -> None:
     env = lmdb.open(
@@ -64,7 +79,7 @@ def main() -> None:
     )
 
     # run(env, list(range(1, 1001)))
-    run(env, [3, 4, 5])
+    run(env, [1, 2])
 
     # with env.begin(write=False) as txn:
     #     user_max_train_split_lengths = load_metadata_tensor(

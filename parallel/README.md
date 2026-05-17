@@ -8,14 +8,17 @@ The database path is `parallel_db`; the map size is `50_000_000_000` bytes.
 
 ## Raw Review Tensors
 
-These tensors come directly from `revlogs/user_id=<user_id>` before feature
-engineering.
+These tensors come from `revlogs/user_id=<user_id>` before feature engineering,
+then are stored in `(card_id, original positional index)` order.
 
 | Blob Entry | Dtype | Shape | Meaning |
 | --- | --- | --- | --- |
 | `ratings` | `torch.int8` | `[raw_reviews]` | Raw `rating` column. |
 | `elapsed_days_int` | `torch.int32` | `[raw_reviews]` | Raw `elapsed_days` column. |
 | `elapsed_days_real` | `torch.float32` | `[raw_reviews]` | `elapsed_seconds / 86400`, so `1.0 == 1 day`. |
+| `card_sorted_index` | `torch.int32` | `[raw_reviews]` | Permutation from grouped tensor position to original positional review index (`review_th - 1`). |
+| `seq_len` | `torch.int32` | `[raw_reviews]` | 1-indexed review number within each card group after sorting by `(card_id, original positional index)`. |
+| `card_last_index` | `torch.int32` | `[cards]` | Inclusive last grouped raw-tensor index for each card group, in grouped-card order. |
 
 ## Test Tensors
 
@@ -24,12 +27,19 @@ copy is intentional: feature creation mutates the dataframe.
 
 | Blob Entry | Dtype | Shape | Meaning |
 | --- | --- | --- | --- |
-| `test_index` | `torch.int32` | `[test_reviews_total]` | Concatenated test reviews for all TSCV splits, as `review_th - 1`. |
+| `test_index` | `torch.int32` | `[test_reviews_total]` | Concatenated test reviews for all TSCV splits, as indices into the grouped raw tensors. |
 | `rmse_bins` | `torch.int8` | `[test_reviews_total]` | RMSE-bin category code for each entry in `test_index`. |
-| `split` | `torch.int32` | `[n_splits + 1]` | 0-indexed test range starts for each split, plus `1_000_000_000` sentinel. |
+| `split` | `torch.int32` | `[n_splits]` | Number of test reviews recorded for each TSCV split. |
 
 `test_index` and `rmse_bins` have matching positions. For split `s`, the test
-range starts at `split[s]` and ends before `split[s + 1]`.
+slice is:
+
+```python
+test_start = split[:s].sum()
+test_end = test_start + split[s]
+split_test_index = test_index[test_start:test_end]
+split_rmse_bins = rmse_bins[test_start:test_end]
+```
 
 ## Training Batch Tensors
 
@@ -47,7 +57,7 @@ so batch `0` contains the shortest remaining sequences, not the longest.
 
 | Blob Entry | Dtype | Shape | Meaning |
 | --- | --- | --- | --- |
-| `train_index` | `torch.int32` | `[train_reviews_total]` | Concatenated train review indices, as `review_th - 1`, in batch-layout order. |
+| `train_index` | `torch.int32` | `[train_reviews_total]` | Concatenated train review indices into the grouped raw tensors, in batch-layout order. |
 | `train_batch_lengths` | `torch.int32` | `[train_batches_total]` | Length of each batch in `train_index`. |
 | `train_split_lengths` | `torch.int32` | `[n_splits]` | Number of training batches for each TSCV split. |
 | `batch_order` | `torch.int32` | `[100 * train_batches_total]` | Concatenated shuffled batch ids for 100 epochs per split. |

@@ -51,6 +51,11 @@ class BenchmarkTensors(NamedTuple):
     train_split_lengths: torch.Tensor
 
 
+class RawTensorLayout(NamedTuple):
+    tensors: dict[str, torch.Tensor]
+    raw_to_grouped_index: np.ndarray
+
+
 def save_user_blob(
     txn: lmdb.Transaction,
     user_id: int,
@@ -81,6 +86,16 @@ def get_max_train_split_length(blob: UserTensorBlob) -> int:
     if blob.train_split_lengths.numel() == 0:
         return 0
     return int(blob.train_split_lengths.max().item())
+
+
+def is_current_user_blob(blob: UserTensorBlob, config: Config) -> bool:
+    if blob.card_sorted_index.numel() != blob.rating.numel():
+        return False
+    if blob.seq_len.numel() != blob.rating.numel():
+        return False
+    if blob.card_last_index.numel() != int((blob.seq_len == 1).sum().item()):
+        return False
+    return blob.split.numel() == config.n_splits
 
 
 def save_global_metadata(user_max_train_split_lengths: list[int]) -> None:
@@ -142,29 +157,70 @@ def load_user_parquet(data_path: Path, user_id: int) -> pd.DataFrame:
     return pd.read_parquet(data_path / "revlogs" / f"{user_id=}")
 
 
-def build_raw_tensors(df: pd.DataFrame) -> dict[str, torch.Tensor]:
-    return {
-        "ratings": torch.tensor(df["rating"].to_numpy(), dtype=torch.int8),
-        "elapsed_days_int": torch.tensor(
-            df["elapsed_days"].to_numpy(),
-            dtype=torch.int32,
-        ),
-        "elapsed_days_real": torch.tensor(
-            df["elapsed_seconds"].to_numpy() / SECONDS_PER_DAY,
-            dtype=torch.float32,
-        ),
-    }
+def build_card_grouping(df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    raw_index = np.arange(len(df), dtype=np.int64)
+    order_df = pd.DataFrame(
+        {
+            "card_id": df["card_id"].to_numpy(),
+            "raw_index": raw_index,
+        }
+    )
+    card_sorted_index = order_df.sort_values(
+        by=["card_id", "raw_index"],
+        kind="stable",
+    )["raw_index"].to_numpy(dtype=np.int64)
+
+    raw_to_grouped_index = np.empty(len(card_sorted_index), dtype=np.int64)
+    raw_to_grouped_index[card_sorted_index] = np.arange(
+        len(card_sorted_index),
+        dtype=np.int64,
+    )
+    return df.iloc[card_sorted_index], card_sorted_index, raw_to_grouped_index
+
+
+def build_raw_tensors(df: pd.DataFrame) -> RawTensorLayout:
+    grouped_df, card_sorted_index, raw_to_grouped_index = build_card_grouping(df)
+    seq_len = grouped_df.groupby("card_id").cumcount() + 1
+    card_sizes = grouped_df.groupby("card_id", sort=False, dropna=False).size()
+    card_last_index = np.cumsum(card_sizes.to_numpy(dtype=np.int64)) - 1
+    return RawTensorLayout(
+        tensors={
+            "ratings": torch.tensor(grouped_df["rating"].to_numpy(), dtype=torch.int8),
+            "elapsed_days_int": torch.tensor(
+                grouped_df["elapsed_days"].to_numpy(),
+                dtype=torch.int32,
+            ),
+            "elapsed_days_real": torch.tensor(
+                grouped_df["elapsed_seconds"].to_numpy() / SECONDS_PER_DAY,
+                dtype=torch.float32,
+            ),
+            "card_sorted_index": torch.tensor(card_sorted_index, dtype=torch.int32),
+            "seq_len": torch.tensor(seq_len.to_numpy(), dtype=torch.int32),
+            "card_last_index": torch.tensor(card_last_index, dtype=torch.int32),
+        },
+        raw_to_grouped_index=raw_to_grouped_index,
+    )
+
+
+def review_th_to_grouped_index(
+    review_th: pd.Series,
+    raw_to_grouped_index: np.ndarray,
+) -> np.ndarray:
+    raw_index = review_th.to_numpy(dtype=np.int64) - 1
+    return raw_to_grouped_index[raw_index].astype(np.int32)
 
 
 def pack_user_tensors(
-    df: pd.DataFrame,
+    raw_tensors: dict[str, torch.Tensor],
     benchmark_tensors: BenchmarkTensors,
 ) -> UserTensorBlob:
-    raw_tensors = build_raw_tensors(df)
     return UserTensorBlob(
-        ratings=raw_tensors["ratings"],
+        rating=raw_tensors["ratings"],
         elapsed_days_int=raw_tensors["elapsed_days_int"],
         elapsed_days_real=raw_tensors["elapsed_days_real"],
+        card_sorted_index=raw_tensors["card_sorted_index"],
+        seq_len=raw_tensors["seq_len"],
+        card_last_index=raw_tensors["card_last_index"],
         test_index=benchmark_tensors.test_index,
         rmse_bins=benchmark_tensors.rmse_bins,
         split=benchmark_tensors.split,
@@ -208,6 +264,7 @@ def get_training_layout(
     train_set: pd.DataFrame,
     batch_size: int,
     max_seq_len: int,
+    raw_to_grouped_index: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     batch_size = max(1, int(batch_size))
     if train_set.empty:
@@ -222,7 +279,10 @@ def get_training_layout(
         return empty, empty, empty
 
     train_set = train_set.sort_values(by=["_seq_len"], kind="stable")
-    train_index = (train_set["review_th"].to_numpy() - 1).astype(np.int32)
+    train_index = review_th_to_grouped_index(
+        train_set["review_th"],
+        raw_to_grouped_index,
+    )
 
     batch_lengths = []
     for start in range(0, len(train_index), batch_size):
@@ -241,22 +301,31 @@ def concat_int32(arrays: list[np.ndarray]) -> np.ndarray:
     return np.concatenate(arrays).astype(np.int32)
 
 
-def build_benchmark_tensors(df: pd.DataFrame, config: Config) -> BenchmarkTensors:
+def build_benchmark_tensors(
+    df: pd.DataFrame,
+    config: Config,
+    raw_to_grouped_index: np.ndarray,
+) -> BenchmarkTensors:
     feature_df = create_features(df.copy(), config=config)
     if len(feature_df) == 0:
         return empty_benchmark_tensors()
 
     model = create_model(config)
     batch_size = getattr(model, "batch_size", config.batch_size)
+    print("overwriting batch size")
+    batch_size = 2
     max_seq_len = config.max_seq_len
 
     bins = feature_df.apply(get_bin, axis=1)
     bin_codes = bins.astype("category").cat.codes.to_numpy()
-    test_index_values = feature_df["review_th"].to_numpy() - 1
+    test_index_values = review_th_to_grouped_index(
+        feature_df["review_th"],
+        raw_to_grouped_index,
+    )
 
     test_indices = []
     rmse_bins = []
-    split_test_ranges = []
+    split_test_lengths = []
     train_indices = []
     train_batch_lengths = []
     batch_orders = []
@@ -265,7 +334,7 @@ def build_benchmark_tensors(df: pd.DataFrame, config: Config) -> BenchmarkTensor
     for train_index, test_index in tscv.split(feature_df):
         test_indices.append(test_index_values[test_index])
         rmse_bins.append(bin_codes[test_index])
-        split_test_ranges.append(min(test_index_values[test_index]))
+        split_test_lengths.append(len(test_index))
 
         train_set = feature_df.iloc[train_index]
         train_set = model.filter_training_data(train_set)
@@ -273,23 +342,22 @@ def build_benchmark_tensors(df: pd.DataFrame, config: Config) -> BenchmarkTensor
             train_set,
             batch_size=batch_size,
             max_seq_len=max_seq_len,
+            raw_to_grouped_index=raw_to_grouped_index,
         )
         train_indices.append(split_train_index)
         train_batch_lengths.append(split_batch_lengths)
         batch_orders.append(split_batch_order)
         train_split_lengths.append(len(split_batch_lengths))
 
-    split_test_ranges.append(int(1e9))
     test_indices = np.concatenate(test_indices)
     rmse_bins = np.concatenate(rmse_bins)
     train_indices_array = concat_int32(train_indices)
     train_batch_lengths_array = concat_int32(train_batch_lengths)
     batch_order_array = concat_int32(batch_orders)
-    assert np.array_equal(np.sort(test_indices), test_indices)
     return BenchmarkTensors(
         test_index=torch.tensor(test_indices, dtype=torch.int32),
         rmse_bins=torch.tensor(rmse_bins, dtype=torch.int8),
-        split=torch.tensor(split_test_ranges, dtype=torch.int32),
+        split=torch.tensor(split_test_lengths, dtype=torch.int32),
         batch_order=torch.tensor(batch_order_array, dtype=torch.int32),
         batch_order_epochs=torch.tensor(BATCH_ORDER_EPOCHS, dtype=torch.int32),
         train_index=torch.tensor(train_indices_array, dtype=torch.int32),
@@ -312,23 +380,38 @@ def process_user(user_id: int) -> int:
         raise RuntimeError("Worker config was not initialized.")
 
     user_keys = get_user_keys(user_id)
-    with lmdb_env.begin(write=False) as txn:
-        if all(txn.get(key.encode()) is not None for key in user_keys):
-            blob_bytes = txn.get(f"{user_id}_packed".encode())
-            if blob_bytes is None:
-                return 0
-            return get_max_train_split_length(load_user_blob_bytes(blob_bytes))
+    # with lmdb_env.begin(write=False) as txn:
+    #     if all(txn.get(key.encode()) is not None for key in user_keys):
+    #         blob_bytes = txn.get(f"{user_id}_packed".encode())
+    #         if blob_bytes is None:
+    #             return 0
+    #         try:
+    #             blob = load_user_blob_bytes(blob_bytes)
+    #         except TypeError:
+    #             blob = None
+    #         if blob is not None and is_current_user_blob(blob, worker_config):
+    #             return get_max_train_split_length(blob)
 
     df = load_user_parquet(worker_config.data_path, user_id)
+    print("temp prune")
+    df = df[df["card_id"] <= 1]
+    print(df)
+    assert len(df) > 0
+    raw_layout = build_raw_tensors(df)
     try:
-        benchmark_tensors = build_benchmark_tensors(df, worker_config)
+        benchmark_tensors = build_benchmark_tensors(
+            df,
+            worker_config,
+            raw_layout.raw_to_grouped_index,
+        )
     except ValueError as err:
         if "No data after handling outliers" in str(err):
             return user_id
         raise
 
     with lmdb_env.begin(write=True) as txn:
-        blob = pack_user_tensors(df, benchmark_tensors)
+        blob = pack_user_tensors(raw_layout.tensors, benchmark_tensors)
+        print(blob)
         save_user_blob(txn, user_id, blob)
         txn.put(f"{user_id}_done".encode(), b"true")
 
