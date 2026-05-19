@@ -24,6 +24,7 @@ from features import create_features
 from parallel.config import (
     LMDB_PATH,
     LMDB_SIZE,
+    N_SPLITS,
     USER_IDS,
     USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
 )
@@ -34,7 +35,6 @@ from utils import get_bin
 
 SECONDS_PER_DAY = 86_400
 BATCH_LOADER_SEED = 2023
-BATCH_ORDER_EPOCHS = 100
 
 lmdb_env: lmdb.Environment | None = None
 worker_config: Config | None = None
@@ -44,10 +44,7 @@ class BenchmarkTensors(NamedTuple):
     test_index: torch.Tensor
     rmse_bins: torch.Tensor
     split: torch.Tensor
-    batch_order: torch.Tensor
-    batch_order_epochs: torch.Tensor
     train_index: torch.Tensor
-    train_batch_lengths: torch.Tensor
     train_split_lengths: torch.Tensor
 
 
@@ -189,11 +186,11 @@ def build_raw_tensors(df: pd.DataFrame) -> RawTensorLayout:
             "elapsed_days_int": torch.tensor(
                 grouped_df["elapsed_days"].to_numpy(),
                 dtype=torch.int32,
-            ),
+            ).clamp_min(0),
             "elapsed_days_real": torch.tensor(
                 grouped_df["elapsed_seconds"].to_numpy() / SECONDS_PER_DAY,
                 dtype=torch.float32,
-            ),
+            ).clamp_min(0),
             "card_sorted_index": torch.tensor(card_sorted_index, dtype=torch.int32),
             "seq_len": torch.tensor(seq_len.to_numpy(), dtype=torch.int32),
             "card_last_index": torch.tensor(card_last_index, dtype=torch.int32),
@@ -224,10 +221,7 @@ def pack_user_tensors(
         test_index=benchmark_tensors.test_index,
         rmse_bins=benchmark_tensors.rmse_bins,
         split=benchmark_tensors.split,
-        batch_order=benchmark_tensors.batch_order,
-        batch_order_epochs=benchmark_tensors.batch_order_epochs,
         train_index=benchmark_tensors.train_index,
-        train_batch_lengths=benchmark_tensors.train_batch_lengths,
         train_split_lengths=benchmark_tensors.train_split_lengths,
     )
 
@@ -238,10 +232,7 @@ def empty_benchmark_tensors() -> BenchmarkTensors:
         test_index=empty_int32,
         rmse_bins=torch.tensor([], dtype=torch.int8),
         split=empty_int32,
-        batch_order=empty_int32,
-        batch_order_epochs=torch.tensor(BATCH_ORDER_EPOCHS, dtype=torch.int32),
         train_index=empty_int32,
-        train_batch_lengths=empty_int32,
         train_split_lengths=empty_int32,
     )
 
@@ -265,34 +256,25 @@ def get_training_layout(
     batch_size: int,
     max_seq_len: int,
     raw_to_grouped_index: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> np.ndarray:
     batch_size = max(1, int(batch_size))
     if train_set.empty:
         empty = np.array([], dtype=np.int32)
-        return empty, empty, empty
+        return empty
 
     train_set = train_set.copy()
     train_set["_seq_len"] = train_set["tensor"].map(len)
     train_set = train_set[train_set["_seq_len"] <= max_seq_len]
     if train_set.empty:
         empty = np.array([], dtype=np.int32)
-        return empty, empty, empty
+        return empty
 
     train_set = train_set.sort_values(by=["_seq_len"], kind="stable")
     train_index = review_th_to_grouped_index(
         train_set["review_th"],
         raw_to_grouped_index,
     )
-
-    batch_lengths = []
-    for start in range(0, len(train_index), batch_size):
-        end = min(start + batch_size, len(train_index))
-        batch_lengths.append(end - start)
-    batch_lengths_array = np.array(batch_lengths, dtype=np.int32)
-
-    batch_order = build_batch_order(len(batch_lengths))
-
-    return train_index, batch_lengths_array, batch_order
+    return train_index
 
 
 def concat_int32(arrays: list[np.ndarray]) -> np.ndarray:
@@ -312,8 +294,8 @@ def build_benchmark_tensors(
 
     model = create_model(config)
     batch_size = getattr(model, "batch_size", config.batch_size)
-    print("overwriting batch size")
-    batch_size = 2
+    # print("overwriting batch size")
+    # batch_size = 2
     max_seq_len = config.max_seq_len
 
     bins = feature_df.apply(get_bin, axis=1)
@@ -330,7 +312,7 @@ def build_benchmark_tensors(
     train_batch_lengths = []
     batch_orders = []
     train_split_lengths = []
-    tscv = TimeSeriesSplit(n_splits=config.n_splits)
+    tscv = TimeSeriesSplit(n_splits=N_SPLITS)
     for train_index, test_index in tscv.split(feature_df):
         test_indices.append(test_index_values[test_index])
         rmse_bins.append(bin_codes[test_index])
@@ -338,16 +320,14 @@ def build_benchmark_tensors(
 
         train_set = feature_df.iloc[train_index]
         train_set = model.filter_training_data(train_set)
-        split_train_index, split_batch_lengths, split_batch_order = get_training_layout(
+        split_train_index = get_training_layout(
             train_set,
             batch_size=batch_size,
             max_seq_len=max_seq_len,
             raw_to_grouped_index=raw_to_grouped_index,
         )
         train_indices.append(split_train_index)
-        train_batch_lengths.append(split_batch_lengths)
-        batch_orders.append(split_batch_order)
-        train_split_lengths.append(len(split_batch_lengths))
+        train_split_lengths.append(len(split_train_index))
 
     test_indices = np.concatenate(test_indices)
     rmse_bins = np.concatenate(rmse_bins)
@@ -358,10 +338,7 @@ def build_benchmark_tensors(
         test_index=torch.tensor(test_indices, dtype=torch.int32),
         rmse_bins=torch.tensor(rmse_bins, dtype=torch.int8),
         split=torch.tensor(split_test_lengths, dtype=torch.int32),
-        batch_order=torch.tensor(batch_order_array, dtype=torch.int32),
-        batch_order_epochs=torch.tensor(BATCH_ORDER_EPOCHS, dtype=torch.int32),
         train_index=torch.tensor(train_indices_array, dtype=torch.int32),
-        train_batch_lengths=torch.tensor(train_batch_lengths_array, dtype=torch.int32),
         train_split_lengths=torch.tensor(train_split_lengths, dtype=torch.int32),
     )
 
@@ -380,22 +357,23 @@ def process_user(user_id: int) -> int:
         raise RuntimeError("Worker config was not initialized.")
 
     user_keys = get_user_keys(user_id)
-    # with lmdb_env.begin(write=False) as txn:
-    #     if all(txn.get(key.encode()) is not None for key in user_keys):
-    #         blob_bytes = txn.get(f"{user_id}_packed".encode())
-    #         if blob_bytes is None:
-    #             return 0
-    #         try:
-    #             blob = load_user_blob_bytes(blob_bytes)
-    #         except TypeError:
-    #             blob = None
-    #         if blob is not None and is_current_user_blob(blob, worker_config):
-    #             return get_max_train_split_length(blob)
+    with lmdb_env.begin(write=False) as txn:
+        if all(txn.get(key.encode()) is not None for key in user_keys):
+            blob_bytes = txn.get(f"{user_id}_packed".encode())
+            if blob_bytes is None:
+                return 0
+            try:
+                blob = load_user_blob_bytes(blob_bytes)
+            except TypeError:
+                blob = None
+            if blob is not None and is_current_user_blob(blob, worker_config):
+                return get_max_train_split_length(blob)
 
     df = load_user_parquet(worker_config.data_path, user_id)
-    print("temp prune")
-    df = df[df["card_id"] <= 1]
-    print(df)
+    # print(dds"].min())
+    # print("temp prune")
+    # df = df[df["card_id"] <= 1]
+    # print(df)
     assert len(df) > 0
     raw_layout = build_raw_tensors(df)
     try:
@@ -411,7 +389,6 @@ def process_user(user_id: int) -> int:
 
     with lmdb_env.begin(write=True) as txn:
         blob = pack_user_tensors(raw_layout.tensors, benchmark_tensors)
-        print(blob)
         save_user_blob(txn, user_id, blob)
         txn.put(f"{user_id}_done".encode(), b"true")
 

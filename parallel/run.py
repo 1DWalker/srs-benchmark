@@ -3,19 +3,26 @@ from __future__ import annotations
 from io import BytesIO
 
 import lmdb
+import numpy as np
 from sklearn.metrics import log_loss
 import torch
 from tqdm import tqdm
 
 from parallel.config import (
+    BATCH_SIZE,
     LMDB_PATH,
     LMDB_SIZE,
     DEVICE,
+    N_EPOCHS,
     N_SPLITS,
     TEST_BATCH_SIZE_MAX,
 )
 from parallel.models import fsrs_v7
+from parallel.randperm import segmented_feistel_permutation
 from parallel.tensors import Data, ParamKey, ReviewData, UserTensorBlob
+
+def ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
 
 def load_blob_bytes(blob_bytes: bytes) -> UserTensorBlob:
     buffer = BytesIO(blob_bytes)
@@ -47,14 +54,130 @@ def predict(review_data: ReviewData, index, params):
     data_len = review_data.elapsed_days_real.size(0)
     take_indices = (card_start_index.unsqueeze(-1) + torch.arange(max_seq_len.item(), device=index.device).repeat(index.size(0), 1)).clamp_max(data_len - 1)
 
-    # TODO possible bug from overlap, if it hits 0 elapsed time
     rating_bl = review_data.rating[take_indices]
     elapsed_time_real_bl = review_data.elapsed_days_real[take_indices]
 
-    # fsrs_params = fsrs_v7.nn_vec_to_fsrs7_params(params)
-    fsrs_params = fsrs_v7.FSRS7_DEFAULT_35.to(params.device).unsqueeze(0).expand(params.size(0), -1)
+    fsrs_params = fsrs_v7.nn_vec_to_fsrs7_params(params)
     return fsrs_v7.forward(fsrs_params, elapsed_time_real_bl, rating_bl, seq_lens)
     
+def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
+    print("start train")
+    print(data.train_split_lengths)
+    train_split_lengths_cat = torch.cat(data.train_split_lengths)
+    num_training_steps_per_epoch_cat = (train_split_lengths_cat + BATCH_SIZE - 1) // BATCH_SIZE
+    num_training_steps_cat = N_EPOCHS * num_training_steps_per_epoch_cat
+    print(num_training_steps_per_epoch_cat)
+    
+    batch_perm_cat = torch.cat([torch.randperm(n) for n in num_training_steps_per_epoch_cat.cpu().numpy() for _ in range(N_EPOCHS)]).to(DEVICE)
+    # Map: (user, split) -> batch_perm_cat start index
+    batch_perm_user_flat_offset = torch.nn.functional.pad(
+        torch.cumsum(num_training_steps_cat, dim=-1)[:-1],
+        (1, 0),
+    ).view(len(users), N_SPLITS)
+    # print(batch_perm_user_flat_offset)
+    # print(batch_perm_cat, batch_perm_cat.size())
+    # print(batch_perm_cat.cpu().tolist())
+    # exit()
+
+    # Map: (user, split) -> data.train_index start index
+    train_split_lengths_offset = torch.nn.functional.pad(
+        torch.cumsum(train_split_lengths_cat, dim=-1)[:-1],
+        (1, 0),
+    ).view(len(users), N_SPLITS)
+
+    print(batch_perm_user_flat_offset)
+    print(batch_perm_cat, len(batch_perm_cat))
+    train_splits_length_cat_sum = int(num_training_steps_cat.sum().item())
+    train_splits_length_cat_max = int(num_training_steps_cat.max().item())
+    batch_num_inner_batches = ceil_div(train_splits_length_cat_sum, train_splits_length_cat_max)
+    
+    print(num_training_steps_cat)
+    print("Inner batches per batch:", batch_num_inner_batches, "Train iters (max):", train_splits_length_cat_max)
+    step_i_cat = torch.zeros_like(num_training_steps_cat)
+    for iter in tqdm(range(train_splits_length_cat_max), desc="Training", smoothing=0.03):
+        remaining = num_training_steps_cat - step_i_cat
+        print("remaining:", remaining)
+        _, indices = torch.topk(remaining, k=int(min(batch_num_inner_batches, (remaining > 0).sum().item())))
+        step_i = step_i_cat[indices]
+        # epoch_step_i = step_i % num_training_steps_per_epoch_cat[indices]
+        # print(step_i, epoch_step_i)
+
+        user_indices = indices // N_SPLITS
+        split_indices = indices % N_SPLITS
+        perm_i = batch_perm_cat[batch_perm_user_flat_offset[user_indices, split_indices] + step_i]
+        assert (perm_i <= num_training_steps_per_epoch_cat[indices]).all()
+
+        train_l = perm_i * BATCH_SIZE
+        train_r = torch.minimum((perm_i + 1) * BATCH_SIZE - 1, train_split_lengths_cat[indices] - 1)
+        assert (train_l <= train_r).all()
+
+        indices_range = indices.unsqueeze(-1).repeat(1, BATCH_SIZE)
+        train_range = \
+            + train_l.unsqueeze(-1) \
+            + torch.arange(BATCH_SIZE, device=train_l.device).view(1, -1).repeat(train_l.size(0), 1)
+
+        legal = train_range <= train_r.unsqueeze(-1)
+        review_data_indices = data.train_index[train_split_lengths_offset[user_indices, split_indices].unsqueeze(-1) + train_range]
+        print(review_data_indices, review_data_indices.shape)
+        print(legal)
+        print(train_split_lengths_cat[indices] - 1)
+
+        indices_flat = indices_range.view(-1)
+        review_data_indices_flat = review_data_indices.view(-1)
+        legal_flat = legal.view(-1)
+
+        indices_filtered = indices_flat[legal_flat]
+        review_data_indices_filtered = review_data_indices_flat[legal_flat]
+
+        # Sort by seq len
+        seq_lens = data.review_data.seq_len[indices_filtered]
+        sorted_seq_lens, sorted_seq_lens_indices = torch.sort(seq_lens, stable=True)
+        seq_lens = sorted_seq_lens
+        indices_filtered = indices_filtered[sorted_seq_lens_indices]
+        review_data_indices_filtered = review_data_indices_filtered[sorted_seq_lens_indices]
+
+        def load_balancer():
+            return [(0, indices_filtered.size(0))]
+        # Run
+        batches = load_balancer()
+        for (l, re) in batches:
+        #    slice = torch.arange(l, re, re - l, device=indices.device)
+            batch_fsrs_params = torch.tensor(fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]], requires_grad=True, device=indices.device)
+            print(batch_fsrs_params, batch_fsrs_params.shape)
+            batch_review_data_indices = review_data_indices_filtered[l:re]
+            p = predict(data.review_data, batch_review_data_indices, batch_fsrs_params)
+            label = data.review_data.rating[batch_review_data_indices] > 1
+            loss = torch.nn.functional.binary_cross_entropy(p, label.float(), reduction='sum')
+            loss.backward()
+            print(p)
+            print(batch_fsrs_params.grad)
+
+
+        fsrs_params_cat_B = fsrs_params[user_indices, split_indices]
+        print(fsrs_params_cat_B.grad)
+        exit()
+
+
+        # TODO apply (user, split) offset, use to index data.train_index
+
+        # print(perm_i)
+        # print(train_l)
+        # print(train_r)
+
+        # TODO find the size of this batch
+        # TODO find the start and end perm indices
+
+        # fsrs_params_cat_B = fsrs_params[user_indices, split_indices]
+        # print(fsrs_params_cat_B)
+
+        # expand indices into indices * BATCH_SIZE
+        # get seq_len for each item
+        step_i_cat[indices] += 1
+
+
+    assert (step_i_cat == num_training_steps_cat).all()
+    print("------------------done train-----------------")
+    return fsrs_params
 
 def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("eval on test")
@@ -63,9 +186,6 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     test_seq_len = data.review_data.seq_len[data.test_index]
     sorted_test_index_permutation = torch.argsort(test_seq_len, stable=True)
     print("sort done")
-
-    def ceil_div(a: int, b: int) -> int:
-        return (a + b - 1) // b
 
     # TODO use the same load balancing as training
     N = data.test_index.size(0)
@@ -77,15 +197,16 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         p = predict(data.review_data, data.test_index[perm_slice], batch_fsrs_params)
         gather_p.append(p)
     
-    # TODO reduce memory by removing the inverse perm tensor
     restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
     restore_test_index_permutation[sorted_test_index_permutation] = torch.arange(
         sorted_test_index_permutation.numel(),
         device=sorted_test_index_permutation.device,
     )
-    gather_p = torch.cat(gather_p, dim=-1)[restore_test_index_permutation]
+    p_concat = torch.cat(gather_p, dim=-1)[restore_test_index_permutation]
+    del sorted_test_index_permutation
+    del restore_test_index_permutation
 
-    p_by_user = gather_p.split(data.test_index_lens)
+    p_by_user = p_concat.split(data.test_index_lens)
     label_by_user = (data.review_data.rating[data.test_index] > 1).split(data.test_index_lens)
 
     for user, pred, label in tqdm(zip(users, p_by_user, label_by_user), smoothing=0.03):
@@ -104,16 +225,17 @@ def run(
         data = Data(blobs)
         del blobs
 
-    # TODO sort users by train split length
     # TODO train
 
 
-    fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
-    print(data)
+    # fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
+    fsrs_params = torch.tensor(fsrs_v7.get_initial_params_for_optimization(), device=DEVICE).view(1, 1, -1).repeat(len(users), N_SPLITS, 1)
+    fsrs_params = train(fsrs_params, users, data)
 
-    # evaluate
-    with torch.no_grad():
-        evaluate_on_test_set(fsrs_params, users, data)
+    print("skip test")
+    # # evaluate
+    # with torch.no_grad():
+    #     evaluate_on_test_set(fsrs_params, users, data)
 
 def main() -> None:
     env = lmdb.open(
@@ -122,9 +244,12 @@ def main() -> None:
         readonly=True,
         lock=False,
     )
+    
+    # users = list(range(1, 2001))
+    users = [1, 2]
+    # TODO get length metadata, sort by users, run
 
-    # run(env, list(range(1, 1001)))
-    run(env, [1, 2])
+    run(env, users)
 
     # with env.begin(write=False) as txn:
     #     user_max_train_split_lengths = load_metadata_tensor(

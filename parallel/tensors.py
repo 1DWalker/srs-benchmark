@@ -33,10 +33,7 @@ class UserTensorBlob:
     split: torch.Tensor
 
     # Train
-    batch_order: torch.Tensor
-    batch_order_epochs: torch.Tensor
     train_index: torch.Tensor
-    train_batch_lengths: torch.Tensor
     train_split_lengths: torch.Tensor
 
     def to_dict(self) -> dict[str, torch.Tensor]:
@@ -66,7 +63,8 @@ class UserTensorBlob:
 
     @classmethod
     def from_dict(cls, tensors: dict[str, torch.Tensor]) -> UserTensorBlob:
-        return cls(**tensors)
+        field_names = {field.name for field in fields(cls)}
+        return cls(**{key: value for key, value in tensors.items() if key in field_names})
 
 
 class Data:
@@ -85,15 +83,16 @@ class Data:
             torch.cumsum(user_lengths, dim=-1)[:-1],
             (1, 0),
         )
-        per_element_offsets = torch.repeat_interleave(
-            self.user_flat_offset,
-            user_lengths,
-            output_size=self.review_data.rating.size(0),
-        )
+        # per_element_offsets = torch.repeat_interleave(
+        #     self.user_flat_offset,
+        #     user_lengths,
+        #     output_size=self.review_data.rating.size(0),
+        # )
         self.train_index = self.concat_with_offset(
             [user_data.train_index for user_data in user_data_list],
             self.user_flat_offset,
         )
+        self.train_split_lengths = [user_data.train_split_lengths for user_data in user_data_list]
 
         self.test_index = self.concat_with_offset(
             [user_data.test_index for user_data in user_data_list],
@@ -101,6 +100,7 @@ class Data:
         )
         self.test_index_lens = [user_data.test_index.size(-1) for user_data in user_data_list]
         self.splits = [user_data.split for user_data in user_data_list]
+
 
     @staticmethod
     def concat_with_offset(xs: list[torch.Tensor], offsets: torch.Tensor) -> torch.Tensor:

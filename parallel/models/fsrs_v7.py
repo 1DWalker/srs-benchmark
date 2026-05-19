@@ -184,6 +184,8 @@ def forward(parameters_bp, feature_elapsed_days_real_bl, feature_rating_bl, seq_
     review_elapsed = feature_elapsed_days_real_bl[torch.arange(B), seq_lens - 1]
     return forgetting_curve(p, review_elapsed, review_s)
 
+def get_initial_params_for_optimization():
+    return torch.zeros(35)
 
 FSRS7_DEFAULT_35 = torch.tensor(
     [
