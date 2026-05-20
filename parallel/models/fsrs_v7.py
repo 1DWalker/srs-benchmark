@@ -142,7 +142,6 @@ def next_d(p: FSRS7Buffer, difficulty, rating):
     new_d = p.init_d_4_rating_weight + 0.99 * new_d
     return new_d
 
-
 def fsrs7_step(l: int, p: FSRS7Buffer, feature_elapsed, feature_rating, stability, difficulty):
     if l == 0:
         new_s = p.s.gather(dim=1, index=(feature_rating - 1).clamp_min(0).unsqueeze(1)).squeeze(1)
@@ -158,26 +157,24 @@ def fsrs7_step(l: int, p: FSRS7Buffer, feature_elapsed, feature_rating, stabilit
     return new_s, new_d
 
 
+@torch.compile(fullgraph=True, dynamic=True)
 def forward(parameters_bp, feature_elapsed_days_real_bl, feature_rating_bl, seq_lens):
     p: FSRS7Buffer = build_params_buffer(parameters_bp)
 
     B, L = feature_elapsed_days_real_bl.shape
-    assert parameters_bp.shape[0] == B
 
     stability = torch.zeros((B,), device=parameters_bp.device)
     difficulty = torch.zeros((B,), device=parameters_bp.device)
     outputs = []
 
-    l = 0
-    for feature_elapsed, feature_rating in zip(
+    for l, (feature_elapsed, feature_rating) in enumerate(zip(
         feature_elapsed_days_real_bl.transpose(0, 1),
         feature_rating_bl.long().transpose(0, 1),
-    ):
-        if l == L:
-            break
+    )):
+        # if l == L:
+        #     break
         stability, difficulty = fsrs7_step(l, p, feature_elapsed, feature_rating, stability, difficulty)
         outputs.append(stability)
-        l += 1
 
     output_tensor = torch.stack(outputs, dim=-1)
     review_s = output_tensor[torch.arange(B), seq_lens - 2]

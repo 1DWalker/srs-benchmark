@@ -4,10 +4,13 @@ from pathlib import Path
 
 
 LMDB_PATH = Path("parallel_db")
-LMDB_SIZE = 1_000_000_000
-USER_IDS = list(range(1, 3))
+LMDB_SIZE = 50_000_000_000
+USER_IDS = list(range(1, 10001))
 DEVICE = "cuda"
 USER_MAX_TRAIN_SPLIT_LENGTHS_KEY = "metadata_user_max_train_split_lengths"
 
 
-TEST_PARALLEL = 
+BATCH_SIZE = 1024
+N_EPOCHS = 8
+N_SPLITS = 5 
+TEST_BATCH_SIZE_MAX = 1_000_000
