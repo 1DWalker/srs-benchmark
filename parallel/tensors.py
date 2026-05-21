@@ -100,6 +100,8 @@ class Data:
         )
         self.test_index_lens = [user_data.test_index.size(-1) for user_data in user_data_list]
         self.splits = [user_data.split for user_data in user_data_list]
+        assert (self.review_data.elapsed_days_real[self.train_index] > 0).all()
+        assert (self.review_data.elapsed_days_real[self.test_index] > 0).all()
 
 
     @staticmethod

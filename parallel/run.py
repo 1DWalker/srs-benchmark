@@ -23,7 +23,6 @@ from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.models import fsrs_v7
 from parallel.models import fsrs_v7_jax_adapter
 from parallel.models.fsrs_v7_jax_adapter import FSRS7JaxAdapter
-from parallel.randperm import segmented_feistel_permutation
 from parallel.tensors import Data, ParamKey, ReviewData, UserTensorBlob
 
 def ceil_div(a: int, b: int) -> int:
@@ -43,7 +42,6 @@ def load_metadata_tensor(txn: lmdb.Transaction, key: str) -> torch.Tensor:
         weights_only=True,
         map_location=DEVICE,
     )
-
 
 def load_user_blob(txn: lmdb.Transaction, user_id: int) -> UserTensorBlob:
     blob_bytes = txn.get(f"{user_id}_packed".encode())
@@ -84,7 +82,10 @@ def _prepare_prediction_inputs(review_data: ReviewData, index):
     print("prepare take", time.time() - ts)
 
     # print("shape", rating_bl.shape, max_seq_len)
-
+    # print(review_data.elapsed_days_real[index])
+    # print(elapsed_time_real_bl[:, seq_lens - 1], elapsed_time_real_bl[:, seq_lens - 1].shape)
+    # assert (review_data.elapsed_days_real[index] == elapsed_time_real_bl[:, seq_lens - 1]).all()
+    B = elapsed_time_real_bl.size(0)
     return elapsed_time_real_bl, rating_bl, seq_lens
 
 def predict(review_data: ReviewData, index, params):
@@ -226,9 +227,14 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         t_opt = time.time()
         active_params_mask = torch.zeros(step_i_cat.size(0), device=step_i_cat.device, dtype=torch.bool)
         active_params_mask[indices] = True
-        lr_schedule_multi = scheduler.scheduler(step_i_cat, num_training_steps_cat)
+        lr_schedule_multi = 2e-2 * scheduler.scheduler(step_i_cat, num_training_steps_cat)
+
+        # TODO ADAMW betas
 
         with torch.no_grad():
+            if fsrs_params.grad.isnan().any():
+                print(fsrs_params.grad.cpu().detach().tolist())
+            assert not fsrs_params.grad.isnan().any()
             flat_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))
             flat_grad = fsrs_params.grad.view_as(flat_fsrs_params)
             new_flat_fsrs_params, optim_state = adamw.adamw_step(
@@ -240,6 +246,7 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
             )
             new_flat_fsrs_params_clipped = fsrs_v7.apply_parameter_clipper(new_flat_fsrs_params)
             flat_fsrs_params.copy_(new_flat_fsrs_params_clipped)
+            assert not flat_fsrs_params.isnan().any()
 
         fsrs_params.grad = None
         step_i_cat[indices] += 1
@@ -255,6 +262,7 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
 
 def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("eval on test")
+    print(fsrs_params)
     param_keys = data.get_test_index_param_key()
 
     test_seq_len = data.review_data.seq_len[data.test_index]
@@ -302,6 +310,7 @@ def run(
         ]
         data = Data(blobs)
         del blobs
+        torch.cuda.empty_cache()
 
     # TODO train
 
@@ -323,7 +332,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 1000))
+    users = list(range(1000, 1018))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 

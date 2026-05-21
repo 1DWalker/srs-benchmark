@@ -97,7 +97,7 @@ def forgetting_curve(p: FSRS7Buffer, t: jax.Array, s: jax.Array) -> jax.Array:
         s_exp = p.s_exp
     r = (1 + factor * t_over_s) ** decay
     weight = base_weight * s[..., None] ** s_exp
-    return 1e-5 + (1 - 2e-5) * ((weight * r).sum(axis=-1) / weight.sum(axis=-1))
+    return ((weight * r).sum(axis=-1) / weight.sum(axis=-1))
 
 
 def stability_after_review(
