@@ -1,37 +1,16 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Iterator
-
-import torch
-
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax
+import torch
 
-from parallel.models import fsrs_v7 as torch_fsrs_v7
 from parallel.models import fsrs_v7_jax
+from parallel.utils import _next_power_of_2
 
 
-DEFAULT_BATCH_SIZE = 2**16
+MIN_PADDED_BATCH_SIZE = 2**15
 DEFAULT_CACHE_DIR = Path(".jax-cache") / "fsrs_v7"
-
-FSRS7_DEFAULT_35 = torch_fsrs_v7.FSRS7_DEFAULT_35
-FSRS_MIN = torch_fsrs_v7.FSRS_MIN
-FSRS_MAX = torch_fsrs_v7.FSRS_MAX
-get_initial_params_for_optimization = torch_fsrs_v7.get_initial_params_for_optimization
-nn_vec_to_fsrs7_params = torch_fsrs_v7.nn_vec_to_fsrs7_params
-
-
-def _is_power_of_2(value: int) -> bool:
-    return value > 0 and value & (value - 1) == 0
-
-
-def _next_power_of_2(value: int) -> int:
-    if value < 1:
-        raise ValueError("seq_lens values must be at least 1.")
-    return 1 << (value - 1).bit_length()
 
 
 def _configure_compilation_cache(cache_dir: Path | None) -> None:
@@ -84,7 +63,7 @@ def _pad_rows_repeat_last(tensor: torch.Tensor, size: int) -> torch.Tensor:
 
 def _pad_cols_zero(tensor: torch.Tensor, size: int) -> torch.Tensor:
     if tensor.shape[1] > size:
-        return tensor[:, :size].contiguous()
+        raise ValueError(f"Cannot pad {tensor.shape[1]} columns down to {size}.")
     if tensor.shape[1] == size:
         return tensor.contiguous()
 
@@ -92,29 +71,32 @@ def _pad_cols_zero(tensor: torch.Tensor, size: int) -> torch.Tensor:
     return torch.cat((tensor, fill), dim=1).contiguous()
 
 
-def _iter_power2_batches(
+def _prepare_prediction_batch(
+    parameters_bp: torch.Tensor,
+    feature_elapsed_days_real_bl: torch.Tensor,
+    feature_rating_bl: torch.Tensor,
     seq_lens: torch.Tensor,
-    batch_size: int,
-) -> Iterator[tuple[int, int, int]]:
-    n_rows = seq_lens.numel()
-    start = 0
-    while start < n_rows:
-        seq_len = int(seq_lens[start].item())
-        l_pad = _next_power_of_2(seq_len)
-        bucket_end = int(
-            torch.searchsorted(
-                seq_lens,
-                seq_lens.new_tensor(l_pad + 1),
-                right=False,
-            ).item()
-        )
-        if bucket_end <= start:
-            raise ValueError("seq_lens must be sorted in ascending order.")
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    actual_size = parameters_bp.shape[0]
+    padded_b = max(MIN_PADDED_BATCH_SIZE, _next_power_of_2(actual_size))
+    padded_l = _next_power_of_2(feature_elapsed_days_real_bl.shape[1])
 
-        while start < bucket_end:
-            end = min(start + batch_size, bucket_end)
-            yield start, end, l_pad
-            start = end
+    elapsed = _pad_rows_repeat_last(
+        _pad_cols_zero(feature_elapsed_days_real_bl, padded_l),
+        padded_b,
+    )
+    rating = _pad_rows_repeat_last(
+        _pad_cols_zero(feature_rating_bl, padded_l),
+        padded_b,
+    )
+
+    return (
+        _pad_rows_repeat_last(parameters_bp, padded_b),
+        _astype(elapsed, torch.float32),
+        _astype(rating, torch.int32),
+        _astype(_pad_rows_repeat_last(seq_lens, padded_b), torch.int32),
+        actual_size,
+    )
 
 
 def _prepare_batch(
@@ -122,32 +104,19 @@ def _prepare_batch(
     feature_elapsed_days_real_bl: torch.Tensor,
     feature_rating_bl: torch.Tensor,
     seq_lens: torch.Tensor,
-    start: int,
-    end: int,
-    batch_size: int,
-    l_pad: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    actual_size = end - start
-
-    parameters = _pad_rows_repeat_last(parameters_bp[start:end], batch_size)
-    elapsed = _pad_cols_zero(feature_elapsed_days_real_bl[start:end], l_pad)
-    rating = _pad_cols_zero(feature_rating_bl[start:end], l_pad)
-    lens = seq_lens[start:end]
-
-    elapsed = _pad_rows_repeat_last(elapsed, batch_size)
-    rating = _pad_rows_repeat_last(rating, batch_size)
-    lens = _pad_rows_repeat_last(lens, batch_size)
-
-    mask = feature_elapsed_days_real_bl.new_zeros((batch_size,), dtype=torch.float32)
-    mask[:actual_size] = 1.0
-
-    return (
-        parameters.contiguous(),
-        _astype(elapsed, torch.float32).contiguous(),
-        _astype(rating, torch.int32).contiguous(),
-        _astype(lens, torch.int32).contiguous(),
-        mask.contiguous(),
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    *batch, actual_size = _prepare_prediction_batch(
+        parameters_bp,
+        feature_elapsed_days_real_bl,
+        feature_rating_bl,
+        seq_lens,
     )
+    mask = feature_elapsed_days_real_bl.new_zeros(
+        (batch[0].shape[0],),
+        dtype=torch.float32,
+    )
+    mask[:actual_size] = 1.0
+    return (*batch, mask.contiguous(), actual_size)
 
 
 def _validate_inputs(
@@ -166,22 +135,19 @@ def _validate_inputs(
         raise ValueError("parameters and feature tensors must have the same B.")
     if seq_lens.shape != (parameters_bp.shape[0],):
         raise ValueError("seq_lens must have shape (B,).")
-    if seq_lens.numel() and not bool(torch.all(seq_lens[:-1] <= seq_lens[1:]).item()):
-        raise ValueError("seq_lens must be sorted in ascending order.")
 
 
 class FSRS7JaxAdapter:
     def __init__(
         self,
-        batch_size: int = DEFAULT_BATCH_SIZE,
+        batch_size: int | None = None,
         cache_dir: Path | str | None = DEFAULT_CACHE_DIR,
     ) -> None:
-        if not _is_power_of_2(batch_size):
-            raise ValueError("batch_size must be a power of 2.")
-        self.batch_size = batch_size
+        if batch_size is not None and batch_size != MIN_PADDED_BATCH_SIZE:
+            raise ValueError(f"batch_size must be {MIN_PADDED_BATCH_SIZE}.")
         _configure_compilation_cache(Path(cache_dir) if cache_dir is not None else None)
 
-    def forward(
+    def prediction_loss_grad(
         self,
         parameters_bp: torch.Tensor,
         feature_elapsed_days_real_bl: torch.Tensor,
@@ -201,52 +167,45 @@ class FSRS7JaxAdapter:
                 parameters_bp.new_empty(parameters_bp.shape),
             )
 
-        seq_lens = _astype(seq_lens, torch.int32)
-        predictions: list[torch.Tensor] = []
-        losses: list[torch.Tensor] = []
-        parameter_grads: list[torch.Tensor] = []
-
-        for start, end, l_pad in _iter_power2_batches(seq_lens, self.batch_size):
-            batch = _prepare_batch(
-                parameters_bp,
-                feature_elapsed_days_real_bl,
-                feature_rating_bl,
-                seq_lens,
-                start,
-                end,
-                self.batch_size,
-                l_pad,
-            )
-            (loss, prediction), parameters_grad = fsrs_v7_jax.loss_and_prediction_and_grad(
-                *(_torch_to_jax(tensor) for tensor in batch)
-            )
-
-            actual_size = end - start
-            predictions.append(_jax_to_torch(prediction)[:actual_size])
-            losses.append(_jax_to_torch(loss, parameters_bp))
-            parameter_grads.append(
-                _jax_to_torch(parameters_grad, parameters_bp)[:actual_size]
-            )
-
-        prediction_b = torch.cat(predictions, dim=0)
-        loss = torch.stack(losses).sum()
-        parameters_grad_bp = torch.cat(parameter_grads, dim=0)
-        return prediction_b, loss, parameters_grad_bp
-
-    def __call__(
-        self,
-        parameters_bp: torch.Tensor,
-        feature_elapsed_days_real_bl: torch.Tensor,
-        feature_rating_bl: torch.Tensor,
-        seq_lens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.forward(
+        *batch, actual_size = _prepare_batch(
             parameters_bp,
             feature_elapsed_days_real_bl,
             feature_rating_bl,
             seq_lens,
         )
+        (loss, prediction), parameters_grad = fsrs_v7_jax.loss_and_prediction_and_grad(
+            *(_torch_to_jax(tensor) for tensor in batch)
+        )
 
+        prediction_b = _jax_to_torch(prediction)[:actual_size]
+        loss_t = _jax_to_torch(loss, parameters_bp)
+        parameters_grad_bp = _jax_to_torch(parameters_grad, parameters_bp)[:actual_size]
+        return prediction_b, loss_t, parameters_grad_bp
+
+    def prediction(
+        self,
+        parameters_bp: torch.Tensor,
+        feature_elapsed_days_real_bl: torch.Tensor,
+        feature_rating_bl: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        _validate_inputs(
+            parameters_bp,
+            feature_elapsed_days_real_bl,
+            feature_rating_bl,
+            seq_lens,
+        )
+        if parameters_bp.shape[0] == 0:
+            return parameters_bp.new_empty((0,))
+
+        *batch, actual_size = _prepare_prediction_batch(
+            parameters_bp,
+            feature_elapsed_days_real_bl,
+            feature_rating_bl,
+            seq_lens,
+        )
+        prediction = fsrs_v7_jax.forward(*(_torch_to_jax(tensor) for tensor in batch))
+        return _jax_to_torch(prediction)[:actual_size]
 
 _DEFAULT_ADAPTER = FSRS7JaxAdapter()
 
@@ -257,7 +216,21 @@ def forward(
     feature_rating_bl: torch.Tensor,
     seq_lens: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return _DEFAULT_ADAPTER.forward(
+    return _DEFAULT_ADAPTER.prediction_loss_grad(
+        parameters_bp,
+        feature_elapsed_days_real_bl,
+        feature_rating_bl,
+        seq_lens,
+    )
+
+
+def prediction(
+    parameters_bp: torch.Tensor,
+    feature_elapsed_days_real_bl: torch.Tensor,
+    feature_rating_bl: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> torch.Tensor:
+    return _DEFAULT_ADAPTER.prediction(
         parameters_bp,
         feature_elapsed_days_real_bl,
         feature_rating_bl,
