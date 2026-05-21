@@ -8,9 +8,15 @@ import torch
 
 
 def tensor_to_jax_array(tensor: torch.Tensor) -> jax.Array:
+    tensor = tensor.detach()
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
-    return jax.dlpack.from_dlpack(tensor, copy=False)
+    try:
+        return jax.dlpack.from_dlpack(tensor, copy=False)
+    except ValueError as exc:
+        if "requires a copy" not in str(exc):
+            raise
+        return jax.dlpack.from_dlpack(tensor, copy=None)
 
 def tensors_to_jax_arrays(*tensors: Any) -> tuple[jax.Array, ...]:
     return tuple(tensor_to_jax_array(tensor) for tensor in tensors)
@@ -66,7 +72,7 @@ def build_params_buffer(parameters_bp: jax.Array) -> FSRS7Buffer:
         jnp.asarray(4.0, dtype=parameters_bp.dtype),
     )
 
-    factor = parameters_bp[:, 29:31] ** (1 / -parameters_bp[:, 27:29]) - 2
+    factor = parameters_bp[:, 29:31] ** (1 / -parameters_bp[:, 27:29]) - 1
 
     return FSRS7Buffer(
         s=parameters_bp[:, :4],
@@ -255,12 +261,31 @@ def binary_cross_entropy_sum(prediction: jax.Array, label: jax.Array) -> jax.Arr
     return -jnp.sum(label * jnp.log(prediction) + (1 - label) * jnp.log1p(-prediction))
 
 
+def binary_cross_entropy_masked_sum(
+    prediction: jax.Array,
+    label: jax.Array,
+    mask: jax.Array,
+) -> jax.Array:
+    label = label.astype(prediction.dtype)
+    mask = mask.astype(prediction.dtype)
+    loss_b = -(label * jnp.log(prediction) + (1 - label) * jnp.log1p(-prediction))
+    return jnp.sum(loss_b * mask)
+
+
+def label_from_feature_rating(
+    feature_rating_bl: jax.Array,
+    seq_lens: jax.Array,
+) -> jax.Array:
+    batch_idx = jnp.arange(feature_rating_bl.shape[0])
+    target_rating = feature_rating_bl[batch_idx, seq_lens.astype(jnp.int32) - 1]
+    return (target_rating > 1).astype(jnp.float32)
+
+
 def loss(
     parameters_bp: jax.Array,
     feature_elapsed_days_real_bl: jax.Array,
     feature_rating_bl: jax.Array,
     seq_lens: jax.Array,
-    label_b: jax.Array,
 ) -> jax.Array:
     prediction_b = _forward(
         parameters_bp,
@@ -268,10 +293,31 @@ def loss(
         feature_rating_bl,
         seq_lens,
     )
+    label_b = label_from_feature_rating(feature_rating_bl, seq_lens)
     return binary_cross_entropy_sum(prediction_b, label_b)
 
 
+def loss_with_prediction(
+    parameters_bp: jax.Array,
+    feature_elapsed_days_real_bl: jax.Array,
+    feature_rating_bl: jax.Array,
+    seq_lens: jax.Array,
+    mask_b: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    prediction_b = _forward(
+        parameters_bp,
+        feature_elapsed_days_real_bl,
+        feature_rating_bl,
+        seq_lens,
+    )
+    label_b = label_from_feature_rating(feature_rating_bl, seq_lens)
+    return binary_cross_entropy_masked_sum(prediction_b, label_b, mask_b), prediction_b
+
+
 loss_and_grad = jax.jit(jax.value_and_grad(loss, argnums=0))
+loss_and_prediction_and_grad = jax.jit(
+    jax.value_and_grad(loss_with_prediction, argnums=0, has_aux=True)
+)
 
 
 def get_initial_params_for_optimization() -> jax.Array:

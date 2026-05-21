@@ -20,6 +20,7 @@ from parallel.config import (
     TEST_BATCH_SIZE_MAX,
 )
 from parallel.models import fsrs_v7
+from parallel.models.fsrs_v7_jax_adapter import FSRS7JaxAdapter
 from parallel.randperm import segmented_feistel_permutation
 from parallel.tensors import Data, ParamKey, ReviewData, UserTensorBlob
 
@@ -57,7 +58,7 @@ def next_power(n: int, base: int = 2) -> int:
         p *= base
     return p
 
-def predict(review_data: ReviewData, index, params):
+def predict_loss_grad(review_data: ReviewData, index, params):
     assert index.size(0) == params.size(0)
     seq_lens = review_data.seq_len[index]
     max_seq_len = seq_lens.max()
@@ -68,26 +69,10 @@ def predict(review_data: ReviewData, index, params):
     rating_bl = review_data.rating[take_indices]
     elapsed_time_real_bl = review_data.elapsed_days_real[take_indices]
 
-    base = 3  # choose 2, 3, 4, etc.
-    L = rating_bl.size(-1)
-    # L_pad = next_power(L, base=base)
-    L_pad = 65
-    pad = L_pad - L
-
-    if pad > 0:
-        rating_bl = torch.cat(
-            [rating_bl, rating_bl.new_full((*rating_bl.shape[:-1], pad), 0)],
-            dim=-1,
-        )
-
-        elapsed_time_real_bl = torch.cat(
-            [elapsed_time_real_bl, elapsed_time_real_bl.new_full((*elapsed_time_real_bl.shape[:-1], pad), 0.0)],
-            dim=-1,
-        )
-
     fsrs_params = fsrs_v7.nn_vec_to_fsrs7_params(params)
     print("shape", rating_bl.shape)
-    return fsrs_v7.forward(fsrs_params, elapsed_time_real_bl, rating_bl, seq_lens)
+    adapter = FSRS7JaxAdapter()
+    return adapter.forward(fsrs_params, elapsed_time_real_bl, rating_bl, seq_lens)
     
 
 def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
@@ -173,42 +158,22 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         seq_lens = sorted_seq_lens
         indices_filtered = indices_filtered[sorted_seq_lens_indices]
         review_data_indices_filtered = review_data_indices_filtered[sorted_seq_lens_indices]
+
+    #    slice = torch.arange(l, re, re - l, device=indices.device)
+        # batch_fsrs_params = torch.tensor(fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]], requires_grad=True, device=indices.device)
+        batch_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered]
+        batch_review_data_indices = review_data_indices_filtered
+        ts = time.time()
+        p, loss, grad = predict_loss_grad(data.review_data, batch_review_data_indices, batch_fsrs_params)
+        # print("Jax adapter output:")
+        # print(p)
+
         print(time.time() - ts)
-
-        def print_power2_bucket_counts(x: torch.Tensor):
-            # buckets: [0], [1], [2,3], [4,7], ..., [32,63], [64]
-            bounds = torch.tensor([0, 1, 2, 4, 8, 16, 32, 64, 65], device=x.device)
-
-            # x is sorted, so searchsorted is efficient
-            starts = torch.searchsorted(x, bounds[:-1], right=False)
-            ends   = torch.searchsorted(x, bounds[1:],  right=False)
-            counts = ends - starts
-
-            for lo, hi, c in zip(bounds[:-1].tolist(), bounds[1:].tolist(), counts.tolist()):
-                if hi == lo + 1:
-                    print(f"{lo}: {c}")
-                else:
-                    print(f"{lo}-{hi - 1}: {c}")
-        
-        print(print_power2_bucket_counts(seq_lens))
-
-        def load_balancer():
-            b = indices_filtered.size(0)
-            # return [(0, b // 2), (b // 2, b)]
-            return [(0, b)]
-        # Run
-        batches = load_balancer()
-        for (l, re) in batches:
-        #    slice = torch.arange(l, re, re - l, device=indices.device)
-            # batch_fsrs_params = torch.tensor(fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]], requires_grad=True, device=indices.device)
-            batch_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]]
-            batch_review_data_indices = review_data_indices_filtered[l:re]
-            ts = time.time()
-            p = predict(data.review_data, batch_review_data_indices, batch_fsrs_params)
-            print(time.time() - ts)
-            label = data.review_data.rating[batch_review_data_indices] > 1
-            loss = torch.nn.functional.binary_cross_entropy(p, label.float(), reduction='sum')
-            loss.backward()
+        # batch_fsrs_params.grad = grad
+        # print(batch_fsrs_params)
+        batch_fsrs_params.backward(grad)
+        # print(fsrs_params.grad)
+        # exit()
 
 
         active_params_mask = torch.zeros(step_i_cat.size(0), device=step_i_cat.device, dtype=torch.bool)
@@ -238,7 +203,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     gather_p = []
     for perm_slice in sorted_test_index_permutation.split(batch_size):
         batch_fsrs_params = fsrs_params[param_keys.user_index[perm_slice], param_keys.split_index[perm_slice]]
-        p = predict(data.review_data, data.test_index[perm_slice], batch_fsrs_params)
+        p = predict_loss_grad(data.review_data, data.test_index[perm_slice], batch_fsrs_params)[0]
         gather_p.append(p)
     
     restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
@@ -277,7 +242,7 @@ def run(
     fsrs_params = train(fsrs_params, users, data)
 
     print("skip test")
-    # # evaluate
+    # evaluate
     # with torch.no_grad():
     #     evaluate_on_test_set(fsrs_params, users, data)
 
@@ -289,7 +254,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 3000))
+    users = list(range(1, 3))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
@@ -310,4 +275,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    torch.manual_seed(123)
     main()
