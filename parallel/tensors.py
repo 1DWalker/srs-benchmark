@@ -2,20 +2,22 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 
+import jax
+import jax.numpy as jnp
 import torch
 
 
 @dataclass(frozen=True)
 class ParamKey:
-    user_index: torch.Tensor
-    split_index: torch.Tensor
+    user_index: jax.Array
+    split_index: jax.Array
 
 
 @dataclass(frozen=True)
 class ReviewData:
-    rating: torch.Tensor
-    elapsed_days_real: torch.Tensor
-    seq_len: torch.Tensor
+    rating: jax.Array
+    elapsed_days_real: jax.Array
+    seq_len: jax.Array
 
 
 @dataclass(frozen=True)
@@ -67,38 +69,64 @@ class UserTensorBlob:
         return cls(**{key: value for key, value in tensors.items() if key in field_names})
 
 
+def torch_tensor_to_jax_array(tensor: torch.Tensor) -> jax.Array:
+    tensor = tensor.detach()
+    if not tensor.is_contiguous():
+        tensor = tensor.contiguous()
+    if tensor.device.type == "cpu":
+        return jnp.asarray(tensor.numpy())
+    try:
+        return jax.dlpack.from_dlpack(tensor, copy=False)
+    except ValueError as exc:
+        if "requires a copy" not in str(exc):
+            raise
+        return jax.dlpack.from_dlpack(tensor, copy=None)
+
+
 class Data:
     def __init__(self, user_data_list: list[UserTensorBlob]) -> None:
+        rating = torch.cat([user_data.rating for user_data in user_data_list], dim=-1)
+        elapsed_days_real = torch.cat(
+            [user_data.elapsed_days_real for user_data in user_data_list],
+            dim=-1,
+        )
+        seq_len = torch.cat([user_data.seq_len for user_data in user_data_list], dim=-1)
         self.review_data = ReviewData(
-            rating=torch.concat([user_data.rating for user_data in user_data_list], dim=-1),
-            elapsed_days_real=torch.concat([user_data.elapsed_days_real for user_data in user_data_list], dim=-1),
-            seq_len=torch.concat([user_data.seq_len for user_data in user_data_list], dim=-1),
+            rating=torch_tensor_to_jax_array(rating),
+            elapsed_days_real=torch_tensor_to_jax_array(elapsed_days_real),
+            seq_len=torch_tensor_to_jax_array(seq_len),
         )
-        self.device = self.review_data.rating.device
         user_lengths = torch.tensor(
-            [user_data.rating.size(0) for user_data in user_data_list],
-            device=self.review_data.rating.device,
+            [user_data.rating.shape[0] for user_data in user_data_list],
+            dtype=torch.int32,
         )
-        self.user_flat_offset = torch.nn.functional.pad(
-            torch.cumsum(user_lengths, dim=-1)[:-1],
+        user_flat_offset = torch.nn.functional.pad(
+            torch.cumsum(user_lengths, dim=-1, dtype=torch.int32)[:-1],
             (1, 0),
         )
+        self.user_flat_offset = torch_tensor_to_jax_array(user_flat_offset)
         # per_element_offsets = torch.repeat_interleave(
         #     self.user_flat_offset,
         #     user_lengths,
         #     output_size=self.review_data.rating.size(0),
         # )
-        self.train_index = self.concat_with_offset(
+        train_index = self.concat_with_offset(
             [user_data.train_index for user_data in user_data_list],
-            self.user_flat_offset,
+            user_flat_offset,
         )
-        self.train_split_lengths = [user_data.train_split_lengths for user_data in user_data_list]
+        self.train_index = torch_tensor_to_jax_array(train_index)
+        train_split_lengths = torch.cat(
+            [user_data.train_split_lengths for user_data in user_data_list],
+            dim=-1,
+        )
+        self.train_split_lengths = torch_tensor_to_jax_array(train_split_lengths)
 
-        self.test_index = self.concat_with_offset(
+        test_index = self.concat_with_offset(
             [user_data.test_index for user_data in user_data_list],
-            self.user_flat_offset,
+            user_flat_offset,
         )
-        self.test_index_lens = [user_data.test_index.size(-1) for user_data in user_data_list]
+        self.test_index = torch_tensor_to_jax_array(test_index)
+        self.test_index_lens = [user_data.test_index.shape[-1] for user_data in user_data_list]
         self.splits = [user_data.split for user_data in user_data_list]
 
 
@@ -113,10 +141,16 @@ class Data:
         # Delay the computation of this to save a bit of memory
         per_user_interleave = [
             torch.repeat_interleave(
-                torch.arange(len(split), device=split.device),
-                split.to(torch.long),
+                torch.arange(len(split), dtype=torch.int32),
+                split.to(torch.int32),
             ) 
             for split in self.splits]
         split_index = torch.cat(per_user_interleave, dim=-1)
-        user_index = torch.repeat_interleave(torch.arange(len(self.test_index_lens), device=self.device), torch.tensor(self.test_index_lens, device=self.device, dtype=torch.long))
-        return ParamKey(user_index=user_index, split_index=split_index)
+        user_index = torch.repeat_interleave(
+            torch.arange(len(self.test_index_lens), dtype=torch.int32),
+            torch.tensor(self.test_index_lens, dtype=torch.int32),
+        )
+        return ParamKey(
+            user_index=torch_tensor_to_jax_array(user_index),
+            split_index=torch_tensor_to_jax_array(split_index),
+        )

@@ -4,7 +4,7 @@ from parallel.utils import _next_power_of_2
 
 
 def get_batches_train(seq_lens):
-    n = seq_lens.size(0)
+    n = seq_lens.shape[0]
     batches = []
     r = n
     VOLUME = int(2 ** 16) * 65
@@ -16,7 +16,7 @@ def get_batches_train(seq_lens):
     return batches
 
 def get_batches_test(seq_lens):
-    n = seq_lens.size(0)
+    n = seq_lens.shape[0]
     batches = []
     r = n
     VOLUME = int(2 ** 17) * 65

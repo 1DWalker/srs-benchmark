@@ -157,7 +157,7 @@ def fsrs7_step(l: int, p: FSRS7Buffer, feature_elapsed, feature_rating, stabilit
     return new_s, new_d
 
 
-@torch.compile(fullgraph=True, dynamic=True)
+# @torch.compile(fullgraph=True, dynamic=True)
 def forward(parameters_bp, feature_elapsed_days_real_bl, feature_rating_bl, seq_lens):
     p: FSRS7Buffer = build_params_buffer(parameters_bp)
 
@@ -179,10 +179,28 @@ def forward(parameters_bp, feature_elapsed_days_real_bl, feature_rating_bl, seq_
     output_tensor = torch.stack(outputs, dim=-1)
     review_s = output_tensor[torch.arange(B), seq_lens - 2]
     review_elapsed = feature_elapsed_days_real_bl[torch.arange(B), seq_lens - 1]
+    assert not review_elapsed.isnan().any()
+    assert not review_s.isnan().any()
     return forgetting_curve(p, review_elapsed, review_s)
 
 def get_initial_params_for_optimization():
-    return torch.zeros(35)
+    return FSRS7_DEFAULT_35.clone()
+
+def apply_parameter_clipper(parameters_b):
+    assert parameters_b.shape[-1] == 35
+    lo = FSRS_MIN.to(device=parameters_b.device, dtype=parameters_b.dtype)
+    hi = FSRS_MAX.to(device=parameters_b.device, dtype=parameters_b.dtype)
+
+    clipped = parameters_b.clamp(min=lo, max=hi)
+    clipped = clipped.clone()
+
+    clipped[..., 1] = torch.maximum(clipped[..., 1], clipped[..., 0])
+    clipped[..., 2] = torch.maximum(clipped[..., 2], clipped[..., 1])
+    clipped[..., 3] = torch.maximum(clipped[..., 3], clipped[..., 2])
+    clipped[..., 28] = torch.maximum(clipped[..., 28], clipped[..., 27])
+    clipped[..., 30] = torch.maximum(clipped[..., 30], clipped[..., 29])
+    return clipped
+
 
 FSRS7_DEFAULT_35 = torch.tensor(
     [
@@ -201,7 +219,7 @@ FSRS7_DEFAULT_35 = torch.tensor(
         0.7503,
         0.0896,
         0.6625,
-        1.15,  # Stability (long-term)
+        1.3,  # Stability (long-term)
         0.882,
         0.3072,
         3.5875,
@@ -210,55 +228,18 @@ FSRS7_DEFAULT_35 = torch.tensor(
         0.2279,
         2.6413,
         0.5594,
-        1.15,  # Stability (short-term)
-        3.5,
-        0.5,  # Long-short term transition function
+        1.3,  # Stability (short-term)
+        2.5,
+        1.0,  # Long-short term transition function
         0.0723,
         0.1634,
-        0.6,
+        0.5,
         0.9555,
         0.2245,
         0.6232,
         0.1362,
         0.3862,
-    ] 
-    # [
-    #     0.041,
-    #     2.4175,
-    #     4.1283,
-    #     11.9709,  # Initial S
-    #     5.6385,
-    #     0.4468,
-    #     3.262,  # Difficulty
-    #     2.3054,
-    #     0.1688,
-    #     1.3325,
-    #     0.3524,
-    #     0.0049,
-    #     0.7503,
-    #     0.0896,
-    #     0.6625,
-    #     1.3,  # Stability (long-term)
-    #     0.882,
-    #     0.3072,
-    #     3.5875,
-    #     0.303,
-    #     0.0107,
-    #     0.2279,
-    #     2.6413,
-    #     0.5594,
-    #     1.3,  # Stability (short-term)
-    #     2.5,
-    #     1.0,  # Long-short term transition function
-    #     0.0723,
-    #     0.1634,
-    #     0.5,
-    #     0.9555,
-    #     0.2245,
-    #     0.6232,
-    #     0.1362,
-    #     0.3862,
-    # ]
+    ]
 )
 
 FSRS_MIN = torch.tensor(
@@ -341,218 +322,5 @@ FSRS_MAX = torch.tensor(
     ]
 )
 
-assert (FSRS_MIN < FSRS7_DEFAULT_35).all()
-assert (FSRS7_DEFAULT_35 < FSRS_MAX).all(), FSRS7_DEFAULT_35 < FSRS_MAX
-
-
-@torch.jit.script
-def _bounded(x, lo, hi, default):
-    mid = torch.log((default - lo) / (hi - default))
-    return lo + (hi - lo) * torch.sigmoid(x + mid)
-
-
-@torch.jit.script
-def _bounded_exp(x, lo, hi, default):
-    lo_log = torch.log(lo)
-    hi_log = torch.log(hi)
-    def_log = torch.log(default)
-    mid = torch.log((def_log - lo_log) / (hi_log - def_log))
-    out_log = lo_log + (hi_log - lo_log) * torch.sigmoid(x + mid)
-    return torch.exp(out_log)
-
-
-def make_slices_increasing(x):
-    sort_slices = [(1, 4)]
-    for i in range(1, len(sort_slices)):
-        assert sort_slices[i][0] >= sort_slices[i - 1][1]
-    x_out = []
-    start = 0
-    dim = x.dim() - 1
-    for l, r in sort_slices:
-        if l > start:
-            x_out.append(x[..., start:l])
-        slice_len = r - l
-        if slice_len == 1:
-            x_out.append(x[..., l:r])
-        else:
-            first = x[..., l : l + 1]
-            increments = torch.nn.functional.softplus(x[..., (l + 1) : r])
-            increasing_slice = torch.cat(
-                [first, first + torch.cumsum(increments, dim=dim)],
-                dim=dim,
-            )
-            x_out.append(increasing_slice)
-        start = r
-    if start < x.shape[-1]:
-        x_out.append(x[..., start:])
-    return torch.cat(x_out, dim=dim)
-
-
-def nn_vec_to_fsrs7_params(x):
-    assert x.shape[-1] == 35
-    lo = FSRS_MIN.to(x.device)
-    hi = FSRS_MAX.to(x.device)
-    default = FSRS7_DEFAULT_35.to(x.device)
-
-    x = make_slices_increasing(x)
-
-    exp_mask = torch.zeros(35, dtype=torch.bool, device=x.device)
-    exp_mask[:4] = True
-
-    out = torch.empty_like(x)
-
-    out[..., exp_mask] = _bounded_exp(
-        x[..., exp_mask],
-        lo[exp_mask],
-        hi[exp_mask],
-        default[exp_mask],
-    )
-
-    out[..., ~exp_mask] = _bounded(
-        x[..., ~exp_mask],
-        lo[~exp_mask],
-        hi[~exp_mask],
-        default[~exp_mask],
-    )
-
-    out_copy = out.clone()
-    out_copy[..., 1:4] = _bounded_exp(
-        x[..., 1:4],
-        out[..., 0:1].expand_as(x[..., 1:4]),
-        hi[1:4],
-        (out[..., 0:1] + hi[1:4]) / 2,
-    )
-    out_copy[..., 28] = _bounded(
-        x[..., 28],
-        out[..., 27],
-        hi[28],
-        (out[..., 27] + hi[28]) / 2,
-    )
-    out_copy[..., 30] = _bounded(
-        x[..., 30],
-        out[..., 29],
-        hi[30],
-        (out[..., 29] + hi[30]) / 2,
-    )
-    return out_copy
-
-
-def _assert_param_constraints(w):
-    assert (FSRS_MIN.to(w.device) <= w + 1e-4).all(), FSRS_MIN.to(w.device) <= w + 1e-4
-    assert (w <= FSRS_MAX.to(w.device) + 1e-4).all(), w <= FSRS_MAX.to(w.device) + 1e-4
-    assert (w[..., 0] <= w[..., 1]).all(), w
-    assert (w[..., 1] <= w[..., 2]).all(), w
-    assert (w[..., 2] <= w[..., 3]).all(), w
-    assert (w[..., 27] <= w[..., 28]).all(), w
-    assert (w[..., 29] <= w[..., 30]).all(), w
-
-
-def _check_batched_forward():
-    raw_bp = torch.stack(
-        [
-            torch.zeros(35),
-            torch.linspace(-1.0, 1.0, 35),
-            torch.linspace(1.0, -1.0, 35),
-        ],
-        dim=0,
-    )
-    parameters_bp = nn_vec_to_fsrs7_params(raw_bp)
-
-    feature_elapsed_days_real_bl = torch.tensor(
-        [
-            [0.0, 1.0, 3.0, 0.25, 10.0],
-            [0.0, 0.5, 2.0, 4.0, 8.0],
-            [0.0, 2.0, 1.0, 5.0, 13.0],
-        ],
-        dtype=torch.float32,
-    )
-    feature_rating_bl = torch.tensor(
-        [
-            [1, 2, 3, 4, 3],
-            [4, 3, 2, 1, 4],
-            [2, 2, 3, 3, 4],
-        ],
-        dtype=torch.long,
-    )
-    label_elapsed_days_real_bl = torch.tensor(
-        [
-            [0.25, 1.5, 4.0, 1.0, 12.0],
-            [0.1, 1.0, 3.0, 6.0, 10.0],
-            [0.5, 2.5, 2.0, 7.0, 15.0],
-        ],
-        dtype=torch.float32,
-    )
-
-    batched_retention_bl, batched_stability_bl = forward(
-        parameters_bp,
-        feature_elapsed_days_real_bl,
-        feature_rating_bl,
-        label_elapsed_days_real_bl,
-    )
-
-    for b in range(parameters_bp.shape[0]):
-        single_retention_bl, single_stability_bl = forward(
-            parameters_bp[b : b + 1],
-            feature_elapsed_days_real_bl[b : b + 1],
-            feature_rating_bl[b : b + 1],
-            label_elapsed_days_real_bl[b : b + 1],
-        )
-        assert torch.allclose(
-            batched_retention_bl[b : b + 1],
-            single_retention_bl,
-            rtol=1e-6,
-            atol=1e-6,
-        )
-        assert torch.allclose(
-            batched_stability_bl[b : b + 1],
-            single_stability_bl,
-            rtol=1e-6,
-            atol=1e-6,
-        )
-
-
-if __name__ == "__main__":
-    a = nn_vec_to_fsrs7_params(torch.full((35,), -1000.0))
-    b = nn_vec_to_fsrs7_params(torch.full((35,), 0.0))
-    c = nn_vec_to_fsrs7_params(torch.full((35,), 1000.0))
-    print(a)
-    print(b)
-    print(c)
-    assert ((a - FSRS_MIN).abs() < 1e-4).all()
-    assert ((c - FSRS_MAX).abs() < 1e-4).all()
-    _assert_param_constraints(a)
-    _assert_param_constraints(b)
-    _assert_param_constraints(c)
-    h = [0.0 for _ in range(35)]
-    h[1] = -2
-    print(nn_vec_to_fsrs7_params(torch.tensor(h)))
-
-    batch_abc = nn_vec_to_fsrs7_params(
-        torch.stack(
-            [
-                torch.full((35,), -1000.0),
-                torch.full((35,), 0.0),
-                torch.full((35,), 1000.0),
-            ],
-            dim=0,
-        )
-    )
-    assert torch.allclose(batch_abc[0], a)
-    assert torch.allclose(batch_abc[1], b)
-    assert torch.allclose(batch_abc[2], c)
-    _assert_param_constraints(batch_abc)
-
-    sampler = torch.distributions.studentT.StudentT(torch.full((35,), 1.0))
-    for _ in range(1000):
-        x = sampler.sample()
-        w = nn_vec_to_fsrs7_params(x)
-        _assert_param_constraints(w)
-
-    for _ in range(100):
-        x = sampler.sample((8,))
-        w = nn_vec_to_fsrs7_params(x)
-        _assert_param_constraints(w)
-
-    _check_batched_forward()
-
-    print("Check complete.")
+assert (FSRS_MIN <= FSRS7_DEFAULT_35).all()
+assert (FSRS7_DEFAULT_35 <= FSRS_MAX).all(), FSRS7_DEFAULT_35 <= FSRS_MAX

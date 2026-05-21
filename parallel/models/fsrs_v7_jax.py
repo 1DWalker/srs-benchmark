@@ -239,6 +239,151 @@ def forward(
     )
 
 
+def get_initial_params_for_optimization() -> jax.Array:
+    return FSRS7_DEFAULT_35.copy()
+
+
+def apply_parameter_clipper(parameters_b: jax.Array) -> jax.Array:
+    assert parameters_b.shape[-1] == 35
+    lo = FSRS_MIN.astype(parameters_b.dtype)
+    hi = FSRS_MAX.astype(parameters_b.dtype)
+
+    clipped = jnp.clip(parameters_b, lo, hi)
+    clipped = clipped.at[..., 1].set(jnp.maximum(clipped[..., 1], clipped[..., 0]))
+    clipped = clipped.at[..., 2].set(jnp.maximum(clipped[..., 2], clipped[..., 1]))
+    clipped = clipped.at[..., 3].set(jnp.maximum(clipped[..., 3], clipped[..., 2]))
+    clipped = clipped.at[..., 28].set(jnp.maximum(clipped[..., 28], clipped[..., 27]))
+    clipped = clipped.at[..., 30].set(jnp.maximum(clipped[..., 30], clipped[..., 29]))
+    return clipped
+
+
+FSRS7_DEFAULT_35 = jnp.array(
+    [
+        0.041,
+        2.4175,
+        4.1283,
+        11.9709,  # Initial S
+        5.6385,
+        0.4468,
+        3.262,  # Difficulty
+        2.3054,
+        0.1688,
+        1.3325,
+        0.3524,
+        0.0049,
+        0.7503,
+        0.0896,
+        0.6625,
+        1.3,  # Stability (long-term)
+        0.882,
+        0.3072,
+        3.5875,
+        0.303,
+        0.0107,
+        0.2279,
+        2.6413,
+        0.5594,
+        1.3,  # Stability (short-term)
+        2.5,
+        1.0,  # Long-short term transition function
+        0.0723,
+        0.1634,
+        0.5,
+        0.9555,
+        0.2245,
+        0.6232,
+        0.1362,
+        0.3862,
+    ],
+    dtype=jnp.float32,
+)
+
+FSRS_MIN = jnp.array(
+    [
+        0.0001,  # 0
+        0.0001,  # 1 (depends on w0)
+        0.0001,  # 2 (depends on w1)
+        0.0001,  # 3 (depends on w2)
+        1.0,  # 4
+        0.001,  # 5
+        0.1,  # 6
+        0.0,  # 7
+        0.0,  # 8
+        0.3,  # 9
+        0.01,  # 10
+        0.001,  # 11
+        0.1,  # 12
+        0.0,  # 13
+        0.0,  # 14
+        1.0,  # 15
+        0.0,  # 16
+        0.0,  # 17
+        0.5,  # 18
+        0.001,  # 19
+        0.001,  # 20
+        0.001,  # 21
+        0.0,  # 22
+        0.0,  # 23
+        1.0,  # 24
+        2.5,  # 25
+        0.0,  # 26
+        0.01,  # 27
+        0.01,  # 28 (depends on w27)
+        0.5,  # 29
+        0.5,  # 30 (depends on w29)
+        0.01,  # 31
+        0.1,  # 32
+        0.0,  # 33
+        0.1,  # 34
+    ],
+    dtype=jnp.float32,
+)
+
+FSRS_MAX = jnp.array(
+    [
+        50.0,  # 0
+        100.0,  # 1
+        100.0,  # 2
+        100.0,  # 3
+        10.0,  # 4
+        4.0,  # 5
+        4.0,  # 6
+        4.0,  # 7
+        1.2,  # 8
+        3.0,  # 9
+        1.5,  # 10
+        0.9,  # 11
+        1.0,  # 12
+        3.5,  # 13
+        1.0,  # 14
+        7.0,  # 15
+        4.0,  # 16
+        2.0,  # 17
+        6.0,  # 18
+        1.5,  # 19
+        2.0,  # 20
+        1.0,  # 21
+        5.0,  # 22
+        1.0,  # 23
+        7.0,  # 24
+        15.0,  # 25
+        1.0,  # 26
+        0.25,  # 27
+        0.95,  # 28
+        0.85,  # 29
+        0.99,  # 30
+        1.0,  # 31
+        1.0,  # 32
+        0.9,  # 33
+        1.1,  # 34
+    ],
+    dtype=jnp.float32,
+)
+
+assert bool(jnp.all(FSRS_MIN <= FSRS7_DEFAULT_35))
+assert bool(jnp.all(FSRS7_DEFAULT_35 <= FSRS_MAX))
+
+
 def binary_cross_entropy_sum(prediction: jax.Array, label: jax.Array) -> jax.Array:
     label = label.astype(prediction.dtype)
     return -jnp.sum(label * jnp.log(prediction) + (1 - label) * jnp.log1p(-prediction))
