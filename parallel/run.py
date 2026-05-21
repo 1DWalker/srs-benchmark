@@ -21,6 +21,7 @@ from parallel.config import (
 )
 from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.models import fsrs_v7
+from parallel.models import fsrs_v7_jax_adapter
 from parallel.models.fsrs_v7_jax_adapter import FSRS7JaxAdapter
 from parallel.randperm import segmented_feistel_permutation
 from parallel.tensors import Data, ParamKey, ReviewData, UserTensorBlob
@@ -60,22 +61,29 @@ def next_power(n: int, base: int = 2) -> int:
     return p
 
 def _prepare_prediction_inputs(review_data: ReviewData, index):
+    ts = time.time()
     seq_lens = review_data.seq_len[index]
     max_seq_len = seq_lens.max()
 
     card_start_index = index - seq_lens + 1
     data_len = review_data.elapsed_days_real.size(0)
 
+    torch.cuda.synchronize()
+    to = time.time()
     arange_l = torch.arange(max_seq_len.item(), device=index.device)
+    print("make arange_l", time.time() - to)
 
     take_indices = (
         card_start_index[:, None] + arange_l[None, :]
     ).clamp_max(data_len - 1)
+    print("prepare before take", time.time() - ts)
+    ts = time.time()
 
     rating_bl = review_data.rating[take_indices]
     elapsed_time_real_bl = review_data.elapsed_days_real[take_indices]
+    print("prepare take", time.time() - ts)
 
-    print("shape", rating_bl.shape, max_seq_len)
+    # print("shape", rating_bl.shape, max_seq_len)
 
     return elapsed_time_real_bl, rating_bl, seq_lens
 
@@ -84,17 +92,19 @@ def predict(review_data: ReviewData, index, params):
     elapsed_time_real_bl, rating_bl, seq_lens = _prepare_prediction_inputs(
         review_data, index
     )
-    adapter = FSRS7JaxAdapter()
-    return adapter.prediction(params, elapsed_time_real_bl, rating_bl, seq_lens)
+    return fsrs_v7_jax_adapter.prediction(params, elapsed_time_real_bl, rating_bl, seq_lens)
 
 
 def predict_loss_grad(review_data: ReviewData, index, params):
+    torch.cuda.synchronize()
+    ts = time.time()
     assert index.size(0) == params.size(0)
     elapsed_time_real_bl, rating_bl, seq_lens = _prepare_prediction_inputs(
         review_data, index
     )
-    adapter = FSRS7JaxAdapter()
-    return adapter.prediction_loss_grad(params, elapsed_time_real_bl, rating_bl, seq_lens) 
+    torch.cuda.synchronize()
+    print("pred loss grad prep", time.time() - ts)
+    return fsrs_v7_jax_adapter.prediction_loss_grad(params, elapsed_time_real_bl, rating_bl, seq_lens) 
 
 def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("start train")
@@ -132,6 +142,7 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
     step_i_cat = torch.zeros_like(num_training_steps_cat)
     optim_state = adamw.init_adamw_state(fsrs_params.view(-1, fsrs_params.size(-1)))
     for iter in tqdm(range(train_splits_length_cat_max), desc="Training", smoothing=0.03):
+        torch.cuda.synchronize()
         ts = time.time()
         remaining = num_training_steps_cat - step_i_cat
         # print("remaining:", remaining)
@@ -180,28 +191,39 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         indices_filtered = indices_filtered[sorted_seq_lens_indices]
         review_data_indices_filtered = review_data_indices_filtered[sorted_seq_lens_indices]
 
+        torch.cuda.synchronize()
+        tb = time.time()
         batches = get_batches_train(seq_lens)
-        print(batches)
+        print("get batches", time.time() - tb)
+        torch.cuda.synchronize()
+        print("prepare iteration", time.time() - ts)
+        # print(batches)
         for (l, re) in batches:
+            ts = time.time()
             # slice = torch.arange(l, re, re - l, device=indices.device)
             # batch_fsrs_params = torch.tensor(fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]], requires_grad=True, device=indices.device)
             # batch_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]].detach().clone().requires_grad_(True)
             batch_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]]
             # batch_review_data_indices = review_data_indices_filtered[slice]
             batch_review_data_indices = review_data_indices_filtered[l:re]
-            ts = time.time()
+            torch.cuda.synchronize()
+            print("intermediate", time.time() - ts)
             p, loss, grad = predict_loss_grad(data.review_data, batch_review_data_indices, batch_fsrs_params)
+            torch.cuda.synchronize()
+            print("intermediate2", time.time() - ts)
             # print("Jax adapter output:")
             # print(p)
 
-            print(time.time() - ts)
             # batch_fsrs_params.grad = grad
             # print(batch_fsrs_params)
             batch_fsrs_params.backward(grad)
             # print(fsrs_params.grad)
             # exit()
+            torch.cuda.synchronize()
+            print("total it", time.time() - ts)
+            print()
 
-
+        t_opt = time.time()
         active_params_mask = torch.zeros(step_i_cat.size(0), device=step_i_cat.device, dtype=torch.bool)
         active_params_mask[indices] = True
         lr_schedule_multi = scheduler.scheduler(step_i_cat, num_training_steps_cat)
@@ -221,6 +243,10 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
 
         fsrs_params.grad = None
         step_i_cat[indices] += 1
+
+        torch.cuda.synchronize()
+        print("opt time", time.time() - t_opt)
+        print("----------------------------------------------------------")
 
 
     assert (step_i_cat == num_training_steps_cat).all()
@@ -297,7 +323,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 3))
+    users = list(range(1, 1000))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
@@ -318,5 +344,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import os
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.30"
     torch.manual_seed(123)
     main()

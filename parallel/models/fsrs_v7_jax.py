@@ -1,26 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-import torch
-
-
-def tensor_to_jax_array(tensor: torch.Tensor) -> jax.Array:
-    tensor = tensor.detach()
-    if not tensor.is_contiguous():
-        tensor = tensor.contiguous()
-    try:
-        return jax.dlpack.from_dlpack(tensor, copy=False)
-    except ValueError as exc:
-        if "requires a copy" not in str(exc):
-            raise
-        return jax.dlpack.from_dlpack(tensor, copy=None)
-
-def tensors_to_jax_arrays(*tensors: Any) -> tuple[jax.Array, ...]:
-    return tuple(tensor_to_jax_array(tensor) for tensor in tensors)
-
 
 class FSRS7Buffer(NamedTuple):
     s: jax.Array

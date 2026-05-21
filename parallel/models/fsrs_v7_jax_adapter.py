@@ -4,6 +4,7 @@ from pathlib import Path
 
 import jax
 import torch
+import time
 
 from parallel.models import fsrs_v7_jax
 from parallel.utils import _next_power_of_2
@@ -37,12 +38,7 @@ def _torch_to_jax(tensor: torch.Tensor) -> jax.Array:
 
 
 def _jax_to_torch(array: jax.Array, like: torch.Tensor | None = None) -> torch.Tensor:
-    tensor = torch.from_dlpack(array)
-    if like is None:
-        return tensor
-    if tensor.device != like.device or tensor.dtype != like.dtype:
-        tensor = tensor.to(device=like.device, dtype=like.dtype)
-    return tensor
+    return torch.from_dlpack(array, copy=False)
 
 
 def _astype(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -79,7 +75,7 @@ def _prepare_prediction_batch(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
     actual_size = parameters_bp.shape[0]
     padded_b = max(MIN_PADDED_BATCH_SIZE, _next_power_of_2(actual_size))
-    padded_l = _next_power_of_2(feature_elapsed_days_real_bl.shape[1])
+    padded_l = 1 + _next_power_of_2(feature_elapsed_days_real_bl.shape[1] - 1)
 
     elapsed = _pad_rows_repeat_last(
         _pad_cols_zero(feature_elapsed_days_real_bl, padded_l),
@@ -154,6 +150,8 @@ class FSRS7JaxAdapter:
         feature_rating_bl: torch.Tensor,
         seq_lens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        torch.cuda.synchronize()
+        to = time.time()
         _validate_inputs(
             parameters_bp,
             feature_elapsed_days_real_bl,
@@ -173,13 +171,28 @@ class FSRS7JaxAdapter:
             feature_rating_bl,
             seq_lens,
         )
+        torch.cuda.synchronize()
+        t_before_move = time.time()
+        jax_arrays = [_torch_to_jax(tensor) for tensor in batch]
+        for array in jax_arrays:
+            array.block_until_ready()
+        ts = time.time()
+        print("adapter start", time.time() - to, time.time() - t_before_move)
         (loss, prediction), parameters_grad = fsrs_v7_jax.loss_and_prediction_and_grad(
-            *(_torch_to_jax(tensor) for tensor in batch)
+            *jax_arrays
         )
 
+        prediction.block_until_ready()
+        loss.block_until_ready()
+        parameters_grad.block_until_ready()
+        print(loss.shape)  # force sync?
+        print("just func", time.time() - ts, time.time() - to, batch[1].shape)
+        ts = time.time()
         prediction_b = _jax_to_torch(prediction)[:actual_size]
         loss_t = _jax_to_torch(loss, parameters_bp)
         parameters_grad_bp = _jax_to_torch(parameters_grad, parameters_bp)[:actual_size]
+        torch.cuda.synchronize()
+        print("tranfer back", time.time() - ts)
         return prediction_b, loss_t, parameters_grad_bp
 
     def prediction(
@@ -209,21 +222,6 @@ class FSRS7JaxAdapter:
 
 _DEFAULT_ADAPTER = FSRS7JaxAdapter()
 
-
-def forward(
-    parameters_bp: torch.Tensor,
-    feature_elapsed_days_real_bl: torch.Tensor,
-    feature_rating_bl: torch.Tensor,
-    seq_lens: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return _DEFAULT_ADAPTER.prediction_loss_grad(
-        parameters_bp,
-        feature_elapsed_days_real_bl,
-        feature_rating_bl,
-        seq_lens,
-    )
-
-
 def prediction(
     parameters_bp: torch.Tensor,
     feature_elapsed_days_real_bl: torch.Tensor,
@@ -231,6 +229,19 @@ def prediction(
     seq_lens: torch.Tensor,
 ) -> torch.Tensor:
     return _DEFAULT_ADAPTER.prediction(
+        parameters_bp,
+        feature_elapsed_days_real_bl,
+        feature_rating_bl,
+        seq_lens,
+    )
+
+def prediction_loss_grad(
+    parameters_bp: torch.Tensor,
+    feature_elapsed_days_real_bl: torch.Tensor,
+    feature_rating_bl: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _DEFAULT_ADAPTER.prediction_loss_grad(
         parameters_bp,
         feature_elapsed_days_real_bl,
         feature_rating_bl,

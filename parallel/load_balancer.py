@@ -7,20 +7,22 @@ def get_batches_train(seq_lens):
     n = seq_lens.size(0)
     batches = []
     r = n
-    SIZE = int(2 ** 15)
+    VOLUME = int(2 ** 16) * 65
     while (r > 0):
-        batches.append((max(0, r - SIZE), r))
-        r -= SIZE
+        len = 1 + _next_power_of_2(seq_lens[r - 1].item() - 1)
+        take = _next_power_of_2(max(1, VOLUME // len))
+        batches.append((max(0, r - take), r))
+        r -= take
     return batches
 
 def get_batches_test(seq_lens):
     n = seq_lens.size(0)
     batches = []
     r = n
-    VOLUME = int(2 ** 16) * 64
+    VOLUME = int(2 ** 17) * 65
     while (r > 0):
-        len = _next_power_of_2(seq_lens[r - 1].item())
-        take = max(1, VOLUME // len)
+        len = 1 + _next_power_of_2(seq_lens[r - 1].item() - 1)
+        take = _next_power_of_2(max(1, VOLUME // len))
         batches.append((max(0, r - take), r))
         r -= take
     batches.sort()
