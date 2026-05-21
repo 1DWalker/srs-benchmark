@@ -86,6 +86,7 @@ def predict(review_data: ReviewData, index, params):
         )
 
     fsrs_params = fsrs_v7.nn_vec_to_fsrs7_params(params)
+    print("shape", rating_bl.shape)
     return fsrs_v7.forward(fsrs_params, elapsed_time_real_bl, rating_bl, seq_lens)
     
 
@@ -173,6 +174,23 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         indices_filtered = indices_filtered[sorted_seq_lens_indices]
         review_data_indices_filtered = review_data_indices_filtered[sorted_seq_lens_indices]
         print(time.time() - ts)
+
+        def print_power2_bucket_counts(x: torch.Tensor):
+            # buckets: [0], [1], [2,3], [4,7], ..., [32,63], [64]
+            bounds = torch.tensor([0, 1, 2, 4, 8, 16, 32, 64, 65], device=x.device)
+
+            # x is sorted, so searchsorted is efficient
+            starts = torch.searchsorted(x, bounds[:-1], right=False)
+            ends   = torch.searchsorted(x, bounds[1:],  right=False)
+            counts = ends - starts
+
+            for lo, hi, c in zip(bounds[:-1].tolist(), bounds[1:].tolist(), counts.tolist()):
+                if hi == lo + 1:
+                    print(f"{lo}: {c}")
+                else:
+                    print(f"{lo}-{hi - 1}: {c}")
+        
+        print(print_power2_bucket_counts(seq_lens))
 
         def load_balancer():
             b = indices_filtered.size(0)
@@ -271,7 +289,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 3001))
+    users = list(range(1, 3000))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 

@@ -4,29 +4,13 @@ from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import torch
 
 
-def tensor_to_jax_array(tensor: Any) -> jax.Array:
-    if isinstance(tensor, jax.Array):
-        return tensor
-
-    if hasattr(tensor, "detach"):
-        tensor = tensor.detach()
-    if hasattr(tensor, "contiguous"):
+def tensor_to_jax_array(tensor: torch.Tensor) -> jax.Array:
+    if not tensor.is_contiguous():
         tensor = tensor.contiguous()
-
-    if hasattr(tensor, "__dlpack__"):
-        try:
-            return jax.dlpack.from_dlpack(tensor)
-        except (BufferError, RuntimeError, TypeError):
-            pass
-
-    # if hasattr(tensor, "cpu"):
-    #     tensor = tensor.cpu()
-    # if hasattr(tensor, "numpy"):
-    #     tensor = tensor.numpy()
-    # return jnp.asarray(tensor)
-
+    return jax.dlpack.from_dlpack(tensor, copy=False)
 
 def tensors_to_jax_arrays(*tensors: Any) -> tuple[jax.Array, ...]:
     return tuple(tensor_to_jax_array(tensor) for tensor in tensors)
@@ -160,7 +144,7 @@ def stability_after_review(
         1
         + (11 - difficulty)[:, None]
         * stability[:, None] ** (-p.sinc_s_exp)
-        * (jnp.exp((1 - r)[:, None] * p.sinc_r_mult) - 1)
+        * jnp.expm1((1 - r)[:, None] * p.sinc_r_mult)
         * sinc_coef
     )
 
@@ -204,8 +188,7 @@ def fsrs7_step(
     return jnp.clip(new_s, 1e-4, 36500), new_d
 
 
-@jax.jit
-def forward(
+def _forward(
     parameters_bp: jax.Array,
     feature_elapsed_days_real_bl: jax.Array,
     feature_rating_bl: jax.Array,
@@ -214,16 +197,19 @@ def forward(
     p = build_params_buffer(parameters_bp)
 
     b = feature_elapsed_days_real_bl.shape[0]
+    l = feature_elapsed_days_real_bl.shape[1]
     feature_elapsed_days_real_lb = feature_elapsed_days_real_bl.T
     feature_rating_lb = feature_rating_bl.astype(jnp.int32).T
-    init = first_review(p, feature_rating_lb[0])
+    seq_lens = seq_lens.astype(jnp.int32)
+    target_step = seq_lens - 2
+    init_s, init_d = first_review(p, feature_rating_lb[0])
 
     def scan_step(
-        carry: tuple[jax.Array, jax.Array],
-        xs: tuple[jax.Array, jax.Array],
-    ) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
-        stability, difficulty = carry
-        feature_elapsed, feature_rating = xs
+        carry: tuple[jax.Array, jax.Array, jax.Array],
+        xs: tuple[jax.Array, jax.Array, jax.Array],
+    ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], None]:
+        stability, difficulty, review_s = carry
+        step, feature_elapsed, feature_rating = xs
         new_s, new_d = fsrs7_step(
             p,
             feature_elapsed,
@@ -231,21 +217,61 @@ def forward(
             stability,
             difficulty,
         )
-        return (new_s, new_d), new_s
+        review_s = jnp.where(step == target_step, new_s, review_s)
+        return (new_s, new_d, review_s), None
 
-    _, output_lb = jax.lax.scan(
+    (_, _, review_s), _ = jax.lax.scan(
         scan_step,
-        init,
-        (feature_elapsed_days_real_lb[1:], feature_rating_lb[1:]),
+        (init_s, init_d, init_s),
+        (
+            jnp.arange(1, l - 1, dtype=jnp.int32),
+            feature_elapsed_days_real_lb[1:-1],
+            feature_rating_lb[1:-1],
+        ),
     )
-    output_lb = jnp.concatenate((init[0][None, :], output_lb), axis=0)
-    output_bl = output_lb.T
 
     batch_idx = jnp.arange(b)
-    seq_lens = seq_lens.astype(jnp.int32)
-    review_s = output_bl[batch_idx, seq_lens - 2]
     review_elapsed = feature_elapsed_days_real_bl[batch_idx, seq_lens - 1]
     return forgetting_curve(p, review_elapsed, review_s)
+
+
+@jax.jit
+def forward(
+    parameters_bp: jax.Array,
+    feature_elapsed_days_real_bl: jax.Array,
+    feature_rating_bl: jax.Array,
+    seq_lens: jax.Array,
+) -> jax.Array:
+    return _forward(
+        parameters_bp,
+        feature_elapsed_days_real_bl,
+        feature_rating_bl,
+        seq_lens,
+    )
+
+
+def binary_cross_entropy_sum(prediction: jax.Array, label: jax.Array) -> jax.Array:
+    label = label.astype(prediction.dtype)
+    return -jnp.sum(label * jnp.log(prediction) + (1 - label) * jnp.log1p(-prediction))
+
+
+def loss(
+    parameters_bp: jax.Array,
+    feature_elapsed_days_real_bl: jax.Array,
+    feature_rating_bl: jax.Array,
+    seq_lens: jax.Array,
+    label_b: jax.Array,
+) -> jax.Array:
+    prediction_b = _forward(
+        parameters_bp,
+        feature_elapsed_days_real_bl,
+        feature_rating_bl,
+        seq_lens,
+    )
+    return binary_cross_entropy_sum(prediction_b, label_b)
+
+
+loss_and_grad = jax.jit(jax.value_and_grad(loss, argnums=0))
 
 
 def get_initial_params_for_optimization() -> jax.Array:
