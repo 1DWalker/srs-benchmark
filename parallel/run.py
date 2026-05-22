@@ -20,9 +20,8 @@ from parallel.config import (
     TEST_BATCH_SIZE_MAX,
 )
 from parallel.load_balancer import get_batches_test, get_batches_train
-from parallel.models import fsrs_v7
+from parallel.models import fsrs_v7_constants
 from parallel.models import fsrs_v7_jax_adapter
-from parallel.models.fsrs_v7_jax_adapter import FSRS7JaxAdapter
 from parallel.tensors import Data, ParamKey, ReviewData, UserTensorBlob
 
 def ceil_div(a: int, b: int) -> int:
@@ -174,7 +173,6 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
 
         indices_flat = indices_range.view(-1)
         review_data_indices_flat = review_data_indices.view(-1)
-        train_range_flat = train_range.view(-1)
         legal_flat = legal.view(-1)
         assert legal_flat.shape == indices_flat.shape
 
@@ -244,7 +242,7 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
                 lr=lr_schedule_multi,
                 mask=active_params_mask,
             )
-            new_flat_fsrs_params_clipped = fsrs_v7.apply_parameter_clipper(new_flat_fsrs_params)
+            new_flat_fsrs_params_clipped = fsrs_v7_constants.apply_parameter_clipper(new_flat_fsrs_params)
             flat_fsrs_params.copy_(new_flat_fsrs_params_clipped)
             assert not flat_fsrs_params.isnan().any()
 
@@ -316,7 +314,9 @@ def run(
 
 
     # fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
-    fsrs_params = torch.tensor(fsrs_v7.get_initial_params_for_optimization().to(DEVICE).view(1, 1, -1).repeat(len(users), N_SPLITS, 1), requires_grad=True)
+    initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
+    fsrs_params = initial_params.view(1, 1, -1).repeat(len(users), N_SPLITS, 1)
+    fsrs_params.requires_grad_(True)
     fsrs_params = train(fsrs_params, users, data)
 
     print("skip test")
@@ -332,7 +332,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1000, 1018))
+    users = list(range(1, 10))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 

@@ -5,6 +5,15 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from parallel.models.fsrs_v7_constants import (
+    FSRS7_DEFAULT_35_VALUES,
+    FSRS7_L2_SIGMA_35_VALUES,
+    FSRS_MAX_VALUES,
+    FSRS_MIN_VALUES,
+    PENALTY_W_L2,
+)
+
+
 class FSRS7Buffer(NamedTuple):
     s: jax.Array
     # forgetting curve
@@ -239,11 +248,6 @@ def forward(
     )
 
 
-def binary_cross_entropy_sum(prediction: jax.Array, label: jax.Array) -> jax.Array:
-    label = label.astype(prediction.dtype)
-    return -jnp.sum(label * jnp.log(prediction) + (1 - label) * jnp.log1p(-prediction))
-
-
 def binary_cross_entropy_masked_sum(
     prediction: jax.Array,
     label: jax.Array,
@@ -255,6 +259,42 @@ def binary_cross_entropy_masked_sum(
     return jnp.sum(loss_b * mask)
 
 
+FSRS7_DEFAULT_35 = jnp.array(FSRS7_DEFAULT_35_VALUES, dtype=jnp.float32)
+FSRS_MIN = jnp.array(FSRS_MIN_VALUES, dtype=jnp.float32)
+FSRS_MAX = jnp.array(FSRS_MAX_VALUES, dtype=jnp.float32)
+FSRS7_L2_SIGMA_35 = jnp.array(FSRS7_L2_SIGMA_35_VALUES, dtype=jnp.float32)
+
+
+def get_initial_params_for_optimization() -> jax.Array:
+    return FSRS7_DEFAULT_35.copy()
+
+
+def apply_parameter_clipper(parameters_b: jax.Array) -> jax.Array:
+    assert parameters_b.shape[-1] == 35
+    lo = FSRS_MIN.astype(parameters_b.dtype)
+    hi = FSRS_MAX.astype(parameters_b.dtype)
+
+    clipped = jnp.clip(parameters_b, lo, hi)
+    clipped = clipped.at[..., 1].set(jnp.maximum(clipped[..., 1], clipped[..., 0]))
+    clipped = clipped.at[..., 2].set(jnp.maximum(clipped[..., 2], clipped[..., 1]))
+    clipped = clipped.at[..., 3].set(jnp.maximum(clipped[..., 3], clipped[..., 2]))
+    clipped = clipped.at[..., 28].set(jnp.maximum(clipped[..., 28], clipped[..., 27]))
+    clipped = clipped.at[..., 30].set(jnp.maximum(clipped[..., 30], clipped[..., 29]))
+    return clipped
+
+
+def fsrs7_l2_loss_term(
+    parameters_bp: jax.Array,
+    mask_b: jax.Array | None = None,
+) -> jax.Array:
+    default = FSRS7_DEFAULT_35.astype(parameters_bp.dtype)
+    sigma = FSRS7_L2_SIGMA_35.astype(parameters_bp.dtype)
+    penalty_b = jnp.sum(jnp.square(parameters_bp - default) / jnp.square(sigma), axis=-1)
+    if mask_b is not None:
+        penalty_b = penalty_b * mask_b.astype(parameters_bp.dtype)
+    return jnp.asarray(PENALTY_W_L2, dtype=parameters_bp.dtype) * jnp.sum(penalty_b)
+
+
 def label_from_feature_rating(
     feature_rating_bl: jax.Array,
     seq_lens: jax.Array,
@@ -262,22 +302,6 @@ def label_from_feature_rating(
     batch_idx = jnp.arange(feature_rating_bl.shape[0])
     target_rating = feature_rating_bl[batch_idx, seq_lens.astype(jnp.int32) - 1]
     return (target_rating > 1).astype(jnp.float32)
-
-
-def loss(
-    parameters_bp: jax.Array,
-    feature_elapsed_days_real_bl: jax.Array,
-    feature_rating_bl: jax.Array,
-    seq_lens: jax.Array,
-) -> jax.Array:
-    prediction_b = _forward(
-        parameters_bp,
-        feature_elapsed_days_real_bl,
-        feature_rating_bl,
-        seq_lens,
-    )
-    label_b = label_from_feature_rating(feature_rating_bl, seq_lens)
-    return binary_cross_entropy_sum(prediction_b, label_b)
 
 
 def loss_with_prediction(
@@ -294,10 +318,13 @@ def loss_with_prediction(
         seq_lens,
     )
     label_b = label_from_feature_rating(feature_rating_bl, seq_lens)
-    return binary_cross_entropy_masked_sum(prediction_b, label_b, mask_b), prediction_b
+    return (
+        binary_cross_entropy_masked_sum(prediction_b, label_b, mask_b)
+        + fsrs7_l2_loss_term(parameters_bp, mask_b),
+        prediction_b,
+    )
 
 
-loss_and_grad = jax.jit(jax.value_and_grad(loss, argnums=0))
 loss_and_prediction_and_grad = jax.jit(
     jax.value_and_grad(loss_with_prediction, argnums=0, has_aux=True)
 )

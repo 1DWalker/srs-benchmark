@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+PENALTY_W_L2 = 0.5
+
+FSRS7_DEFAULT_35_VALUES = (
+    0.041,
+    2.4175,
+    4.1283,
+    11.9709,
+    5.6385,
+    0.4468,
+    3.262,
+    2.3054,
+    0.1688,
+    1.3325,
+    0.3524,
+    0.0049,
+    0.7503,
+    0.0896,
+    0.6625,
+    1.3,
+    0.882,
+    0.3072,
+    3.5875,
+    0.303,
+    0.0107,
+    0.2279,
+    2.6413,
+    0.5594,
+    1.3,
+    2.5,
+    1.0,
+    0.0723,
+    0.1634,
+    0.5,
+    0.9555,
+    0.2245,
+    0.6232,
+    0.1362,
+    0.3862,
+)
+
+FSRS_MIN_VALUES = (
+    0.0001,
+    0.0001,
+    0.0001,
+    0.0001,
+    1.0,
+    0.001,
+    0.1,
+    0.0,
+    0.0,
+    0.3,
+    0.01,
+    0.001,
+    0.1,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    0.5,
+    0.001,
+    0.001,
+    0.001,
+    0.0,
+    0.0,
+    1.0,
+    2.5,
+    0.0,
+    0.01,
+    0.01,
+    0.5,
+    0.5,
+    0.01,
+    0.1,
+    0.0,
+    0.1,
+)
+
+FSRS_MAX_VALUES = (
+    50.0,
+    100.0,
+    100.0,
+    100.0,
+    10.0,
+    4.0,
+    4.0,
+    4.0,
+    1.2,
+    3.0,
+    1.5,
+    0.9,
+    1.0,
+    3.5,
+    1.0,
+    7.0,
+    4.0,
+    2.0,
+    6.0,
+    1.5,
+    2.0,
+    1.0,
+    5.0,
+    1.0,
+    7.0,
+    15.0,
+    1.0,
+    0.25,
+    0.95,
+    0.85,
+    0.99,
+    1.0,
+    1.0,
+    0.9,
+    1.1,
+)
+
+FSRS7_L2_SIGMA_35_VALUES = (
+    9999.0,
+    9999.0,
+    9999.0,
+    9999.0,
+    0.523,
+    0.2528,
+    0.4329,
+    0.2966,
+    0.2139,
+    0.2889,
+    0.1862,
+    0.0829,
+    0.175,
+    0.3812,
+    0.3013,
+    0.9104,
+    0.3234,
+    0.2448,
+    0.3273,
+    0.1842,
+    0.1542,
+    0.1735,
+    0.4608,
+    0.311,
+    0.864,
+    0.4053,
+    0.162,
+    0.0418,
+    0.2596,
+    0.0798,
+    0.0682,
+    0.1282,
+    0.1397,
+    0.1407,
+    0.1489,
+)
+
+
+def get_initial_params_for_optimization():
+    import torch
+
+    return torch.tensor(FSRS7_DEFAULT_35_VALUES, dtype=torch.float32)
+
+
+def apply_parameter_clipper(parameters_b):
+    import torch
+
+    assert parameters_b.shape[-1] == 35
+    lo = torch.tensor(
+        FSRS_MIN_VALUES,
+        device=parameters_b.device,
+        dtype=parameters_b.dtype,
+    )
+    hi = torch.tensor(
+        FSRS_MAX_VALUES,
+        device=parameters_b.device,
+        dtype=parameters_b.dtype,
+    )
+
+    clipped = parameters_b.clamp(min=lo, max=hi).clone()
+    clipped[..., 1] = torch.maximum(clipped[..., 1], clipped[..., 0])
+    clipped[..., 2] = torch.maximum(clipped[..., 2], clipped[..., 1])
+    clipped[..., 3] = torch.maximum(clipped[..., 3], clipped[..., 2])
+    clipped[..., 28] = torch.maximum(clipped[..., 28], clipped[..., 27])
+    clipped[..., 30] = torch.maximum(clipped[..., 30], clipped[..., 29])
+    return clipped
