@@ -7,6 +7,7 @@ LMDB_PATH = Path("parallel_db")
 LMDB_SIZE = 50_000_000_000
 USER_IDS = list(range(1, 10001))
 DEVICE = "cuda"
+DATA_BUILD_DEVICE = "cpu"
 USER_MAX_TRAIN_SPLIT_LENGTHS_KEY = "metadata_user_max_train_split_lengths"
 
 

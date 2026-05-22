@@ -12,6 +12,7 @@ import time
 from parallel import adamw, scheduler
 from parallel.config import (
     BATCH_SIZE,
+    DATA_BUILD_DEVICE,
     LMDB_PATH,
     LMDB_SIZE,
     DEVICE,
@@ -22,14 +23,14 @@ from parallel.config import (
 from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.models import fsrs_v7_constants
 from parallel.models import fsrs_v7_jax_adapter
-from parallel.tensors import Data, ParamKey, ReviewData, UserTensorBlob
+from parallel.tensors import Data, DataBuilder, ParamKey, ReviewData, UserTensorBlob
 
 def ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
 
-def load_blob_bytes(blob_bytes: bytes) -> UserTensorBlob:
+def load_blob_bytes(blob_bytes: bytes, map_location: str | torch.device = "cpu") -> UserTensorBlob:
     buffer = BytesIO(blob_bytes)
-    tensors = torch.load(buffer, weights_only=True, map_location=DEVICE)
+    tensors = torch.load(buffer, weights_only=True, map_location=map_location)
     return UserTensorBlob.from_dict(tensors)
 
 def load_metadata_tensor(txn: lmdb.Transaction, key: str) -> torch.Tensor:
@@ -42,11 +43,15 @@ def load_metadata_tensor(txn: lmdb.Transaction, key: str) -> torch.Tensor:
         map_location=DEVICE,
     )
 
-def load_user_blob(txn: lmdb.Transaction, user_id: int) -> UserTensorBlob:
+def load_user_blob(
+    txn: lmdb.Transaction,
+    user_id: int,
+    map_location: str | torch.device = "cpu",
+) -> UserTensorBlob:
     blob_bytes = txn.get(f"{user_id}_packed".encode())
     if blob_bytes is None:
         raise LookupError(f"Packed blob not found for user {user_id}.")
-    return load_blob_bytes(blob_bytes)
+    return load_blob_bytes(blob_bytes, map_location=map_location)
 
 def next_power(n: int, base: int = 2) -> int:
     assert n > 0
@@ -110,7 +115,7 @@ def predict_loss_grad(review_data: ReviewData, index, params, epoch_lens):
 def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("start train")
     print(data.train_split_lengths)
-    train_split_lengths_cat = torch.cat(data.train_split_lengths)
+    train_split_lengths_cat = data.train_split_lengths
     num_training_steps_per_epoch_cat = (train_split_lengths_cat + BATCH_SIZE - 1) // BATCH_SIZE
     num_training_steps_cat = N_EPOCHS * num_training_steps_per_epoch_cat
     print(num_training_steps_per_epoch_cat)
@@ -140,6 +145,7 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
     
     print(num_training_steps_cat)
     print("Inner batches per batch:", batch_num_inner_batches, "Train iters (max):", train_splits_length_cat_max)
+    # exit()
     step_i_cat = torch.zeros_like(num_training_steps_cat)
     optim_state = adamw.init_adamw_state(fsrs_params.view(-1, fsrs_params.size(-1)))
     for iter in tqdm(range(train_splits_length_cat_max), desc="Training", smoothing=0.03):
@@ -317,16 +323,14 @@ def run(
     users: list[int],
 ) -> None:
     with env.begin(write=False) as txn:
-        blobs = [
-            load_user_blob(txn, user_id)
-            for user_id in tqdm(users, total=len(users), smoothing=0.03, desc="Loading user data")
-        ]
-        data = Data(blobs)
-        del blobs
-        torch.cuda.empty_cache()
-
-    # TODO train
-
+        data_build_device = torch.device(DATA_BUILD_DEVICE)
+        data_builder = DataBuilder(device=data_build_device)
+        for user_id in tqdm(users, total=len(users), smoothing=0.03, desc="Loading user data"):
+            blob = load_user_blob(txn, user_id, map_location=data_build_device)
+            data_builder.append(blob)
+            del blob
+        data = data_builder.finish(device=DEVICE)
+        del data_builder
 
     # fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
     initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
@@ -347,7 +351,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 2000))
+    users = list(range(1, 4000))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
