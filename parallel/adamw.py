@@ -35,6 +35,7 @@ def _masked_lr(lr: float | torch.Tensor, mask: torch.Tensor) -> float | torch.Te
     return lr
 
 
+# @torch.compile(fullgraph=True, dynamic=True)
 def adamw_step(
     params: torch.Tensor,
     grad: torch.Tensor,

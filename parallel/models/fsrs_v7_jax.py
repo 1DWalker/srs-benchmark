@@ -10,7 +10,6 @@ from parallel.models.fsrs_v7_constants import (
     FSRS7_L2_SIGMA_35_VALUES,
     FSRS_MAX_VALUES,
     FSRS_MIN_VALUES,
-    PENALTY_W_L2,
 )
 
 
@@ -264,35 +263,21 @@ FSRS_MIN = jnp.array(FSRS_MIN_VALUES, dtype=jnp.float32)
 FSRS_MAX = jnp.array(FSRS_MAX_VALUES, dtype=jnp.float32)
 FSRS7_L2_SIGMA_35 = jnp.array(FSRS7_L2_SIGMA_35_VALUES, dtype=jnp.float32)
 
-
-def get_initial_params_for_optimization() -> jax.Array:
-    return FSRS7_DEFAULT_35.copy()
-
-
-def apply_parameter_clipper(parameters_b: jax.Array) -> jax.Array:
-    assert parameters_b.shape[-1] == 35
-    lo = FSRS_MIN.astype(parameters_b.dtype)
-    hi = FSRS_MAX.astype(parameters_b.dtype)
-
-    clipped = jnp.clip(parameters_b, lo, hi)
-    clipped = clipped.at[..., 1].set(jnp.maximum(clipped[..., 1], clipped[..., 0]))
-    clipped = clipped.at[..., 2].set(jnp.maximum(clipped[..., 2], clipped[..., 1]))
-    clipped = clipped.at[..., 3].set(jnp.maximum(clipped[..., 3], clipped[..., 2]))
-    clipped = clipped.at[..., 28].set(jnp.maximum(clipped[..., 28], clipped[..., 27]))
-    clipped = clipped.at[..., 30].set(jnp.maximum(clipped[..., 30], clipped[..., 29]))
-    return clipped
-
-
 def fsrs7_l2_loss_term(
     parameters_bp: jax.Array,
+    epoch_lens_b: jax.Array,
     mask_b: jax.Array | None = None,
 ) -> jax.Array:
     default = FSRS7_DEFAULT_35.astype(parameters_bp.dtype)
     sigma = FSRS7_L2_SIGMA_35.astype(parameters_bp.dtype)
-    penalty_b = jnp.sum(jnp.square(parameters_bp - default) / jnp.square(sigma), axis=-1)
+    epoch_lens_b = epoch_lens_b.astype(parameters_bp.dtype)
+    penalty_b = (
+        jnp.sum(jnp.square(parameters_bp - default) / jnp.square(sigma), axis=-1)
+        / epoch_lens_b
+    )
     if mask_b is not None:
         penalty_b = penalty_b * mask_b.astype(parameters_bp.dtype)
-    return jnp.asarray(PENALTY_W_L2, dtype=parameters_bp.dtype) * jnp.sum(penalty_b)
+    return jnp.sum(penalty_b)
 
 
 def label_from_feature_rating(
@@ -310,6 +295,7 @@ def loss_with_prediction(
     feature_rating_bl: jax.Array,
     seq_lens: jax.Array,
     mask_b: jax.Array,
+    epoch_lens_b: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
     prediction_b = _forward(
         parameters_bp,
@@ -320,7 +306,7 @@ def loss_with_prediction(
     label_b = label_from_feature_rating(feature_rating_bl, seq_lens)
     return (
         binary_cross_entropy_masked_sum(prediction_b, label_b, mask_b)
-        + fsrs7_l2_loss_term(parameters_bp, mask_b),
+        + fsrs7_l2_loss_term(parameters_bp, epoch_lens_b, mask_b),
         prediction_b,
     )
 

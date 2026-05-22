@@ -1,6 +1,16 @@
 import torch
 from typing import NamedTuple
 
+from parallel.models.fsrs_v7_constants import (
+    FSRS7_DEFAULT_35_VALUES,
+    FSRS_MAX_VALUES,
+    FSRS_MIN_VALUES,
+)
+from parallel.models.fsrs_v7_constants import (
+    apply_parameter_clipper,
+    get_initial_params_for_optimization,
+)
+
 
 class FSRS7Buffer(NamedTuple):
     s: torch.Tensor
@@ -183,144 +193,9 @@ def forward(parameters_bp, feature_elapsed_days_real_bl, feature_rating_bl, seq_
     assert not review_s.isnan().any()
     return forgetting_curve(p, review_elapsed, review_s)
 
-def get_initial_params_for_optimization():
-    return FSRS7_DEFAULT_35.clone()
-
-def apply_parameter_clipper(parameters_b):
-    assert parameters_b.shape[-1] == 35
-    lo = FSRS_MIN.to(device=parameters_b.device, dtype=parameters_b.dtype)
-    hi = FSRS_MAX.to(device=parameters_b.device, dtype=parameters_b.dtype)
-
-    clipped = parameters_b.clamp(min=lo, max=hi)
-    clipped = clipped.clone()
-
-    clipped[..., 1] = torch.maximum(clipped[..., 1], clipped[..., 0])
-    clipped[..., 2] = torch.maximum(clipped[..., 2], clipped[..., 1])
-    clipped[..., 3] = torch.maximum(clipped[..., 3], clipped[..., 2])
-    clipped[..., 28] = torch.maximum(clipped[..., 28], clipped[..., 27])
-    clipped[..., 30] = torch.maximum(clipped[..., 30], clipped[..., 29])
-    return clipped
-
-
-FSRS7_DEFAULT_35 = torch.tensor(
-    [
-        0.041,
-        2.4175,
-        4.1283,
-        11.9709,  # Initial S
-        5.6385,
-        0.4468,
-        3.262,  # Difficulty
-        2.3054,
-        0.1688,
-        1.3325,
-        0.3524,
-        0.0049,
-        0.7503,
-        0.0896,
-        0.6625,
-        1.3,  # Stability (long-term)
-        0.882,
-        0.3072,
-        3.5875,
-        0.303,
-        0.0107,
-        0.2279,
-        2.6413,
-        0.5594,
-        1.3,  # Stability (short-term)
-        2.5,
-        1.0,  # Long-short term transition function
-        0.0723,
-        0.1634,
-        0.5,
-        0.9555,
-        0.2245,
-        0.6232,
-        0.1362,
-        0.3862,
-    ]
-)
-
-FSRS_MIN = torch.tensor(
-    [
-        0.0001,  # 0
-        0.0001,  # 1 (depends on w0)
-        0.0001,  # 2 (depends on w1)
-        0.0001,  # 3 (depends on w2)
-        1.0,  # 4
-        0.001,  # 5
-        0.1,  # 6
-        0.0,  # 7
-        0.0,  # 8
-        0.3,  # 9
-        0.01,  # 10
-        0.001,  # 11
-        0.1,  # 12
-        0.0,  # 13
-        0.0,  # 14
-        1.0,  # 15
-        0.0,  # 16
-        0.0,  # 17
-        0.5,  # 18
-        0.001,  # 19
-        0.001,  # 20
-        0.001,  # 21
-        0.0,  # 22
-        0.0,  # 23
-        1.0,  # 24
-        2.5,  # 25
-        0.0,  # 26
-        0.01,  # 27
-        0.01,  # 28 (depends on w27)
-        0.5,  # 29
-        0.5,  # 30 (depends on w29)
-        0.01,  # 31
-        0.1,  # 32
-        0.0,  # 33
-        0.1,  # 34
-    ]
-)
-
-FSRS_MAX = torch.tensor(
-    [
-        50.0,  # 0
-        100.0,  # 1
-        100.0,  # 2
-        100.0,  # 3
-        10.0,  # 4
-        4.0,  # 5
-        4.0,  # 6
-        4.0,  # 7
-        1.2,  # 8
-        3.0,  # 9
-        1.5,  # 10
-        0.9,  # 11
-        1.0,  # 12
-        3.5,  # 13
-        1.0,  # 14
-        7.0,  # 15
-        4.0,  # 16
-        2.0,  # 17
-        6.0,  # 18
-        1.5,  # 19
-        2.0,  # 20
-        1.0,  # 21
-        5.0,  # 22
-        1.0,  # 23
-        7.0,  # 24
-        15.0,  # 25
-        1.0,  # 26
-        0.25,  # 27
-        0.95,  # 28
-        0.85,  # 29
-        0.99,  # 30
-        1.0,  # 31
-        1.0,  # 32
-        0.9,  # 33
-        1.1,  # 34
-    ]
-)
+FSRS7_DEFAULT_35 = torch.tensor(FSRS7_DEFAULT_35_VALUES)
+FSRS_MIN = torch.tensor(FSRS_MIN_VALUES)
+FSRS_MAX = torch.tensor(FSRS_MAX_VALUES)
 
 assert (FSRS_MIN <= FSRS7_DEFAULT_35).all()
 assert (FSRS7_DEFAULT_35 <= FSRS_MAX).all(), FSRS7_DEFAULT_35 <= FSRS_MAX

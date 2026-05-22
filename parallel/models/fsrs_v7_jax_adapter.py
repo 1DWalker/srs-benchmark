@@ -100,7 +100,8 @@ def _prepare_batch(
     feature_elapsed_days_real_bl: torch.Tensor,
     feature_rating_bl: torch.Tensor,
     seq_lens: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    epoch_lens: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
     *batch, actual_size = _prepare_prediction_batch(
         parameters_bp,
         feature_elapsed_days_real_bl,
@@ -112,7 +113,11 @@ def _prepare_batch(
         dtype=torch.float32,
     )
     mask[:actual_size] = 1.0
-    return (*batch, mask.contiguous(), actual_size)
+    epoch_lens = _astype(
+        _pad_rows_repeat_last(epoch_lens, batch[0].shape[0]),
+        torch.float32,
+    )
+    return (*batch, mask.contiguous(), epoch_lens, actual_size)
 
 
 def _validate_inputs(
@@ -149,6 +154,7 @@ class FSRS7JaxAdapter:
         feature_elapsed_days_real_bl: torch.Tensor,
         feature_rating_bl: torch.Tensor,
         seq_lens: torch.Tensor,
+        epoch_lens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         torch.cuda.synchronize()
         to = time.time()
@@ -170,6 +176,7 @@ class FSRS7JaxAdapter:
             feature_elapsed_days_real_bl,
             feature_rating_bl,
             seq_lens,
+            epoch_lens,
         )
         torch.cuda.synchronize()
         t_before_move = time.time()
@@ -240,10 +247,12 @@ def prediction_loss_grad(
     feature_elapsed_days_real_bl: torch.Tensor,
     feature_rating_bl: torch.Tensor,
     seq_lens: torch.Tensor,
+    epoch_lens: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return _DEFAULT_ADAPTER.prediction_loss_grad(
         parameters_bp,
         feature_elapsed_days_real_bl,
         feature_rating_bl,
         seq_lens,
+        epoch_lens,
     )

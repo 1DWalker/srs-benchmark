@@ -1,4 +1,5 @@
 from __future__ import annotations
+import torch
 
 PENALTY_W_L2 = 0.5
 
@@ -154,17 +155,15 @@ FSRS7_L2_SIGMA_35_VALUES = (
     0.1489,
 )
 
+default_params = torch.tensor(FSRS7_DEFAULT_35_VALUES, dtype=torch.float32)
+sigma = torch.tensor(FSRS7_L2_SIGMA_35_VALUES, dtype=torch.float32)
 
 def get_initial_params_for_optimization():
-    import torch
-
     return torch.tensor(FSRS7_DEFAULT_35_VALUES, dtype=torch.float32)
 
 
+# @torch.compile(fullgraph=True, dynamic=True)
 def apply_parameter_clipper(parameters_b):
-    import torch
-
-    assert parameters_b.shape[-1] == 35
     lo = torch.tensor(
         FSRS_MIN_VALUES,
         device=parameters_b.device,
