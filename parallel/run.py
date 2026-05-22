@@ -67,11 +67,11 @@ def _prepare_prediction_inputs(review_data: ReviewData, index):
 
     torch.cuda.synchronize()
     to = time.time()
-    arange_l = torch.arange(max_seq_len.item(), device=index.device)
-    print("make arange_l", time.time() - to)
+    B = index.size(0)
 
     take_indices = (
-        card_start_index[:, None] + arange_l[None, :]
+        # card_start_index.unsqueeze(-1) + torch.minimum(torch.arange(max_seq_len.item(), device=index.device).unsqueeze(0).repeat(B, 1), seq_lens.unsqueeze(-1) - 1)
+        card_start_index.unsqueeze(-1) + torch.arange(max_seq_len.item(), device=index.device).unsqueeze(0)
     ).clamp_max(data_len - 1)
     print("prepare before take", time.time() - ts)
     ts = time.time()
@@ -83,7 +83,8 @@ def _prepare_prediction_inputs(review_data: ReviewData, index):
     # print("shape", rating_bl.shape, max_seq_len)
     # print(review_data.elapsed_days_real[index])
     # print(elapsed_time_real_bl[:, seq_lens - 1], elapsed_time_real_bl[:, seq_lens - 1].shape)
-    # assert (review_data.elapsed_days_real[index] == elapsed_time_real_bl[:, seq_lens - 1]).all()
+    # assert (review_data.elapsed_days_real[index] == elapsed_time_real_bl[torch.arange(index.size(0)), seq_lens - 1]).all()
+    # assert (review_data.elapsed_days_real[index] > 0).all()
     B = elapsed_time_real_bl.size(0)
     return elapsed_time_real_bl, rating_bl, seq_lens
 
@@ -346,7 +347,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 30))
+    users = list(range(1, 2000))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 

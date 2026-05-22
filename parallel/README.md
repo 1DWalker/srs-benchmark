@@ -110,3 +110,9 @@ as raw bytes (`b"true"`) after the packed blob is saved.
 blob entry. It stores a `torch.int32` vector with one entry per prepared user,
 in the same order as `user_ids` in `prepare.py`. Each entry is that user's
 maximum value from `train_split_lengths`.
+
+
+
+Commands
+
+docker compose run --rm -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.50 srs-benchmark python -m parallel.run

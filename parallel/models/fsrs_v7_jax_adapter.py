@@ -57,13 +57,13 @@ def _pad_rows_repeat_last(tensor: torch.Tensor, size: int) -> torch.Tensor:
     return torch.cat((tensor, fill), dim=0).contiguous()
 
 
-def _pad_cols_zero(tensor: torch.Tensor, size: int) -> torch.Tensor:
+def _pad_cols_full(tensor: torch.Tensor, size: int, value: float = 0) -> torch.Tensor:
     if tensor.shape[1] > size:
         raise ValueError(f"Cannot pad {tensor.shape[1]} columns down to {size}.")
     if tensor.shape[1] == size:
         return tensor.contiguous()
 
-    fill = tensor.new_zeros((tensor.shape[0], size - tensor.shape[1]))
+    fill = tensor.new_full((tensor.shape[0], size - tensor.shape[1]), value)
     return torch.cat((tensor, fill), dim=1).contiguous()
 
 
@@ -78,11 +78,11 @@ def _prepare_prediction_batch(
     padded_l = 1 + _next_power_of_2(feature_elapsed_days_real_bl.shape[1] - 1)
 
     elapsed = _pad_rows_repeat_last(
-        _pad_cols_zero(feature_elapsed_days_real_bl, padded_l),
+        _pad_cols_full(feature_elapsed_days_real_bl, padded_l, 1),
         padded_b,
     )
     rating = _pad_rows_repeat_last(
-        _pad_cols_zero(feature_rating_bl, padded_l),
+        _pad_cols_full(feature_rating_bl, padded_l, 1),
         padded_b,
     )
 

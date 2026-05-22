@@ -105,7 +105,7 @@ def forgetting_curve(p: FSRS7Buffer, t: jax.Array, s: jax.Array) -> jax.Array:
         s_exp = p.s_exp
     r = (1 + factor * t_over_s) ** decay
     weight = base_weight * s[..., None] ** s_exp
-    return ((weight * r).sum(axis=-1) / weight.sum(axis=-1))
+    return 1e-5 + (1 - 2e-5) * ((weight * r).sum(axis=-1) / weight.sum(axis=-1))
 
 
 def stability_after_review(
@@ -185,7 +185,8 @@ def fsrs7_step(
     return jnp.clip(new_s, 1e-4, 36500), new_d
 
 
-def _forward(
+@jax.jit
+def forward(
     parameters_bp: jax.Array,
     feature_elapsed_days_real_bl: jax.Array,
     feature_rating_bl: jax.Array,
@@ -195,6 +196,7 @@ def _forward(
 
     b = feature_elapsed_days_real_bl.shape[0]
     l = feature_elapsed_days_real_bl.shape[1]
+    feature_elapsed_days_real_bl = feature_elapsed_days_real_bl + 1e-5  # Seems to be required for the `r` in fsrs_step
     feature_elapsed_days_real_lb = feature_elapsed_days_real_bl.T
     feature_rating_lb = feature_rating_bl.astype(jnp.int32).T
     seq_lens = seq_lens.astype(jnp.int32)
@@ -230,22 +232,6 @@ def _forward(
     batch_idx = jnp.arange(b)
     review_elapsed = feature_elapsed_days_real_bl[batch_idx, seq_lens - 1]
     return forgetting_curve(p, review_elapsed, review_s)
-
-
-@jax.jit
-def forward(
-    parameters_bp: jax.Array,
-    feature_elapsed_days_real_bl: jax.Array,
-    feature_rating_bl: jax.Array,
-    seq_lens: jax.Array,
-) -> jax.Array:
-    return _forward(
-        parameters_bp,
-        feature_elapsed_days_real_bl,
-        feature_rating_bl,
-        seq_lens,
-    )
-
 
 def binary_cross_entropy_masked_sum(
     prediction: jax.Array,
@@ -297,7 +283,7 @@ def loss_with_prediction(
     mask_b: jax.Array,
     epoch_lens_b: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    prediction_b = _forward(
+    prediction_b = forward(
         parameters_bp,
         feature_elapsed_days_real_bl,
         feature_rating_bl,
