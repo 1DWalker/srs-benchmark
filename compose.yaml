@@ -1,0 +1,25 @@
+services:
+  srs-benchmark:
+    build:
+      context: .
+      dockerfile: dockerfile
+    image: srs-benchmark:cuda12
+    working_dir: /app
+    command: bash
+    tty: true
+    stdin_open: true
+    volumes:
+      - type: bind
+        source: .
+        target: /app
+      - type: bind
+        source: ../anki-revlogs-10k
+        target: /anki-revlogs-10k
+        read_only: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
