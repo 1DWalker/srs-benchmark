@@ -55,53 +55,12 @@ __global__ void square_backward_kernel(
     grad_x[i] = grad_x_local;
 }
 
-__device__ __forceinline__
-fsrs_params_t fsrs7_params_from_flat(const float* p) {
-    return fsrs_params_t{
-        .s0_again = p[0],
-        .s0_hard = p[1],
-        .s0_good = p[2],
-        .s0_easy = p[3],
-        .init_d0 = p[4],
-        .init_d1 = p[5],
-        .next_d_mult = p[6],
-        .long_sinc_base = p[7],
-        .long_sinc_s_exp = p[8],
-        .long_sinc_r_mult = p[9],
-        .long_fail_mult = p[10],
-        .long_fail_d_exp = p[11],
-        .long_fail_s_exp = p[12],
-        .long_fail_r_mult = p[13],
-        .long_hard_penalty = p[14],
-        .long_easy_bonus = p[15],
-        .short_sinc_base = p[16],
-        .short_sinc_s_exp = p[17],
-        .short_sinc_r_mult = p[18],
-        .short_fail_mult = p[19],
-        .short_fail_d_exp = p[20],
-        .short_fail_s_exp = p[21],
-        .short_fail_r_mult = p[22],
-        .short_hard_penalty = p[23],
-        .short_easy_bonus = p[24],
-        .transition_decay = p[25],
-        .transition_scale = p[26],
-        .decay1 = p[27],
-        .decay2 = p[28],
-        .base1 = p[29],
-        .base2 = p[30],
-        .base_weight1 = p[31],
-        .base_weight2 = p[32],
-        .s_weight_power1 = p[33],
-        .s_weight_power2 = p[34],
-    };
-}
-
 __global__ void fsrs_test_kernel(
     const float* __restrict__ elapsed_days_real_flat,
     const int8_t* __restrict__ rating_flat,
     const int32_t* __restrict__ start_index,
     const int32_t* __restrict__ seq_len,
-    const float* __restrict__ fsrs_params,
+    const fsrs_params_t* __restrict__ fsrs_params,
     const int32_t N,
     float* __restrict__ p
 ) {
@@ -110,7 +69,7 @@ __global__ void fsrs_test_kernel(
 
     const int32_t start = start_index[i];
     const int32_t len = seq_len[i];
-    const fsrs_params_t params = fsrs7_params_from_flat(fsrs_params + i * 35);
+    const fsrs_params_t params = fsrs_params[i];
 
     fsrs_state_t state = fsrs7_init(params, rating_flat[start]);
     for (int32_t l = 1; l < len - 1; ++l) {
@@ -137,7 +96,7 @@ extern "C" void fsrs_test_cuda(
     const int8_t* rating_flat,
     const int32_t* start_index,
     const int32_t* seq_len,
-    const float* fsrs_params,
+    const fsrs_params_t* fsrs_params,
     float* p,
     const int32_t N,
     cudaStream_t stream

@@ -375,7 +375,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 4000))
+    users = list(range(1, 10))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 

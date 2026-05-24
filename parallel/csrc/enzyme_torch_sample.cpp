@@ -4,15 +4,16 @@
 #include <cuda_runtime_api.h>
 #include <torch/extension.h>
 
+#include "fsrs/fsrs7_constants.cuh"
 
 extern "C" void fsrs_test_cuda(
     const float* elapsed_days_real_flat,
     const int8_t* rating_flat,
     const int32_t* start_index,
     const int32_t* seq_len,
-    const float* fsrs_params,
+    const fsrs_params_t* fsrs_params,
     float* p,
-    int64_t num_sequences,
+    int32_t num_sequences,
     cudaStream_t stream
 );
 
@@ -58,6 +59,12 @@ torch::Tensor fsrs7_test(
 
     c10::cuda::CUDAGuard device_guard(elapsed_days_real_flat.device());
     const int32_t N = start_index.numel();
+    constexpr int64_t fsrs_param_count =
+        static_cast<int64_t>(sizeof(fsrs_params_t) / sizeof(float));
+    TORCH_CHECK(
+        fsrs_params.dim() == 2 && fsrs_params.size(0) == N && fsrs_params.size(1) == fsrs_param_count,
+        "fsrs_params must have shape (N, ", fsrs_param_count, ")"
+    );
 
     torch::Tensor p = torch::empty(
         start_index.sizes(),
@@ -69,7 +76,7 @@ torch::Tensor fsrs7_test(
         rating_flat.data_ptr<int8_t>(),
         start_index.data_ptr<int32_t>(),
         seq_len.data_ptr<int32_t>(),
-        fsrs_params.data_ptr<float>(),
+        reinterpret_cast<const fsrs_params_t*>(fsrs_params.data_ptr<float>()),
         p.data_ptr<float>(),
         N,
         at::cuda::getCurrentCUDAStream().stream()
