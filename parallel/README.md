@@ -116,3 +116,5 @@ maximum value from `train_split_lengths`.
 Commands
 
 docker compose run --rm -e XLA_PYTHON_CLIENT_MEM_FRACTION=0.50 srs-benchmark python -m parallel.run
+docker compose run --rm srs-benchmark python setup.py build_ext --inplace
+docker compose run --rm srs-benchmark python parallel/test_enzyme_torch_extension.py

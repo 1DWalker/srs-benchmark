@@ -110,7 +110,8 @@ def predict_loss_grad(review_data: ReviewData, index, params, epoch_lens):
     )
     torch.cuda.synchronize()
     print("pred loss grad prep", time.time() - ts)
-    return fsrs_v7_jax_adapter.prediction_loss_grad(params, elapsed_time_real_bl, rating_bl, seq_lens, epoch_lens) 
+    return None, None, None
+    # return fsrs_v7_jax_adapter.prediction_loss_grad(params, elapsed_time_real_bl, rating_bl, seq_lens, epoch_lens) 
 
 def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("start train")
@@ -218,18 +219,18 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
             torch.cuda.synchronize()
             print("intermediate", time.time() - ts)
             p, loss, grad = predict_loss_grad(data.review_data, batch_review_data_indices, batch_fsrs_params, batch_epoch_lens)
-            assert not p.isnan().any()
-            torch.cuda.synchronize()
-            print("intermediate2", time.time() - ts)
-            # print("Jax adapter output:")
-            # print(p)
+            # assert not p.isnan().any()
+            # torch.cuda.synchronize()
+            # print("intermediate2", time.time() - ts)
+            # # print("Jax adapter output:")
+            # # print(p)
 
-            # batch_fsrs_params.grad = grad
-            # print(batch_fsrs_params)
-            print(batch_epoch_lens)
-            batch_fsrs_params.backward(grad)
+            # # batch_fsrs_params.grad = grad
+            # # print(batch_fsrs_params)
+            # print(batch_epoch_lens)
+            # batch_fsrs_params.backward(grad)
 
-            print(batch_fsrs_params.shape)
+            # print(batch_fsrs_params.shape)
             # torch.cuda.synchronize()
             # tl2 = time.time()
             # l2_grad = fsrs_v7_constants.l2_penalty_per_review(batch_fsrs_params, batch_epoch_lens)
@@ -251,22 +252,22 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
 
         # TODO ADAMW betas
 
-        with torch.no_grad():
-            if fsrs_params.grad.isnan().any():
-                print(fsrs_params.grad.cpu().detach().tolist())
-            assert not fsrs_params.grad.isnan().any()
-            flat_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))
-            flat_grad = fsrs_params.grad.view_as(flat_fsrs_params)
-            new_flat_fsrs_params, optim_state = adamw.adamw_step(
-                flat_fsrs_params,
-                flat_grad,
-                optim_state,
-                lr=lr_schedule_multi,
-                mask=active_params_mask,
-            )
-            new_flat_fsrs_params_clipped = fsrs_v7_constants.apply_parameter_clipper(new_flat_fsrs_params)
-            flat_fsrs_params.copy_(new_flat_fsrs_params_clipped)
-            assert not flat_fsrs_params.isnan().any()
+        # with torch.no_grad():
+        #     if fsrs_params.grad.isnan().any():
+        #         print(fsrs_params.grad.cpu().detach().tolist())
+        #     assert not fsrs_params.grad.isnan().any()
+        #     flat_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))
+        #     flat_grad = fsrs_params.grad.view_as(flat_fsrs_params)
+        #     new_flat_fsrs_params, optim_state = adamw.adamw_step(
+        #         flat_fsrs_params,
+        #         flat_grad,
+        #         optim_state,
+        #         lr=lr_schedule_multi,
+        #         mask=active_params_mask,
+        #     )
+        #     new_flat_fsrs_params_clipped = fsrs_v7_constants.apply_parameter_clipper(new_flat_fsrs_params)
+        #     flat_fsrs_params.copy_(new_flat_fsrs_params_clipped)
+        #     assert not flat_fsrs_params.isnan().any()
 
         fsrs_params.grad = None
         step_i_cat[indices] += 1
