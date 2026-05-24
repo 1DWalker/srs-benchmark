@@ -313,8 +313,9 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         # perm_slice = sorted_test_index_permutation[l:re]
         batch_fsrs_params = fsrs_params[param_keys.user_index[perm_slice], param_keys.split_index[perm_slice]]
         # p = predict(data.review_data, data.test_index[perm_slice], batch_fsrs_params)
-        seq_lens = data.review_data.seq_len[perm_slice]
-        start_indices = data.test_index[perm_slice] - seq_lens + 1
+        test_index_perm_slice = data.test_index[perm_slice]
+        seq_lens = data.review_data.seq_len[test_index_perm_slice]
+        start_indices = test_index_perm_slice - seq_lens + 1
         print(seq_lens.size(0))
         p = enzyme_sample.fsrs7_forward(
                 data.review_data.elapsed_days_real, 
