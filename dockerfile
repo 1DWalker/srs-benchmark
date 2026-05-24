@@ -81,6 +81,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         clang-${LLVM_VERSION} \
         lld-${LLVM_VERSION} \
         llvm-${LLVM_VERSION} \
+        ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
 RUN ln -s "/usr/bin/opt-${LLVM_VERSION}" /usr/local/bin/opt \
@@ -110,4 +111,5 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --index-url https://download.pytorch.org/whl/cu118 \
         "torch==2.7.1+cu118"
 
+ENTRYPOINT []
 CMD ["bash"]
