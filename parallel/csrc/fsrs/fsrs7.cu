@@ -1,58 +1,11 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
+#include "fsrs7_constants.cuh"
+
 struct fsrs_state_t {
     float s; 
     float d;
-};
-
-struct fsrs_params_t {
-    // 0..3: Initial stability by first rating.
-    float s0_again;
-    float s0_hard;
-    float s0_good;
-    float s0_easy;
-
-    // 4..6: Difficulty.
-    float init_d0;
-    float init_d1;
-    float next_d_mult;
-
-    // 7..15: Long-term stability after review.
-    float long_sinc_base;
-    float long_sinc_s_exp;
-    float long_sinc_r_mult;
-    float long_fail_mult;
-    float long_fail_d_exp;
-    float long_fail_s_exp;
-    float long_fail_r_mult;
-    float long_hard_penalty;
-    float long_easy_bonus;
-
-    // 16..24: Short-term stability after review.
-    float short_sinc_base;
-    float short_sinc_s_exp;
-    float short_sinc_r_mult;
-    float short_fail_mult;
-    float short_fail_d_exp;
-    float short_fail_s_exp;
-    float short_fail_r_mult;
-    float short_hard_penalty;
-    float short_easy_bonus;
-
-    // 25..26: Long-short term transition function.
-    float transition_decay;
-    float transition_scale;
-
-    // 27..34: Forgetting curve.
-    float decay1;
-    float decay2;
-    float base1;
-    float base2;
-    float base_weight1;
-    float base_weight2;
-    float s_weight_power1;
-    float s_weight_power2;
 };
 
 __device__ __forceinline__
