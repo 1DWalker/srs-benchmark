@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from io import BytesIO
 
 import lmdb
@@ -22,8 +23,9 @@ from parallel.config import (
 )
 from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.models import fsrs_v7_constants
-from parallel.models import fsrs_v7_jax_adapter
 from parallel.tensors import Data, DataBuilder, ParamKey, ReviewData, UserTensorBlob
+
+enzyme_sample = importlib.import_module("parallel._enzyme_torch_sample")
 
 def ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
@@ -53,65 +55,65 @@ def load_user_blob(
         raise LookupError(f"Packed blob not found for user {user_id}.")
     return load_blob_bytes(blob_bytes, map_location=map_location)
 
-def next_power(n: int, base: int = 2) -> int:
-    assert n > 0
-    assert base >= 2
+# def next_power(n: int, base: int = 2) -> int:
+#     assert n > 0
+#     assert base >= 2
 
-    p = 1
-    while p < n:
-        p *= base
-    return p
+#     p = 1
+#     while p < n:
+#         p *= base
+#     return p
 
-def _prepare_prediction_inputs(review_data: ReviewData, index):
-    ts = time.time()
-    seq_lens = review_data.seq_len[index]
-    max_seq_len = seq_lens.max()
+# def _prepare_prediction_inputs(review_data: ReviewData, index):
+#     ts = time.time()
+#     seq_lens = review_data.seq_len[index]
+#     max_seq_len = seq_lens.max()
 
-    card_start_index = index - seq_lens + 1
-    data_len = review_data.elapsed_days_real.size(0)
+#     card_start_index = index - seq_lens + 1
+#     data_len = review_data.elapsed_days_real.size(0)
 
-    torch.cuda.synchronize()
-    to = time.time()
-    B = index.size(0)
+#     torch.cuda.synchronize()
+#     to = time.time()
+#     B = index.size(0)
 
-    take_indices = (
-        # card_start_index.unsqueeze(-1) + torch.minimum(torch.arange(max_seq_len.item(), device=index.device).unsqueeze(0).repeat(B, 1), seq_lens.unsqueeze(-1) - 1)
-        card_start_index.unsqueeze(-1) + torch.arange(max_seq_len.item(), device=index.device).unsqueeze(0)
-    ).clamp_max(data_len - 1)
-    print("prepare before take", time.time() - ts)
-    ts = time.time()
+#     take_indices = (
+#         # card_start_index.unsqueeze(-1) + torch.minimum(torch.arange(max_seq_len.item(), device=index.device).unsqueeze(0).repeat(B, 1), seq_lens.unsqueeze(-1) - 1)
+#         card_start_index.unsqueeze(-1) + torch.arange(max_seq_len.item(), device=index.device).unsqueeze(0)
+#     ).clamp_max(data_len - 1)
+#     print("prepare before take", time.time() - ts)
+#     ts = time.time()
 
-    rating_bl = review_data.rating[take_indices]
-    elapsed_time_real_bl = review_data.elapsed_days_real[take_indices]
-    print("prepare take", time.time() - ts)
+#     rating_bl = review_data.rating[take_indices]
+#     elapsed_time_real_bl = review_data.elapsed_days_real[take_indices]
+#     print("prepare take", time.time() - ts)
 
-    # print("shape", rating_bl.shape, max_seq_len)
-    # print(review_data.elapsed_days_real[index])
-    # print(elapsed_time_real_bl[:, seq_lens - 1], elapsed_time_real_bl[:, seq_lens - 1].shape)
-    # assert (review_data.elapsed_days_real[index] == elapsed_time_real_bl[torch.arange(index.size(0)), seq_lens - 1]).all()
-    # assert (review_data.elapsed_days_real[index] > 0).all()
-    B = elapsed_time_real_bl.size(0)
-    return elapsed_time_real_bl, rating_bl, seq_lens
+#     # print("shape", rating_bl.shape, max_seq_len)
+#     # print(review_data.elapsed_days_real[index])
+#     # print(elapsed_time_real_bl[:, seq_lens - 1], elapsed_time_real_bl[:, seq_lens - 1].shape)
+#     # assert (review_data.elapsed_days_real[index] == elapsed_time_real_bl[torch.arange(index.size(0)), seq_lens - 1]).all()
+#     # assert (review_data.elapsed_days_real[index] > 0).all()
+#     B = elapsed_time_real_bl.size(0)
+#     return elapsed_time_real_bl, rating_bl, seq_lens
 
-def predict(review_data: ReviewData, index, params):
-    assert index.size(0) == index.size(0)
-    elapsed_time_real_bl, rating_bl, seq_lens = _prepare_prediction_inputs(
-        review_data, index
-    )
-    return fsrs_v7_jax_adapter.prediction(params, elapsed_time_real_bl, rating_bl, seq_lens)
+# def predict(review_data: ReviewData, index, params):
+#     assert index.size(0) == index.size(0)
+#     elapsed_time_real_bl, rating_bl, seq_lens = _prepare_prediction_inputs(
+#         review_data, index
+#     )
+#     return fsrs_v7_jax_adapter.prediction(params, elapsed_time_real_bl, rating_bl, seq_lens)
 
 
-def predict_loss_grad(review_data: ReviewData, index, params, epoch_lens):
-    torch.cuda.synchronize()
-    ts = time.time()
-    assert index.size(0) == params.size(0)
-    elapsed_time_real_bl, rating_bl, seq_lens = _prepare_prediction_inputs(
-        review_data, index
-    )
-    torch.cuda.synchronize()
-    print("pred loss grad prep", time.time() - ts)
-    return None, None, None
-    # return fsrs_v7_jax_adapter.prediction_loss_grad(params, elapsed_time_real_bl, rating_bl, seq_lens, epoch_lens) 
+# def predict_loss_grad(review_data: ReviewData, index, params, epoch_lens):
+#     torch.cuda.synchronize()
+#     ts = time.time()
+#     assert index.size(0) == params.size(0)
+#     elapsed_time_real_bl, rating_bl, seq_lens = _prepare_prediction_inputs(
+#         review_data, index
+#     )
+#     torch.cuda.synchronize()
+#     print("pred loss grad prep", time.time() - ts)
+#     return None, None, None
+#     # return fsrs_v7_jax_adapter.prediction_loss_grad(params, elapsed_time_real_bl, rating_bl, seq_lens, epoch_lens) 
 
 def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("start train")
@@ -294,13 +296,32 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     num_batches = ceil_div(N, TEST_BATCH_SIZE_MAX)
     batch_size = ceil_div(N, num_batches)
     gather_p = []
-    batches = get_batches_test(sorted_test_seq_len)
-    print(batches)
-    for (l, re) in tqdm(batches, desc="Test set", smoothing=0.03):
-    # for perm_slice in sorted_test_index_permutation.split(batch_size):
-        perm_slice = sorted_test_index_permutation[l:re]
+    # batches = get_batches_test(sorted_test_seq_len)
+    # print(batches)
+
+    # enzyme_sample.fsrs7_forward(
+    #     data.review_data.elapsed_days_real, 
+    #     data.review_data.rating, 
+    #     data.review_data.seq_len, 
+    #     sorted_test_index_permutation,
+    # )
+    # exit()
+    # for (l, re) in tqdm(batches, desc="Test set", smoothing=0.03):
+    for perm_slice in tqdm(sorted_test_index_permutation.split(batch_size), desc="Test set", smoothing=0.03):
+        # perm_slice = sorted_test_index_permutation[l:re]
         batch_fsrs_params = fsrs_params[param_keys.user_index[perm_slice], param_keys.split_index[perm_slice]]
-        p = predict(data.review_data, data.test_index[perm_slice], batch_fsrs_params)
+        # p = predict(data.review_data, data.test_index[perm_slice], batch_fsrs_params)
+        seq_lens = data.review_data.seq_len[perm_slice]
+        start_indices = data.test_index[perm_slice] - seq_lens + 1
+        p = enzyme_sample.fsrs7_forward(
+                data.review_data.elapsed_days_real, 
+                data.review_data.rating, 
+                start_indices,
+                seq_lens,
+                batch_fsrs_params,
+            )
+        print(p)
+        exit()
         gather_p.append(p)
     
     restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
@@ -336,8 +357,7 @@ def run(
     # fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
     initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
     fsrs_params = initial_params.view(1, 1, -1).repeat(len(users), N_SPLITS, 1)
-    fsrs_params.requires_grad_(True)
-    fsrs_params = train(fsrs_params, users, data)
+    # fsrs_params = train(fsrs_params, users, data)
 
     print("skip test")
     # evaluate
@@ -352,7 +372,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 4000))
+    users = list(range(1, 10))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
