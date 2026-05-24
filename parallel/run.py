@@ -285,11 +285,13 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
 
 def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("eval on test")
+    ts = time.time()
     param_keys = data.get_test_index_param_key()
 
     test_seq_len = data.review_data.seq_len[data.test_index]
     sorted_test_seq_len, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True)
-    print("sort done")
+    torch.cuda.synchronize()
+    print("sort done", time.time() - ts)
 
     # TODO use the same load balancing as training
     N = data.test_index.size(0)
@@ -313,6 +315,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         # p = predict(data.review_data, data.test_index[perm_slice], batch_fsrs_params)
         seq_lens = data.review_data.seq_len[perm_slice]
         start_indices = data.test_index[perm_slice] - seq_lens + 1
+        print(seq_lens.size(0))
         p = enzyme_sample.fsrs7_forward(
                 data.review_data.elapsed_days_real, 
                 data.review_data.rating, 
@@ -320,8 +323,8 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
                 seq_lens,
                 batch_fsrs_params,
             )
-        print(p)
-        exit()
+        # print(p)
+        # exit()
         gather_p.append(p)
     
     restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
@@ -372,7 +375,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 10))
+    users = list(range(1, 4000))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 

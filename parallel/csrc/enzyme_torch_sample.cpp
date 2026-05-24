@@ -32,6 +32,15 @@ void check_sample_tensor(const torch::Tensor& tensor, const char* name) {
     TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
 }
 
+void check_sample_tensor(
+    const torch::Tensor& tensor,
+    const char* name,
+    const c10::ScalarType dtype
+) {
+    check_sample_tensor(tensor, name);
+    TORCH_CHECK(tensor.scalar_type() == dtype, name, " has unexpected dtype");
+}
+
 }  // namespace
 
 torch::Tensor fsrs7_test(
@@ -41,18 +50,18 @@ torch::Tensor fsrs7_test(
     const torch::Tensor& seq_len,
     const torch::Tensor& fsrs_params
 ) {
-    check_sample_tensor(elapsed_days_real_flat, "elapsed_days_real_flat");
-    check_sample_tensor(rating_flat, "rating_flat");
-    check_sample_tensor(start_index, "start_index");
-    check_sample_tensor(seq_len, "seq_len");
-    check_sample_tensor(fsrs_params, "fsrs_params");
+    check_sample_tensor(elapsed_days_real_flat, "elapsed_days_real_flat", torch::kFloat32);
+    check_sample_tensor(rating_flat, "rating_flat", torch::kInt8);
+    check_sample_tensor(start_index, "start_index", torch::kInt32);
+    check_sample_tensor(seq_len, "seq_len", torch::kInt32);
+    check_sample_tensor(fsrs_params, "fsrs_params", torch::kFloat32);
 
     c10::cuda::CUDAGuard device_guard(elapsed_days_real_flat.device());
     const int32_t N = start_index.numel();
 
     torch::Tensor p = torch::empty(
         start_index.sizes(),
-        start_index.options()
+        fsrs_params.options()
     );
 
     fsrs_test_cuda(

@@ -139,11 +139,11 @@ class DataBuilder:
         self.rating = _TensorVector(device=self.device)
         self.elapsed_days_real = _TensorVector(device=self.device)
         self.seq_len = _TensorVector(device=self.device)
-        self.train_index = _TensorVector(torch.long, device=self.device)
-        self.test_index = _TensorVector(torch.long, device=self.device)
+        self.train_index = _TensorVector(torch.int32, device=self.device)
+        self.test_index = _TensorVector(torch.int32, device=self.device)
         self.train_split_lengths = _TensorVector(torch.int32, device=self.device)
         self.splits = _TensorVector(torch.int32, device=self.device)
-        self.split_counts = _TensorVector(torch.long, device=self.device)
+        self.split_counts = _TensorVector(torch.int32, device=self.device)
 
         self.user_lengths: list[int] = []
         self.test_index_lens: list[int] = []
@@ -160,11 +160,11 @@ class DataBuilder:
         self.seq_len.append(user_data.seq_len)
 
         self.train_index.append(
-            user_data.train_index.detach().to(device=self.device, dtype=torch.long)
+            user_data.train_index.detach().to(device=self.device)
             + self.review_offset,
         )
         self.test_index.append(
-            user_data.test_index.detach().to(device=self.device, dtype=torch.long)
+            user_data.test_index.detach().to(device=self.device)
             + self.review_offset,
         )
 
@@ -172,7 +172,7 @@ class DataBuilder:
         self.test_index_lens.append(user_data.test_index.numel())
         self.splits.append(user_data.split)
         self.split_counts.append(
-            torch.tensor([user_data.split.numel()], dtype=torch.long, device=self.device),
+            torch.tensor([user_data.split.numel()], device=self.device),
         )
 
         user_length = user_data.rating.size(0)
@@ -195,22 +195,22 @@ class DataBuilder:
         )
         data.device = data.review_data.rating.device
 
-        user_lengths_t = torch.tensor(self.user_lengths, device=self.device, dtype=torch.long)
+        user_lengths_t = torch.tensor(self.user_lengths, device=self.device)
         if user_lengths_t.numel() == 0:
-            data.user_flat_offset = torch.empty(0, device=self.device, dtype=torch.long)
+            data.user_flat_offset = torch.empty(0, device=self.device)
         else:
             data.user_flat_offset = torch.nn.functional.pad(
                 torch.cumsum(user_lengths_t, dim=-1)[:-1],
                 (1, 0),
             )
 
-        data.train_index = self.train_index.finish(torch.long, shrink=shrink)
+        data.train_index = self.train_index.finish(shrink=shrink)
         data.train_split_lengths = self.train_split_lengths.finish(torch.int32, shrink=shrink)
 
-        data.test_index = self.test_index.finish(torch.long, shrink=shrink)
+        data.test_index = self.test_index.finish(shrink=shrink)
         data.test_index_lens = self.test_index_lens
         data.splits = self.splits.finish(torch.int32, shrink=shrink)
-        data.split_counts = self.split_counts.finish(torch.long, shrink=shrink)
+        data.split_counts = self.split_counts.finish(shrink=shrink)
 
         data._assert_valid()
 
@@ -261,7 +261,7 @@ class Data:
 
     def get_test_index_param_key(self) -> ParamKey:
         # Delay the computation of this to save a bit of memory
-        split_counts = self.split_counts.to(dtype=torch.long)
+        split_counts = self.split_counts
         split_offsets = torch.nn.functional.pad(
             torch.cumsum(split_counts, dim=-1)[:-1],
             (1, 0),
@@ -270,14 +270,13 @@ class Data:
         split_index_per_split = torch.arange(
             self.splits.numel(),
             device=self.device,
-            dtype=torch.long,
         ) - split_owner_offsets
         split_index = torch.repeat_interleave(
             split_index_per_split,
-            self.splits.to(dtype=torch.long),
+            self.splits,
         )
         user_index = torch.repeat_interleave(
             torch.arange(len(self.test_index_lens), device=self.device),
-            torch.tensor(self.test_index_lens, device=self.device, dtype=torch.long),
+            torch.tensor(self.test_index_lens, device=self.device),
         )
         return ParamKey(user_index=user_index, split_index=split_index)
