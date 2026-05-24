@@ -30,6 +30,27 @@ float fsrs7_initial_difficulty(
 }
 
 __device__ __forceinline__
+float fsrs7_linear_damping(const float delta_d, const float old_d) {
+    return delta_d * (10.0f - old_d) / 9.0f;
+}
+
+__device__ __forceinline__
+float fsrs7_mean_reversion(const float init, const float current) {
+    return 0.01f * init + 0.99f * current;
+}
+
+__device__ __forceinline__
+float fsrs7_next_d(
+    const fsrs_params_t &fsrs_params,
+    const fsrs_state_t fsrs_state,
+    const int8_t rating
+) {
+    const float delta_d = -fsrs_params.next_d_mult * (static_cast<float>(rating) - 3.0f);
+    const float new_d = fsrs_state.d + fsrs7_linear_damping(delta_d, fsrs_state.d);
+    return fsrs7_mean_reversion(fsrs7_initial_difficulty(fsrs_params, 4.0f), new_d);
+}
+
+__device__ __forceinline__
 float fsrs7_forgetting_curve(
     const fsrs_params_t &fsrs_params,
     const float elapsed_time,
@@ -169,11 +190,7 @@ fsrs_state_t fsrs7_step(
     const float coefficient =
         1.0f - fsrs_params.transition_scale * expf(-fsrs_params.transition_decay * elapsed_time);
     const float new_s = short_stability + coefficient * (long_stability - short_stability);
-
-    const float delta_d = -fsrs_params.next_d_mult * (static_cast<float>(rating) - 3.0f);
-    const float damped_d = fsrs_state.d + delta_d * (10.0f - fsrs_state.d) / 9.0f;
-    const float init_d_4 = fsrs7_initial_difficulty(fsrs_params, 4.0f);
-    const float new_d = 0.01f * init_d_4 + 0.99f * damped_d;
+    const float new_d = fsrs7_next_d(fsrs_params, fsrs_state, rating);
 
     return fsrs7_clamp_state(new_s, new_d);
 }

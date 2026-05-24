@@ -92,12 +92,12 @@ __global__ void fsrs_test_kernel(
 }
 
 extern "C" void fsrs_test_cuda(
-    const float* elapsed_days_real_flat,
-    const int8_t* rating_flat,
-    const int32_t* start_index,
-    const int32_t* seq_len,
-    const fsrs_params_t* fsrs_params,
-    float* p,
+    const float* __restrict__  elapsed_days_real_flat,
+    const int8_t* __restrict__  rating_flat,
+    const int32_t* __restrict__  start_index,
+    const int32_t* __restrict__  seq_len,
+    const fsrs_params_t* __restrict__  fsrs_params,
+    float* __restrict__  p,
     const int32_t N,
     cudaStream_t stream
 ) {
