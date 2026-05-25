@@ -17,28 +17,19 @@ extern "C" void fsrs_test_cuda(
     cudaStream_t stream
 );
 
-extern "C" void enzyme_square_backward_cuda(
-    const double* x,
-    const double* grad_out,
-    double* grad_x,
-    int64_t n,
+extern "C" void fsrs_train_cuda(
     cudaStream_t stream
 );
 
 
 namespace {
-
-void check_sample_tensor(const torch::Tensor& tensor, const char* name) {
-    TORCH_CHECK(tensor.is_cuda(), name, " must be a CUDA tensor");
-    TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
-}
-
 void check_sample_tensor(
     const torch::Tensor& tensor,
     const char* name,
     const c10::ScalarType dtype
 ) {
-    check_sample_tensor(tensor, name);
+    TORCH_CHECK(tensor.is_cuda(), name, " must be a CUDA tensor");
+    TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
     TORCH_CHECK(tensor.scalar_type() == dtype, name, " has unexpected dtype");
 }
 
@@ -88,20 +79,13 @@ torch::Tensor fsrs7_test(
 }
 
 
-torch::Tensor square_backward(torch::Tensor x, torch::Tensor grad_out) {
-    check_sample_tensor(x, "x");
-    check_sample_tensor(grad_out, "grad_out");
-    TORCH_CHECK(x.sizes() == grad_out.sizes(), "x and grad_out must have the same shape");
-    TORCH_CHECK(x.device() == grad_out.device(), "x and grad_out must be on the same CUDA device");
+torch::Tensor fsrs7_train(torch::Tensor x) {
+    check_sample_tensor(x, "x", torch::kFloat32);
 
     c10::cuda::CUDAGuard device_guard(x.device());
     torch::Tensor grad_x = torch::empty_like(x);
 
-    enzyme_square_backward_cuda(
-        x.data_ptr<double>(),
-        grad_out.data_ptr<double>(),
-        grad_x.data_ptr<double>(),
-        x.numel(),
+    fsrs_train_cuda(
         at::cuda::getCurrentCUDAStream().stream()
     );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -109,8 +93,7 @@ torch::Tensor square_backward(torch::Tensor x, torch::Tensor grad_out) {
     return grad_x;
 }
 
-
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("fsrs7_forward", &fsrs7_test, "fsrs7 forward");
-    m.def("square_backward", &square_backward, "Enzyme square backward (CUDA)");
+    m.def("fsrs7_train", &fsrs7_train, "fsrs7 gradient");
+    m.def("fsrs7_test", &fsrs7_test, "fsrs7 test forward pass");
 }

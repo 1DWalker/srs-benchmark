@@ -117,6 +117,9 @@ def load_user_blob(
 
 def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("start train")
+    enzyme_sample.fsrs7_train(fsrs_params)
+    exit()
+
     print(data.train_split_lengths)
     train_split_lengths_cat = data.train_split_lengths
     num_training_steps_per_epoch_cat = (train_split_lengths_cat + BATCH_SIZE - 1) // BATCH_SIZE
@@ -320,7 +323,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         seq_lens = data.review_data.seq_len[test_index_perm_slice]
         start_indices = test_index_perm_slice - seq_lens + 1
         # print(seq_lens.size(0))
-        p = enzyme_sample.fsrs7_forward(
+        p = enzyme_sample.fsrs7_test(
                 data.review_data.elapsed_days_real, 
                 data.review_data.rating, 
                 start_indices,
@@ -365,7 +368,7 @@ def run(
     # fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
     initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
     fsrs_params = initial_params.view(1, 1, -1).repeat(len(users), N_SPLITS, 1)
-    # fsrs_params = train(fsrs_params, users, data)
+    fsrs_params = train(fsrs_params, users, data)
 
     print("skip test")
     # evaluate

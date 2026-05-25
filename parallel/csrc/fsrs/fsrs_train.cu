@@ -1,6 +1,6 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
-
+#include <stdio.h>
 #include "fsrs7.cu"
 
 int __device__ enzyme_dup;
@@ -11,7 +11,7 @@ int __device__ enzyme_const;
 template < typename return_type, typename ... T >
 return_type __device__ __enzyme_autodiff(void*, T ... );
 
-__global__ void fsrs_test_kernel(
+__global__ void fsrs_train_kernel(
     const float* __restrict__ elapsed_days_real_flat,
     const int8_t* __restrict__ rating_flat,
     const int32_t* __restrict__ start_index,
@@ -67,25 +67,26 @@ __global__ void fsrs_test_kernel(
     // p[i] = square(p[i]);
 }
 
-extern "C" void fsrs_test_cuda(
-    const float* __restrict__ elapsed_days_real_flat,
-    const int8_t* __restrict__ rating_flat,
-    const int32_t* __restrict__ start_index,
-    const int32_t* __restrict__ seq_len,
-    const fsrs_params_t* __restrict__ fsrs_params,
-    float* __restrict__ p,
-    const int32_t N,
+extern "C" void fsrs_train_cuda(
+    // const float* __restrict__ elapsed_days_real_flat,
+    // const int8_t* __restrict__ rating_flat,
+    // const int32_t* __restrict__ start_index,
+    // const int32_t* __restrict__ seq_len,
+    // const fsrs_params_t* __restrict__ fsrs_params,
+    // float* __restrict__ p,
+    // const int32_t N,
     cudaStream_t stream
 ) {
-    constexpr int threads = 256;
-    int blocks = static_cast<int>((N + threads - 1) / threads);
-    fsrs_test_kernel<<<blocks, threads, 0, stream>>>(
-        elapsed_days_real_flat,
-        rating_flat,
-        start_index,
-        seq_len,
-        fsrs_params,
-        N,
-        p
-    );
+    std::cout << "Hello world!\n";
+    // constexpr int threads = 256;
+    // int blocks = static_cast<int>((N + threads - 1) / threads);
+    // fsrs_train_kernel<<<blocks, threads, 0, stream>>>(
+    //     elapsed_days_real_flat,
+    //     rating_flat,
+    //     start_index,
+    //     seq_len,
+    //     fsrs_params,
+    //     N,
+    //     p
+    // );
 }

@@ -1,5 +1,8 @@
 import os
 import subprocess
+import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from setuptools._distutils import log
@@ -9,10 +12,68 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
 ROOT = Path(__file__).resolve().parent
 ENZYME_CUDA_SOURCE = ROOT / "parallel" / "csrc" / "enzyme_torch_sample.cu"
+ENZYME_CUDA_DEPENDENCIES = [
+    ENZYME_CUDA_SOURCE,
+    ROOT / "parallel" / "csrc" / "fsrs" / "fsrs_test.cu",
+    ROOT / "parallel" / "csrc" / "fsrs" / "fsrs_train.cu",
+    ROOT / "parallel" / "csrc" / "fsrs" / "fsrs7.cu",
+    ROOT / "parallel" / "csrc" / "fsrs" / "fsrs7_constants.cuh",
+]
 ENZYME_EXTENSION_NAME = "parallel._enzyme_torch_sample"
+ENZYME_BUILD_VERBOSE = os.environ.get("ENZYME_BUILD_VERBOSE") == "1"
 ENZYME_PLUGIN = Path(
     os.environ.get("ENZYME_CLANG_PLUGIN", "/opt/enzyme/lib/ClangEnzyme-18.so")
 )
+
+if not ENZYME_BUILD_VERBOSE:
+    if "-q" not in sys.argv and "--quiet" not in sys.argv:
+        sys.argv.insert(1, "-q")
+    log.set_threshold(log.WARN)
+
+
+@contextmanager
+def quiet_success_output():
+    if ENZYME_BUILD_VERBOSE:
+        yield
+        return
+
+    stdout_fd = os.dup(1)
+    stderr_fd = os.dup(2)
+
+    with tempfile.TemporaryFile() as stdout_capture, tempfile.TemporaryFile() as stderr_capture:
+        restored = False
+
+        def restore() -> None:
+            nonlocal restored
+            if restored:
+                return
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(stdout_fd, 1)
+            os.dup2(stderr_fd, 2)
+            restored = True
+
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(stdout_capture.fileno(), 1)
+            os.dup2(stderr_capture.fileno(), 2)
+            yield
+        except BaseException:
+            restore()
+            stdout_capture.seek(0)
+            stderr_capture.seek(0)
+            stdout_text = stdout_capture.read().decode(errors="replace")
+            stderr_text = stderr_capture.read().decode(errors="replace")
+            if stdout_text:
+                print(stdout_text, end="")
+            if stderr_text:
+                print(stderr_text, end="", file=sys.stderr)
+            raise
+        finally:
+            restore()
+            os.close(stdout_fd)
+            os.close(stderr_fd)
 
 
 class EnzymeBuildExtension(BuildExtension):
@@ -36,12 +97,12 @@ class EnzymeBuildExtension(BuildExtension):
         ]
         extension_path = Path(self.get_ext_fullpath(extension.name))
 
-        needs_link = self.force or self._any_newer([*sources, ENZYME_CUDA_SOURCE], extension_path)
+        needs_link = self.force or self._any_newer([*sources, *ENZYME_CUDA_DEPENDENCIES], extension_path)
         if not needs_link:
             log.debug("skipping '%s' extension (up-to-date)", extension.name)
             return
 
-        if self.force or self._source_newer(ENZYME_CUDA_SOURCE, object_path):
+        if self.force or self._any_newer(ENZYME_CUDA_DEPENDENCIES, object_path):
             self._compile_enzyme_cuda_object(object_path)
 
         needs_source_compile = self.force or any(
@@ -49,10 +110,11 @@ class EnzymeBuildExtension(BuildExtension):
             for source, object_path in zip(sources, source_objects, strict=True)
         )
         if needs_source_compile:
-            super().build_extension(extension)
+            with quiet_success_output():
+                super().build_extension(extension)
             return
 
-        log.info("linking '%s' extension", extension.name)
+        log.debug("linking '%s' extension", extension.name)
         self._link_extension(extension, source_objects, extension_path, sources)
 
     @staticmethod
@@ -76,9 +138,10 @@ class EnzymeBuildExtension(BuildExtension):
     @staticmethod
     def _add_enzyme_dependency(extension) -> None:
         depends = list(getattr(extension, "depends", None) or [])
-        source_path_s = str(ENZYME_CUDA_SOURCE)
-        if source_path_s not in depends:
-            depends.append(source_path_s)
+        for source_path in ENZYME_CUDA_DEPENDENCIES:
+            source_path_s = str(source_path)
+            if source_path_s not in depends:
+                depends.append(source_path_s)
         extension.depends = depends
 
     def _compile_enzyme_cuda_object(self, object_path: Path) -> None:
@@ -110,7 +173,10 @@ class EnzymeBuildExtension(BuildExtension):
             str(Path(cuda_home) / "include"),
         ]
 
-        subprocess.run(command, check=True)
+        run_kwargs = {"check": True}
+        if not ENZYME_BUILD_VERBOSE:
+            run_kwargs["stdout"] = subprocess.DEVNULL
+        subprocess.run(command, **run_kwargs)
 
     def _link_extension(
         self,
@@ -125,18 +191,19 @@ class EnzymeBuildExtension(BuildExtension):
         extra_args = extension.extra_link_args or []
         language = extension.language or self.compiler.detect_language([str(source) for source in sources])
 
-        self.compiler.link_shared_object(
-            objects,
-            str(extension_path),
-            libraries=self.get_libraries(extension),
-            library_dirs=extension.library_dirs,
-            runtime_library_dirs=extension.runtime_library_dirs,
-            extra_postargs=extra_args,
-            export_symbols=self.get_export_symbols(extension),
-            debug=self.debug,
-            build_temp=self.build_temp,
-            target_lang=language,
-        )
+        with quiet_success_output():
+            self.compiler.link_shared_object(
+                objects,
+                str(extension_path),
+                libraries=self.get_libraries(extension),
+                library_dirs=extension.library_dirs,
+                runtime_library_dirs=extension.runtime_library_dirs,
+                extra_postargs=extra_args,
+                export_symbols=self.get_export_symbols(extension),
+                debug=self.debug,
+                build_temp=self.build_temp,
+                target_lang=language,
+            )
 
 
 setup(
