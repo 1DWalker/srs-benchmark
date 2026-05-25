@@ -76,7 +76,7 @@ extern "C" void fsrs_train_cuda(
     // const fsrs_params_t* __restrict__ fsrs_params,
     // float* __restrict__ p,
     // const int32_t N,
-    cudaStream_t stream
+    cudaStream_t &stream
 ) {
     std::cout << "Hello world!\n";
     // constexpr int threads = 256;

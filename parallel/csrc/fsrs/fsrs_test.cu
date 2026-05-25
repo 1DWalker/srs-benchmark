@@ -46,7 +46,7 @@ extern "C" void fsrs_test_cuda(
     const fsrs_params_t* __restrict__ fsrs_params,
     float* __restrict__ p,
     const int32_t N,
-    cudaStream_t stream
+    cudaStream_t &stream
 ) {
     constexpr int threads = 256;
     int blocks = static_cast<int>((N + threads - 1) / threads);

@@ -20,12 +20,17 @@ from parallel.config import (
     N_EPOCHS,
     N_SPLITS,
     TEST_BATCH_SIZE_MAX,
+    TRAIN_BUFFER_SIZE_GB,
 )
 from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.models import fsrs_v7_constants
 from parallel.tensors import Data, DataBuilder, ParamKey, ReviewData, UserTensorBlob
 
 enzyme_sample = importlib.import_module("parallel._enzyme_torch_sample")
+THREADS_PER_BLOCK = enzyme_sample.threads_per_block()
+
+train_buffer_float_size = TRAIN_BUFFER_SIZE_GB * 1_000_000_000 // 4
+train_buffer = torch.empty(train_buffer_float_size, dtype=torch.float32, device=DEVICE)
 
 def ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
@@ -115,11 +120,35 @@ def load_user_blob(
 #     return None, None, None
 #     # return fsrs_v7_jax_adapter.prediction_loss_grad(params, elapsed_time_real_bl, rating_bl, seq_lens, epoch_lens) 
 
+def run_cpp_train_pass(elapsed_days_real, rating, start_indices, seq_lens, batch_fsrs_params):
+    U, B = seq_lens.shape
+    assert B % THREADS_PER_BLOCK == 0
+    seq_lens_UxT = seq_lens.view(U, B // THREADS_PER_BLOCK, THREADS_PER_BLOCK)
+    seq_lens_UxT_max = seq_lens_UxT.max(dim=-1).values
+    # seq_lens_Ux_max_cumsum = seq_lens_UxT_max.view(-1).cumsum(dim=-1).view(U, B // THREADS_PER_BLOCK)
+    flat = seq_lens_UxT_max.view(-1)
+    seq_lens_Ux_max_cumsum = torch.nn.functional.pad(
+        (flat * THREADS_PER_BLOCK).cumsum(dim=0)[:-1],
+        (1, 0),
+        value=0,
+    ).view(U, B // THREADS_PER_BLOCK)
+    buffer_req_size = seq_lens_Ux_max_cumsum[-1, -1].item()
+    # print(seq_lens_Ux_max_cumsum)
+    # return seq_lens_Ux_max_cumsum
+    return enzyme_sample.fsrs7_train(
+        elapsed_days_real, 
+        rating, 
+        start_indices.view_as(seq_lens_UxT),
+        seq_lens_UxT,
+        seq_lens_UxT_max,
+        seq_lens_Ux_max_cumsum,
+        batch_fsrs_params,
+        buffer_req_size,
+    )
+
+
 def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("start train")
-    enzyme_sample.fsrs7_train(fsrs_params)
-    exit()
-
     print(data.train_split_lengths)
     train_split_lengths_cat = data.train_split_lengths
     num_training_steps_per_epoch_cat = (train_split_lengths_cat + BATCH_SIZE - 1) // BATCH_SIZE
@@ -132,10 +161,6 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         torch.cumsum(num_training_steps_cat, dim=-1)[:-1],
         (1, 0),
     ).view(len(users), N_SPLITS)
-    # print(batch_perm_user_flat_offset)
-    # print(batch_perm_cat, batch_perm_cat.size())
-    # print(batch_perm_cat.cpu().tolist())
-    # exit()
 
     # Map: (user, split) -> data.train_index start index
     train_split_lengths_offset = torch.nn.functional.pad(
@@ -160,6 +185,9 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         remaining = num_training_steps_cat - step_i_cat
         # print("remaining:", remaining)
         _, indices = torch.topk(remaining, k=int(min(batch_num_inner_batches, (remaining > 0).sum().item())))
+        # Permute indices to achieve a more stable # of blocks per batch down the line
+        indices = indices[torch.randperm(indices.size(0))]
+
         step_i = step_i_cat[indices]
         # epoch_step_i = step_i % num_training_steps_per_epoch_cat[indices]
         # print(step_i, epoch_step_i)
@@ -173,7 +201,6 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         train_r = torch.minimum((perm_i + 1) * BATCH_SIZE - 1, train_split_lengths_cat[indices] - 1)
         assert (train_l <= train_r).all()
 
-        indices_range = indices.unsqueeze(-1).repeat(1, BATCH_SIZE)
         train_range = \
             + train_l.unsqueeze(-1) \
             + torch.arange(BATCH_SIZE, device=train_l.device).view(1, -1).repeat(train_l.size(0), 1)
@@ -184,47 +211,63 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         # print(legal)
         # print(train_split_lengths_cat[indices] - 1)
 
-        indices_flat = indices_range.view(-1)
-        review_data_indices_flat = review_data_indices.view(-1)
-        legal_flat = legal.view(-1)
-        assert legal_flat.shape == indices_flat.shape
+        # indices_flat = indices_range.view(-1)
+        # review_data_indices_flat = review_data_indices.view(-1)
+        # legal_flat = legal.view(-1)
+        # assert legal_flat.shape == indices_flat.shape
 
-        indices_filtered = indices_flat[legal_flat]
-        # train_range_filtered = train_range_flat[legal_flat]
-        review_data_indices_filtered = review_data_indices_flat[legal_flat]
-        # review_data_indices_filtered = data.train_index[train_split_lengths_offset[indices_filtered // N_SPLITS, indices_filtered % N_SPLITS].unsqueeze(-1) + train_range_filtered]
-        # print(review_data_indices_filtered.shape)
-        # exit()
+        # indices_filtered = indices_flat[legal_flat]
+        # review_data_indices_filtered = review_data_indices_flat[legal_flat]
 
         # Sort by seq len
-        seq_lens = data.review_data.seq_len[review_data_indices_filtered]
-        print("TODO Try reverse sort")
-        sorted_seq_lens, sorted_seq_lens_indices = torch.sort(seq_lens, stable=True)
-        seq_lens = sorted_seq_lens
-        indices_filtered = indices_filtered[sorted_seq_lens_indices]
-        review_data_indices_filtered = review_data_indices_filtered[sorted_seq_lens_indices]
+        # seq_lens = data.review_data.seq_len[review_data_indices_filtered]
+        seq_lens = data.review_data.seq_len[review_data_indices]
 
         torch.cuda.synchronize()
         tb = time.time()
-        batches = get_batches_train(seq_lens)
+        # batches = get_batches_train(seq_lens)
         print("get batches", time.time() - tb)
         torch.cuda.synchronize()
         print("prepare iteration", time.time() - ts)
         # print(batches)
-        for (l, re) in batches:
+
+        for l in [0]:
+            # re = min(seq_lens.size(0), l + STEP)
+            re = seq_lens.size(0)
             ts = time.time()
             # slice = torch.arange(l, re, re - l, device=indices.device)
             # batch_fsrs_params = torch.tensor(fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]], requires_grad=True, device=indices.device)
             # batch_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]].detach().clone().requires_grad_(True)
-            batch_indices = indices_filtered[l:re]
+            batch_indices = indices[l:re]
             batch_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))[batch_indices]
             batch_epoch_lens = train_split_lengths_cat[batch_indices]
             assert (batch_epoch_lens > 0).all()
             # batch_review_data_indices = review_data_indices_filtered[slice]
-            batch_review_data_indices = review_data_indices_filtered[l:re]
+            batch_review_data_indices = review_data_indices[l:re]
+            print(batch_review_data_indices.shape, batch_fsrs_params.shape, batch_indices.shape, legal.shape)
+            print(seq_lens.shape)
+            seq_lens_u_cumsum = seq_lens.cumsum(dim=-1)
+            print(seq_lens_u_cumsum)
+            seq_lens_cumsum = seq_lens_u_cumsum[:, -1].cumsum(dim=-1)
+            # print(seq_lens_cumsum)
+            print(seq_lens_cumsum[-1], train_buffer_float_size)
+            start_indices = review_data_indices - seq_lens + 1
+            print(start_indices)
             torch.cuda.synchronize()
+            ts = time.time()
+            out = run_cpp_train_pass(
+                data.review_data.elapsed_days_real, 
+                data.review_data.rating, 
+                start_indices,
+                seq_lens,
+                batch_fsrs_params,
+            )
+            torch.cuda.synchronize()
+            print("HERE", time.time() - ts)
+            print(out)
+            exit()
             print("intermediate", time.time() - ts)
-            p, loss, grad = predict_loss_grad(data.review_data, batch_review_data_indices, batch_fsrs_params, batch_epoch_lens)
+            # p, loss, grad = predict_loss_grad(data.review_data, batch_review_data_indices, batch_fsrs_params, batch_epoch_lens)
             # assert not p.isnan().any()
             # torch.cuda.synchronize()
             # print("intermediate2", time.time() - ts)
@@ -245,11 +288,11 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
             # torch.cuda.synchronize()
             # print("L2 time", time.time() - tl2)
 
-            # print(fsrs_params.grad)
-            # exit()
-            torch.cuda.synchronize()
-            print("total it", time.time() - ts)
-            print()
+        # print(fsrs_params.grad)
+        # exit()
+        torch.cuda.synchronize()
+        print("total it", time.time() - ts)
+        print()
 
         t_opt = time.time()
         active_params_mask = torch.zeros(step_i_cat.size(0), device=step_i_cat.device, dtype=torch.bool)
@@ -376,6 +419,7 @@ def run(
         evaluate_on_test_set(fsrs_params, users, data)
 
 def main() -> None:
+    assert DEVICE == "cuda", "Only cuda is supported."
     env = lmdb.open(
         str(LMDB_PATH),
         map_size=LMDB_SIZE,
@@ -383,7 +427,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 10))
+    users = list(range(1, 5))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
@@ -404,7 +448,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    import os
-    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.30"
     torch.manual_seed(123)
     main()
