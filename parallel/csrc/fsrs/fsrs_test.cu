@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "fsrs7.cu"
+#include "fsrs_test.cuh"
 
 __global__ void fsrs_test_kernel(
     const float* __restrict__ elapsed_days_real_flat,
@@ -34,11 +35,11 @@ __global__ void fsrs_test_kernel(
     p[i] = fsrs7_forgetting_curve(
         params,
         elapsed_days_real_flat[target_index],
-        state.s
+        state
     );
 }
 
-extern "C" void fsrs_test_cuda(
+void fsrs_test_cuda(
     const float* __restrict__ elapsed_days_real_flat,
     const int8_t* __restrict__ rating_flat,
     const int32_t* __restrict__ start_index,

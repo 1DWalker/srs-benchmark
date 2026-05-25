@@ -3,34 +3,146 @@
 #include <iostream>
 #include <stdio.h>
 #include "fsrs7.cu"
+#include "fsrs_train.cuh"
 
 int __device__ enzyme_dup;
 int __device__ enzyme_dupnoneed;
 int __device__ enzyme_out;
 int __device__ enzyme_const;
 
-template < typename return_type, typename ... T >
-return_type __device__ __enzyme_autodiff(void*, T ... );
+// template < typename return_type, typename ... T >
+// return_type __device__ __enzyme_autodiff(void*, T ... );
+
+__device__ __forceinline__
+void __enzyme_autodiff_forgetting_curve(
+    void*,
+    int, fsrs_params_t, fsrs_params_t*,
+    int, float,
+    int, fsrs_state_t, fsrs_state_t*
+);
+
+__device__ __forceinline__
+void fsrs7_step_wrapper(
+    const fsrs_params_t &fsrs_params,
+    const fsrs_state_t fsrs_state,
+    const float elapsed_time,
+    const int8_t rating,
+    fsrs_state_t &out_state
+) {
+    out_state = fsrs7_step(fsrs_params, fsrs_state, elapsed_time, rating);
+}
+
+__device__  __forceinline__
+void __enzyme_autodiff_fsrs7_step(
+    void*,
+    int, fsrs_params_t, fsrs_params_t*,
+    int, fsrs_state_t, fsrs_state_t*,
+    int, float,
+    int, int8_t,
+    int, fsrs_state_t, fsrs_state_t*
+);
+
+// __device__
+// void fsrs7_forgetting_curve_wrapper(
+//     fsrs_params_t &params,
+//     float elapsed_days,
+//     fsrs_state_t &fsrs_state_t
+// ) {
+
+// }v
+
+
+
+__device__ __forceinline__ 
+int32_t idx2(
+    int32_t i,
+    int32_t j,
+    int32_t J
+) {
+    return i * J + j;
+}
+
+__device__ __forceinline__ 
+int32_t idx3(
+    int32_t i,
+    int32_t j,
+    int32_t k,
+    int32_t J,
+    int32_t K
+) {
+    return (i * J + j) * K + k;
+}
+
+// __device__ __forceinline__
+// float loss(
+//     float p,
+//     float y
+// ) {
+//     constexpr float eps = 1e-7f;
+//     p = fminf(fmaxf(p, eps), 1.0f - eps);
+//     return -(y * logf(p) + (1.0f - y) * logf(1.0f - p));
+// }
+
+__device__ __forceinline__
+float dloss_dp(
+    const float p,
+    const bool label
+) {
+    return label ? (-1.0f / p) : (1.0f / (1.0f - p));
+}
 
 __global__ void fsrs_train_kernel(
     const float* __restrict__ elapsed_days_real_flat,
     const int8_t* __restrict__ rating_flat,
     const int32_t* __restrict__ start_index,
-    const int32_t* __restrict__ seq_len,
-    const fsrs_params_t* __restrict__ fsrs_params,
-    const int32_t N,
-    float* __restrict__ p
+    const int32_t* __restrict__ seq_len_p,
+    const int32_t* __restrict__ seq_len_max,
+    const int32_t* __restrict__ seq_len_max_cumsum,
+    const fsrs_params_t* __restrict__ fsrs_params_p,
+    fsrs_state_t* __restrict__ state_buffer,
+    fsrs_params_t* __restrict__ grad
 ) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= N) return;
+    // blockIdx.x is up to U
+    // blockIdx.y is up to x
+    // gridDim.x == U
+    // gridDim.y == x
+    // threadIdx.x is contiguous in a warp
+    // threadIdx.y is different warps
+    // blockDim.x == 32
+    // use thread_i for thread indexing
 
+    __shared__ fsrs_params_t params;
+    __shared__ int32_t _state_buffer_step;
+    __shared__ int32_t _state_buffer_offset;
+    const int32_t thread_i_within_block = threadIdx.y * blockDim.x + threadIdx.x;
+    // const int32_t i = blockDim.y * blockIdx.x + blockIdx.y + thread_i_within_block;
+    const int32_t threads_per_block = blockDim.x * blockDim.y * blockDim.z;
+    const int32_t i = idx3(blockIdx.x, blockIdx.y, thread_i_within_block, gridDim.y, threads_per_block);
+
+    if (threadIdx.y == 0 && threadIdx.x == 0) {
+        params = fsrs_params_p[blockIdx.x];
+    }
+    if (threadIdx.y == 1 && threadIdx.x == 0) {
+        _state_buffer_offset = seq_len_max_cumsum[idx2(blockIdx.x, blockIdx.y, gridDim.y)];
+        _state_buffer_step = seq_len_max[idx2(blockIdx.x, blockIdx.y, gridDim.y)];
+    }
+    __syncthreads();
+
+    const int32_t len = seq_len_p[i];
+    // Moved to registers for speedup(?)
+    const int32_t state_buffer_offset = _state_buffer_offset;
+    const int32_t state_buffer_step = _state_buffer_step;
+    
     const int32_t start = start_index[i];
-    const int32_t len = seq_len[i];
-    const fsrs_params_t params = fsrs_params[i];
-
     fsrs_state_t state = fsrs7_init(params, rating_flat[start]);
+
+    auto get_state_buffer_index = [&](int32_t len) {
+        return state_buffer_offset + len * threads_per_block + thread_i_within_block;
+    };
+
     for (int32_t l = 1; l < len - 1; ++l) {
         const int32_t review_index = start + l;
+        state_buffer[get_state_buffer_index(len)] = state;
         state = fsrs7_step(
             params,
             state,
@@ -40,58 +152,91 @@ __global__ void fsrs_train_kernel(
     }
 
     const int32_t target_index = start + len - 1;
-    p[i] = fsrs7_forgetting_curve(
+    float p = fsrs7_forgetting_curve(
         params,
         elapsed_days_real_flat[target_index],
-        state.s
+        state
+    );
+    float label = (float) (rating_flat[target_index] > 1);
+    float grad_p = dloss_dp(p, label);
+    // if (thread_i_within_block == 0) {
+    //     printf("%d %d %f %f %f %f\n", blockIdx.x, blockIdx.y, p, elapsed_days_real_flat[target_index], label, grad_p);
+    // }
+
+    fsrs_state_t grad_state{};
+    fsrs_params_t grad_params{};
+    __enzyme_autodiff_forgetting_curve(
+        (void*) fsrs7_forgetting_curve, 
+        enzyme_dup, params, &grad_params,
+        enzyme_const, elapsed_days_real_flat[target_index],
+        enzyme_dup, state, &grad_state
     );
 
-    // float x = 5.0;
-    // float y = 2.0;
-    // // float df_dx = __enzyme_fwddiff<float>((void*)square, enzyme_dup, x, dx); 
-    // auto [df_dx, df_dy] = __enzyme_autodiff<float2>((void*)square, enzyme_out, x, enzyme_out, y); 
-    // p[i] = df_dx;
-    // printf("%f %f\n", df_dx, df_dy);
-    B b = {3.0, 2.0};
-    B db;
-    A a;
-    // A lambda = {1.0, 0.0};
-    // A lambda = {0.0, 1.0};
-    A lambda = {0.0, 1.0, 1.0};
-    // auto db = __enzyme_autodiff<B>((void*)bar, enzyme_out, b); 
-    // auto db = __enzyme_autodiff<B>((void*)bar, enzyme_out, b); 
-    __enzyme_autodiff<B>((void*)barwrap, enzyme_dup, b, &db, enzyme_dupnoneed, a, lambda); 
-    printf("%f %f\n", b.a, b.b);
-    // printf("%f %f\n", db.x, db.y);
-    printf("%f %f\n", db.a, db.b);
-    // printf("%f %f\n", a.a, a.b);
-    // p[i] = square(p[i]);
+
+    fsrs_state_t _blank_state{};
+    for (int32_t l = len - 2; l >= 1; l--) {
+        const int32_t review_index = start + l;
+        fsrs_state_t new_grad_state{};
+        fsrs_state_t state_before_review = state_buffer[get_state_buffer_index(len)];
+        __enzyme_autodiff_fsrs7_step(
+            (void*) fsrs7_step_wrapper, 
+            enzyme_dup, params, &grad_params,
+            enzyme_dup, state, &new_grad_state,
+            enzyme_const, elapsed_days_real_flat[review_index],
+            enzyme_const, rating_flat[review_index],
+            enzyme_dupnoneed, _blank_state, &grad_state
+        );
+        grad_state = new_grad_state;
+    }
+    if (thread_i_within_block == 0) {
+        printf("%d %d %f %f %f\n", blockIdx.x, blockIdx.y, grad_state.s, grad_params.decay1, grad_params.decay2);
+    }
+
+
+    // // float x = 5.0;
+    // // float y = 2.0;
+    // // // float df_dx = __enzyme_fwddiff<float>((void*)square, enzyme_dup, x, dx); 
+    // // auto [df_dx, df_dy] = __enzyme_autodiff<float2>((void*)square, enzyme_out, x, enzyme_out, y); 
+    // // p[i] = df_dx;
+    // // printf("%f %f\n", df_dx, df_dy);
+    // B b = {3.0, 2.0};
+    // B db;
+    // A a;
+    // A lambda = {0.0, 1.0, 1.0};
+    // __enzyme_autodiff<B>((void*)barwrap, enzyme_dup, b, &db, enzyme_dupnoneed, a, lambda); 
+    // printf("%f %f\n", b.a, b.b);
+    // // printf("%f %f\n", db.x, db.y);
+    // printf("%f %f\n", db.a, db.b);
+    // // printf("%f %f\n", a.a, a.b);
+    // // p[i] = square(p[i]);
 }
 
-extern "C" void fsrs_train_cuda(
+void fsrs_train_cuda(
     const float* __restrict__ elapsed_days_real_flat,
     const int8_t* __restrict__ rating_flat,
     const int32_t* __restrict__ start_index,
     const int32_t* __restrict__ seq_len_UxT,
-    const int32_t* __restrict__ seq_len_UxT_max,
-    const int32_t* __restrict__ seq_len_UxT_max_cumsum,
+    const int32_t* __restrict__ seq_len_Ux_max,
+    const int32_t* __restrict__ seq_len_Ux_max_cumsum,
     const fsrs_params_t* __restrict__ fsrs_params,
     const int32_t U,
     const int32_t x,
     const int32_t THREADS_PER_BLOCK,
     cudaStream_t stream,
-    fsrs_state_t* __restrict__ state_buffer
+    fsrs_state_t* __restrict__ state_buffer,
+    fsrs_params_t* __restrict__ grad
 ) {
-    std::cout << "Hello world!\n";
-    // constexpr int threads = 256;
-    // int blocks = static_cast<int>((N + threads - 1) / threads);
-    // fsrs_train_kernel<<<blocks, threads, 0, stream>>>(
-    //     elapsed_days_real_flat,
-    //     rating_flat,
-    //     start_index,
-    //     seq_len,
-    //     fsrs_params,
-    //     N,
-    //     p
-    // );
+    dim3 block(32, THREADS_PER_BLOCK / 32);
+    dim3 grid(U, x);
+    fsrs_train_kernel<<<grid, block, 0, stream>>>(
+        elapsed_days_real_flat,
+        rating_flat,
+        start_index,
+        seq_len_UxT,
+        seq_len_Ux_max,
+        seq_len_Ux_max_cumsum,
+        fsrs_params,
+        state_buffer,
+        grad
+    );
 }

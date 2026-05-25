@@ -27,7 +27,7 @@ from parallel.models import fsrs_v7_constants
 from parallel.tensors import Data, DataBuilder, ParamKey, ReviewData, UserTensorBlob
 
 enzyme_sample = importlib.import_module("parallel._enzyme_torch_sample")
-THREADS_PER_BLOCK = enzyme_sample.threads_per_block()
+THREADS_PER_BLOCK = int(enzyme_sample.threads_per_block())
 
 train_buffer_float_size = TRAIN_BUFFER_SIZE_GB * 1_000_000_000 // 4
 train_buffer = torch.empty(train_buffer_float_size, dtype=torch.float32, device=DEVICE)
@@ -124,25 +124,23 @@ def run_cpp_train_pass(elapsed_days_real, rating, start_indices, seq_lens, batch
     U, B = seq_lens.shape
     assert B % THREADS_PER_BLOCK == 0
     seq_lens_UxT = seq_lens.view(U, B // THREADS_PER_BLOCK, THREADS_PER_BLOCK)
-    seq_lens_UxT_max = seq_lens_UxT.max(dim=-1).values
+    seq_lens_Ux_max = seq_lens_UxT.max(dim=-1).values
     # seq_lens_Ux_max_cumsum = seq_lens_UxT_max.view(-1).cumsum(dim=-1).view(U, B // THREADS_PER_BLOCK)
-    flat = seq_lens_UxT_max.view(-1)
+    flat = seq_lens_Ux_max.view(-1)
     seq_lens_Ux_max_cumsum = torch.nn.functional.pad(
-        (flat * THREADS_PER_BLOCK).cumsum(dim=0)[:-1],
+        (flat * THREADS_PER_BLOCK).cumsum(dim=0, dtype=torch.int32)[:-1],
         (1, 0),
         value=0,
     ).view(U, B // THREADS_PER_BLOCK)
     buffer_req_size = seq_lens_Ux_max_cumsum[-1, -1].item()
-    # print(seq_lens_Ux_max_cumsum)
-    print(batch_fsrs_params.shape)
-    exit()
-    # return seq_lens_Ux_max_cumsum
+    print(seq_lens_Ux_max)
+    print(seq_lens_Ux_max_cumsum)
     return enzyme_sample.fsrs7_train(
         elapsed_days_real, 
         rating, 
         start_indices.view_as(seq_lens_UxT),
         seq_lens_UxT,
-        seq_lens_UxT_max,
+        seq_lens_Ux_max,
         seq_lens_Ux_max_cumsum,
         batch_fsrs_params,
         buffer_req_size,
@@ -264,9 +262,14 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
                 seq_lens,
                 batch_fsrs_params,
             )
+            assert not out.isnan().any()
+            print(legal)
+            print(out.shape, legal.shape)
+            grad = (out * legal.unsqueeze(-1)).sum(dim=1)
             torch.cuda.synchronize()
             print("HERE", time.time() - ts)
-            print(out)
+            # print(out)
+            # print(grad)
             exit()
             print("intermediate", time.time() - ts)
             # p, loss, grad = predict_loss_grad(data.review_data, batch_review_data_indices, batch_fsrs_params, batch_epoch_lens)

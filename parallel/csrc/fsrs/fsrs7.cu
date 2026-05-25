@@ -51,9 +51,9 @@ __device__ __forceinline__
 float fsrs7_forgetting_curve(
     const fsrs_params_t &fsrs_params,
     const float elapsed_time,
-    const float stability
+    const fsrs_state_t &state
 ) {
-    const float t_over_s = elapsed_time / stability;
+    const float t_over_s = elapsed_time / state.s;
 
     const float decay1 = -fsrs_params.decay1;
     const float factor1 = powf(fsrs_params.base1, 1.0f / decay1) - 1.0f;
@@ -63,8 +63,8 @@ float fsrs7_forgetting_curve(
     const float factor2 = powf(fsrs_params.base2, 1.0f / decay2) - 1.0f;
     const float r2 = powf(1.0f + factor2 * t_over_s, decay2);
 
-    const float weight1 = fsrs_params.base_weight1 * powf(stability, -fsrs_params.s_weight_power1);
-    const float weight2 = fsrs_params.base_weight2 * powf(stability, fsrs_params.s_weight_power2);
+    const float weight1 = fsrs_params.base_weight1 * powf(state.s, -fsrs_params.s_weight_power1);
+    const float weight2 = fsrs_params.base_weight2 * powf(state.s, fsrs_params.s_weight_power2);
     const float retention = (weight1 * r1 + weight2 * r2) / (weight1 + weight2);
 
     return 1e-5f + (1.0f - 2e-5f) * retention;
@@ -149,7 +149,7 @@ fsrs_state_t fsrs7_step(
     const float retention = fsrs7_forgetting_curve(
         fsrs_params,
         elapsed_time,
-        fsrs_state.s
+        fsrs_state
     );
 
     const float long_stability = fsrs7_stability_after_review_one_term(
