@@ -195,6 +195,7 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
 
         # Sort by seq len
         seq_lens = data.review_data.seq_len[review_data_indices_filtered]
+        print("TODO Try reverse sort")
         sorted_seq_lens, sorted_seq_lens_indices = torch.sort(seq_lens, stable=True)
         seq_lens = sorted_seq_lens
         indices_filtered = indices_filtered[sorted_seq_lens_indices]
@@ -285,11 +286,13 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
 
 def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("eval on test")
+    torch.cuda.synchronize()
+    tz = time.time()
     ts = time.time()
     param_keys = data.get_test_index_param_key()
 
     test_seq_len = data.review_data.seq_len[data.test_index]
-    sorted_test_seq_len, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True)
+    sorted_test_seq_len, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True, descending=True)
     torch.cuda.synchronize()
     print("sort done", time.time() - ts)
 
@@ -316,7 +319,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         test_index_perm_slice = data.test_index[perm_slice]
         seq_lens = data.review_data.seq_len[test_index_perm_slice]
         start_indices = test_index_perm_slice - seq_lens + 1
-        print(seq_lens.size(0))
+        # print(seq_lens.size(0))
         p = enzyme_sample.fsrs7_forward(
                 data.review_data.elapsed_days_real, 
                 data.review_data.rating, 
@@ -324,9 +327,10 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
                 seq_lens,
                 batch_fsrs_params,
             )
-        # print(p)
-        # exit()
         gather_p.append(p)
+
+    torch.cuda.synchronize()
+    print("took", time.time() - tz)
     
     restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
     restore_test_index_permutation[sorted_test_index_permutation] = torch.arange(

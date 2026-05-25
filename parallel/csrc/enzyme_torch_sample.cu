@@ -10,14 +10,6 @@ __device__ void square_impl(double* x, double* y) {
 
 typedef void (*square_fn)(double*, double*);
 
-extern void __device__ __enzyme_autodiff(
-    square_fn,
-    int, double*, double*,
-    int, double*, double*
-);
-
-int __device__ enzyme_dup;
-
 __global__ void square_forward_kernel(const double* x, double* y, int64_t n) {
     int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) {
@@ -45,12 +37,6 @@ __global__ void square_backward_kernel(
     double grad_x_local = 0.0;
     double y_local = 0.0;
     double grad_y_local = grad_out[i];
-
-    __enzyme_autodiff(
-        square_impl,
-        enzyme_dup, &x_local, &grad_x_local,
-        enzyme_dup, &y_local, &grad_y_local
-    );
 
     grad_x[i] = grad_x_local;
 }

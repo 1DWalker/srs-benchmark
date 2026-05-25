@@ -194,3 +194,29 @@ fsrs_state_t fsrs7_step(
 
     return fsrs7_clamp_state(new_s, new_d);
 }
+
+__device__
+float square(float x, float y) {
+    return x * x + y;
+}
+
+struct A {
+    float a;
+    float b;
+    float c;
+};
+
+struct B {
+    float a;
+    float b;
+};
+
+__device__
+A bar(B b) {
+    return {.a = b.a * b.a + b.b, .b = b.b + 50 * b.a, .c = b.b * b.b * b.b};
+}
+
+__device__
+void barwrap(B b, A &a) {
+    a = bar(b);
+}
