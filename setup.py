@@ -12,13 +12,8 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
 ROOT = Path(__file__).resolve().parent
 ENZYME_CUDA_SOURCE = ROOT / "parallel" / "csrc" / "enzyme_torch_sample.cu"
-ENZYME_CUDA_DEPENDENCIES = [
-    ENZYME_CUDA_SOURCE,
-    ROOT / "parallel" / "csrc" / "fsrs" / "fsrs_test.cu",
-    ROOT / "parallel" / "csrc" / "fsrs" / "fsrs_train.cu",
-    ROOT / "parallel" / "csrc" / "fsrs" / "fsrs7.cu",
-    ROOT / "parallel" / "csrc" / "fsrs" / "fsrs7_constants.cuh",
-]
+FSRS_CUDA_DIR = ROOT / "parallel" / "csrc" / "fsrs"
+ENZYME_CUDA_DEPENDENCIES = [ENZYME_CUDA_SOURCE, *sorted(FSRS_CUDA_DIR.glob("*.*"))]
 ENZYME_EXTENSION_NAME = "parallel._enzyme_torch_sample"
 ENZYME_BUILD_VERBOSE = os.environ.get("ENZYME_BUILD_VERBOSE") == "1"
 ENZYME_PLUGIN = Path(

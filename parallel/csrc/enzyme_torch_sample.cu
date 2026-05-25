@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "fsrs/fsrs_test.cu"
+#include "fsrs/fsrs_train.cu"
 
 
 __device__ void square_impl(double* x, double* y) {

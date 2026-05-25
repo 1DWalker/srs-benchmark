@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include <iostream>
 #include <stdio.h>
 #include "fsrs7.cu"
 
