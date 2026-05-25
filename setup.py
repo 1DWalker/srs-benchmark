@@ -13,6 +13,7 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 ROOT = Path(__file__).resolve().parent
 ENZYME_CUDA_SOURCE = ROOT / "parallel" / "csrc" / "enzyme_torch_sample.cu"
 FSRS_CUDA_DIR = ROOT / "parallel" / "csrc" / "fsrs"
+CXX_DEPENDENCIES = sorted((ROOT / "parallel" / "csrc").glob("*.h*"))
 ENZYME_CUDA_DEPENDENCIES = [ENZYME_CUDA_SOURCE, *sorted(FSRS_CUDA_DIR.glob("*.*"))]
 ENZYME_EXTENSION_NAME = "parallel._enzyme_torch_sample"
 ENZYME_BUILD_VERBOSE = os.environ.get("ENZYME_BUILD_VERBOSE") == "1"
@@ -92,7 +93,10 @@ class EnzymeBuildExtension(BuildExtension):
         ]
         extension_path = Path(self.get_ext_fullpath(extension.name))
 
-        needs_link = self.force or self._any_newer([*sources, *ENZYME_CUDA_DEPENDENCIES], extension_path)
+        needs_link = self.force or self._any_newer(
+            [*sources, *CXX_DEPENDENCIES, *ENZYME_CUDA_DEPENDENCIES],
+            extension_path,
+        )
         if not needs_link:
             log.debug("skipping '%s' extension (up-to-date)", extension.name)
             return
@@ -101,7 +105,7 @@ class EnzymeBuildExtension(BuildExtension):
             self._compile_enzyme_cuda_object(object_path)
 
         needs_source_compile = self.force or any(
-            self._source_newer(source, object_path)
+            self._any_newer([source, *CXX_DEPENDENCIES], object_path)
             for source, object_path in zip(sources, source_objects, strict=True)
         )
         if needs_source_compile:

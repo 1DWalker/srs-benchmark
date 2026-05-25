@@ -1,5 +1,10 @@
 #pragma once
 
+struct fsrs_state_t {
+    float s;
+    float d;
+};
+
 struct fsrs_params_t {
     // 0..3: Initial stability by first rating.
     float s0_again;

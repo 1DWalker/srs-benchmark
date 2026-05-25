@@ -134,6 +134,8 @@ def run_cpp_train_pass(elapsed_days_real, rating, start_indices, seq_lens, batch
     ).view(U, B // THREADS_PER_BLOCK)
     buffer_req_size = seq_lens_Ux_max_cumsum[-1, -1].item()
     # print(seq_lens_Ux_max_cumsum)
+    print(batch_fsrs_params.shape)
+    exit()
     # return seq_lens_Ux_max_cumsum
     return enzyme_sample.fsrs7_train(
         elapsed_days_real, 

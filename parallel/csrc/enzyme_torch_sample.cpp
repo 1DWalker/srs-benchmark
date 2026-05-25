@@ -4,7 +4,7 @@
 #include <cuda_runtime_api.h>
 #include <torch/extension.h>
 #include <stdio.h>
-#include <buffer.cpp>
+#include "buffer.hpp"
 
 #include "fsrs/fsrs7_constants.cuh"
 
@@ -20,7 +20,18 @@ extern "C" void fsrs_test_cuda(
 );
 
 extern "C" void fsrs_train_cuda(
-    cudaStream_t stream
+    const float* elapsed_days_real_flat,
+    const int8_t* rating_flat,
+    const int32_t* start_index,
+    const int32_t* seq_len_UxT,
+    const int32_t* seq_len_UxT_max,
+    const int32_t* seq_len_UxT_max_cumsum,
+    const fsrs_params_t* fsrs_params,
+    int32_t U,
+    int32_t x,
+    int32_t threads_per_block,
+    cudaStream_t stream,
+    fsrs_state_t* state_buffer
 );
 
 
@@ -81,7 +92,7 @@ torch::Tensor fsrs7_test(
 }
 
 constexpr int THREADS_PER_BLOCK = 256;
-StateBuffer<fsrs_state_t> buffer;
+StateBuffer<fsrs_state_t> state_buffer;
 
 torch::Tensor fsrs7_train(
     const torch::Tensor& elapsed_days_real_flat,
@@ -90,16 +101,17 @@ torch::Tensor fsrs7_train(
     const torch::Tensor& seq_len_UxT,
     const torch::Tensor& seq_len_UxT_max,
     const torch::Tensor& seq_len_Ux_max_cumsum,
-    const torch::Tensor& fsrs_params_UBP,
+    const torch::Tensor& fsrs_params_UP,
     const int buffer_req_size
 ) {
     // check_sample_tensor(x, "x", torch::kFloat32);
 
     c10::cuda::CUDAGuard device_guard(elapsed_days_real_flat.device());
-    torch::Tensor grad = torch::zeros_like(fsrs_params_UBP);
+    torch::Tensor grad = torch::zeros_like(fsrs_params_UP);
     std::cout << "buffer size req: " << buffer_req_size << '\n';
-    // const int64_t U = start_index.size(0);
-    // const int64_t B = start_index.size(1);
+    fsrs_state_t *state_buffer_ptr = state_buffer.ensure(buffer_req_size);
+    const int64_t U = seq_len_UxT.size(0);
+    const int64_t x = seq_len_UxT.size(1);
     // TORCH_CHECK(
     //     B % THREADS_PER_BLOCK == 0,
     //     "batch size must be a multiple of THREADS_PER_BLOCK"
@@ -111,9 +123,20 @@ torch::Tensor fsrs7_train(
     // auto seq_len_max_cumsum = seq_len_UxT_max.view({-1}).cumsum(-1).view({U, B / THREADS_PER_BLOCK});
 
 
-    // fsrs_train_cuda(
-    //     at::cuda::getCurrentCUDAStream().stream()
-    // );
+    fsrs_train_cuda(
+        elapsed_days_real_flat.data_ptr<float>(),
+        rating_flat.data_ptr<int8_t>(),
+        start_index_UxT.data_ptr<int32_t>(),
+        seq_len_UxT.data_ptr<int32_t>(),
+        seq_len_UxT_max.data_ptr<int32_t>(),
+        seq_len_Ux_max_cumsum.data_ptr<int32_t>(),
+        reinterpret_cast<const fsrs_params_t*>(fsrs_params_UP.data_ptr<float>()),
+        U,
+        x,
+        THREADS_PER_BLOCK,
+        at::cuda::getCurrentCUDAStream().stream(),
+        state_buffer_ptr
+    );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     return grad;

@@ -5,11 +5,6 @@
 
 #include "fsrs7_constants.cuh"
 
-struct fsrs_state_t {
-    float s; 
-    float d;
-};
-
 __device__ __forceinline__
 float fsrs7_clamp(const float x, const float lo, const float hi) {
     return fminf(fmaxf(x, lo), hi);

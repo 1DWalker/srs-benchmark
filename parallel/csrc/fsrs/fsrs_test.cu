@@ -12,7 +12,7 @@ __global__ void fsrs_test_kernel(
     const int32_t N,
     float* __restrict__ p
 ) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
     const int32_t start = start_index[i];
@@ -46,10 +46,10 @@ extern "C" void fsrs_test_cuda(
     const fsrs_params_t* __restrict__ fsrs_params,
     float* __restrict__ p,
     const int32_t N,
-    cudaStream_t &stream
+    cudaStream_t stream
 ) {
     constexpr int threads = 256;
-    int blocks = static_cast<int>((N + threads - 1) / threads);
+    const int blocks = static_cast<int>((N + threads - 1) / threads);
     fsrs_test_kernel<<<blocks, threads, 0, stream>>>(
         elapsed_days_real_flat,
         rating_flat,

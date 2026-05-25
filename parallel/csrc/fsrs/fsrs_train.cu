@@ -69,14 +69,18 @@ __global__ void fsrs_train_kernel(
 }
 
 extern "C" void fsrs_train_cuda(
-    // const float* __restrict__ elapsed_days_real_flat,
-    // const int8_t* __restrict__ rating_flat,
-    // const int32_t* __restrict__ start_index,
-    // const int32_t* __restrict__ seq_len,
-    // const fsrs_params_t* __restrict__ fsrs_params,
-    // float* __restrict__ p,
-    // const int32_t N,
-    cudaStream_t &stream
+    const float* __restrict__ elapsed_days_real_flat,
+    const int8_t* __restrict__ rating_flat,
+    const int32_t* __restrict__ start_index,
+    const int32_t* __restrict__ seq_len_UxT,
+    const int32_t* __restrict__ seq_len_UxT_max,
+    const int32_t* __restrict__ seq_len_UxT_max_cumsum,
+    const fsrs_params_t* __restrict__ fsrs_params,
+    const int32_t U,
+    const int32_t x,
+    const int32_t THREADS_PER_BLOCK,
+    cudaStream_t stream,
+    fsrs_state_t* __restrict__ state_buffer
 ) {
     std::cout << "Hello world!\n";
     // constexpr int threads = 256;
