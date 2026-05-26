@@ -77,6 +77,7 @@ def _open_cache_env(
     return lmdb.open(
         str(cache_path),
         map_size=map_size,
+        writemap=True,
         subdir=True,
     )
 
@@ -274,6 +275,8 @@ def _read_user_info(txn: lmdb.Transaction, user_id: int) -> _SourceUserInfo:
 
 
 def _put_cache_array(cache_env: lmdb.Environment, split_i: int, name: str, array: np.ndarray) -> None:
+    size_gb = array.nbytes / 1_000_000_000
+    tqdm.write(f"split {split_i + 1}: writing {name} ({size_gb:.3f} GB)")
     with cache_env.begin(write=True) as cache_txn:
         put_array(cache_txn, _cache_tensor_prefix(split_i, name), array)
 

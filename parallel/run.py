@@ -409,7 +409,7 @@ def main() -> None:
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
-    split_factor_k = 2
+    split_factor_k = 1
     with env.begin(write=False) as txn:
         user_max_train_split_lengths = load_metadata_tensor(
             txn,
@@ -431,6 +431,7 @@ def main() -> None:
                 f"Run split {split_i + 1}/{len(user_splits)}: "
                 f"users={len(user_subset)}, max_train_split_length_sum={split_work}"
             )
+            torch.cuda.empty_cache()
             data, train_setup = load_cached_split(cache_env, split_i, DEVICE)
             run(user_subset, data, train_setup)
             del data
