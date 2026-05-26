@@ -18,7 +18,6 @@ from parallel.config import (
     N_EPOCHS,
     N_SPLITS,
     TEST_BATCH_SIZE_MAX,
-    TRAIN_BUFFER_SIZE_GB,
     USER_END,
     USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
     USER_START,
@@ -37,7 +36,6 @@ from parallel.tensors import Data, ParamKey
 
 enzyme_sample = srs_ops.enzyme_sample
 THREADS_PER_BLOCK = srs_ops.THREADS_PER_BLOCK
-TRAIN_BUFFER_FLOAT_SIZE = int(TRAIN_BUFFER_SIZE_GB * 1_000_000_000) // 4
 
 def ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
@@ -120,18 +118,18 @@ def run_cpp_train_pass(
     start_indices,
     seq_lens,
     batch_fsrs_params,
-    state_buffer,
+    threads_per_block: int,
 ):
     U, B = seq_lens.shape
-    seq_lens_UxT = seq_lens.view(U, B // THREADS_PER_BLOCK, THREADS_PER_BLOCK)
+    seq_lens_UxT = seq_lens.view(U, B // threads_per_block, threads_per_block)
     seq_lens_Ux_max = seq_lens_UxT.max(dim=-1).values
     flat = seq_lens_Ux_max.view(-1)
-    seq_lens_Ux_max_cumsum_inc = (flat * THREADS_PER_BLOCK).cumsum(dim=0, dtype=torch.int32)
+    seq_lens_Ux_max_cumsum_inc = (flat * threads_per_block).cumsum(dim=0, dtype=torch.int32)
     seq_lens_Ux_max_cumsum = torch.nn.functional.pad(
         seq_lens_Ux_max_cumsum_inc[:-1],
         (1, 0),
         value=0,
-    ).view(U, B // THREADS_PER_BLOCK)
+    ).view(U, B // threads_per_block)
     return torch.ops.srs.fsrs7_train(
         elapsed_days_real, 
         rating, 
@@ -140,11 +138,10 @@ def run_cpp_train_pass(
         seq_lens_Ux_max,
         seq_lens_Ux_max_cumsum,
         batch_fsrs_params,
-        state_buffer,
     )
 
 
-# @torch.compile(fullgraph=True)
+@torch.compile(fullgraph=True)
 def train_iter(
     flat_fsrs_params: torch.Tensor,
     optim_state: adamw.AdamWState,
@@ -159,7 +156,7 @@ def train_iter(
     elapsed_days_real: torch.Tensor,
     rating: torch.Tensor,
     seq_len: torch.Tensor,
-    state_buffer: torch.Tensor,
+    threads_per_block: int,
     batch_num_inner_batches: int,
 ) -> tuple[torch.Tensor, adamw.AdamWState, torch.Tensor]:
     remaining = num_training_steps_cat - step_i_cat
@@ -204,7 +201,7 @@ def train_iter(
         start_indices,
         batch_seq_lens,
         batch_fsrs_params,
-        state_buffer,
+        threads_per_block,
     )
     selected_grad = (per_example_grad * legal.unsqueeze(-1)).sum(dim=1)
     flat_grad = torch.zeros_like(flat_fsrs_params).scatter_add(
@@ -303,7 +300,6 @@ def train(
     step_i_cat = torch.zeros_like(num_training_steps_cat)
     flat_fsrs_params = fsrs_params.detach().view(-1, fsrs_params.size(-1))
     optim_state = adamw.init_adamw_state(flat_fsrs_params)
-    state_buffer = torch.empty(TRAIN_BUFFER_FLOAT_SIZE, dtype=torch.float32, device=DEVICE)
     print("Inner batches:", batch_num_inner_batches)
     for iter in tqdm(range(train_splits_length_cat_max), desc="Training", smoothing=0.06):
         flat_fsrs_params, optim_state, step_i_cat = train_iter(
@@ -320,7 +316,7 @@ def train(
             data.review_data.elapsed_days_real,
             data.review_data.rating,
             data.review_data.seq_len,
-            state_buffer,
+            THREADS_PER_BLOCK,
             batch_num_inner_batches,
         )
 
@@ -419,7 +415,15 @@ def main() -> None:
         user_max_train_split_lengths,
         split_factor_k,
     )
-    user_splits.reverse()
+    # user_splits.reverse()
+    new_user_splits = []
+    for l in user_splits:
+        import random
+        x = [z for z in l]
+        random.shuffle(x)
+        new_user_splits.append(l)   
+        new_user_splits.append(x)   
+    user_splits = new_user_splits
 
     # user_splits = [users]  # overwrite
     cache_env = load_or_rebuild_tensor_cache(env, user_splits)

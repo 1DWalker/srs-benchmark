@@ -69,6 +69,13 @@ torch::Tensor fsrs7_test(
 }
 
 constexpr int THREADS_PER_BLOCK = 128; // must be a multiple of 32 and a divisor of the batch size
+constexpr int64_t TRAIN_SCRATCH_BYTES = 500LL * 1000LL * 1000LL;
+static_assert(
+    TRAIN_SCRATCH_BYTES % static_cast<int64_t>(sizeof(fsrs_state_t)) == 0,
+    "train scratch size must be a whole number of fsrs_state_t values"
+);
+constexpr int64_t TRAIN_SCRATCH_STATES =
+    TRAIN_SCRATCH_BYTES / static_cast<int64_t>(sizeof(fsrs_state_t));
 StateBuffer<fsrs_state_t> state_buffer;
 
 torch::Tensor fsrs7_train(
@@ -127,8 +134,7 @@ torch::Tensor fsrs7_train_dispatch(
     const torch::Tensor& seq_len_UxT,
     const torch::Tensor& seq_len_Ux_max,
     const torch::Tensor& seq_len_Ux_max_cumsum,
-    const torch::Tensor& fsrs_params_UP,
-    const torch::Tensor& state_buffer_tensor
+    const torch::Tensor& fsrs_params_UP
 ) {
     check_sample_tensor(elapsed_days_real_flat, "elapsed_days_real_flat", torch::kFloat32);
     check_sample_tensor(rating_flat, "rating_flat", torch::kInt8);
@@ -137,7 +143,6 @@ torch::Tensor fsrs7_train_dispatch(
     check_sample_tensor(seq_len_Ux_max, "seq_len max", torch::kInt32);
     check_sample_tensor(seq_len_Ux_max_cumsum, "seq_len max cumsum", torch::kInt32);
     check_sample_tensor(fsrs_params_UP, "fsrs_params", torch::kFloat32);
-    check_sample_tensor(state_buffer_tensor, "state_buffer", torch::kFloat32);
 
     const int U = seq_len_UxT.size(0);
     const int x = seq_len_UxT.size(1);
@@ -146,6 +151,7 @@ torch::Tensor fsrs7_train_dispatch(
     TORCH_CHECK(T == THREADS_PER_BLOCK, "seq_len_UxT last dimension must equal THREADS_PER_BLOCK");
 
     c10::cuda::CUDAGuard device_guard(elapsed_days_real_flat.device());
+    fsrs_state_t *state_buffer_ptr = state_buffer.ensure(TRAIN_SCRATCH_STATES);
     torch::Tensor grad = torch::zeros(
         {U, x * T, P},
         fsrs_params_UP.options()
@@ -163,7 +169,7 @@ torch::Tensor fsrs7_train_dispatch(
         x,
         THREADS_PER_BLOCK,
         at::cuda::getCurrentCUDAStream().stream(),
-        reinterpret_cast<fsrs_state_t*>(state_buffer_tensor.data_ptr<float>()),
+        state_buffer_ptr,
         reinterpret_cast<fsrs_params_t*>(grad.data_ptr<float>())
     );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -184,8 +190,7 @@ TORCH_LIBRARY(srs, m) {
         "Tensor seq_len_UxT, "
         "Tensor seq_len_Ux_max, "
         "Tensor seq_len_Ux_max_cumsum, "
-        "Tensor fsrs_params_UP, "
-        "Tensor state_buffer"
+        "Tensor fsrs_params_UP"
         ") -> Tensor"
     );
 }
