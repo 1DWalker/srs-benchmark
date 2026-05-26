@@ -11,7 +11,6 @@ import time
 
 from parallel import adamw, scheduler, srs_ops
 from parallel.config import (
-    BATCH_PERM_SEED,
     BATCH_SIZE,
     LMDB_PATH,
     LMDB_SIZE,
@@ -20,12 +19,15 @@ from parallel.config import (
     N_SPLITS,
     TEST_BATCH_SIZE_MAX,
     TRAIN_BUFFER_SIZE_GB,
+    USER_END,
     USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
+    USER_START,
 )
 from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.models import fsrs_v7, fsrs_v7_constants
 from parallel.tensor_cache import (
     TrainSetup,
+    build_batch_perm_cat_for_users,
     load_cached_review_data,
     load_cached_test_only,
     load_cached_train_only,
@@ -142,7 +144,7 @@ def run_cpp_train_pass(
     )
 
 
-@torch.compile(fullgraph=True)
+# @torch.compile(fullgraph=True)
 def train_iter(
     flat_fsrs_params: torch.Tensor,
     optim_state: adamw.AdamWState,
@@ -238,17 +240,12 @@ def build_train_setup(data: Data, users: list[int]) -> TrainSetup:
     num_training_steps_per_epoch_cat = (train_split_lengths_cat + BATCH_SIZE - 1) // BATCH_SIZE
     num_training_steps_cat = N_EPOCHS * num_training_steps_per_epoch_cat
 
-    generator = torch.Generator()
-    generator.manual_seed(BATCH_PERM_SEED)
-    batch_perm_parts = [
-        torch.randperm(int(n), generator=generator)
-        for n in num_training_steps_per_epoch_cat.cpu().numpy()
-        for _ in range(N_EPOCHS)
-    ]
-    if batch_perm_parts:
-        batch_perm_cat = torch.cat(batch_perm_parts).to(DEVICE)
-    else:
-        batch_perm_cat = torch.empty(0, dtype=torch.int64, device=DEVICE)
+    batch_perm_cat = torch.from_numpy(
+        build_batch_perm_cat_for_users(
+            users,
+            num_training_steps_per_epoch_cat.cpu().numpy(),
+        )
+    ).to(DEVICE)
 
     batch_perm_user_flat_offset = torch.nn.functional.pad(
         torch.cumsum(num_training_steps_cat.to(dtype=torch.int64), dim=-1)[:-1],
@@ -407,11 +404,10 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 100))
-    # users = [1, 2]
+    users = list(range(USER_START, USER_END + 1))
     # TODO get length metadata, sort by users, run
 
-    split_factor_k = 1
+    split_factor_k = 2
     with env.begin(write=False) as txn:
         user_max_train_split_lengths = load_metadata_tensor(
             txn,
@@ -424,7 +420,8 @@ def main() -> None:
         split_factor_k,
     )
     user_splits.reverse()
-    user_splits = [users]  # overwrite
+
+    # user_splits = [users]  # overwrite
     cache_env = load_or_rebuild_tensor_cache(env, user_splits)
     try:
         for split_i, user_subset in enumerate(user_splits):

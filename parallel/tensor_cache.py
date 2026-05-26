@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import json
 import math
@@ -67,6 +68,48 @@ def _ceil_div(a: int, b: int) -> int:
 
 def _numel(shape: tuple[int, ...]) -> int:
     return math.prod(shape)
+
+
+def build_user_batch_perm(
+    user_id: int,
+    num_training_steps_per_epoch: np.ndarray,
+) -> np.ndarray:
+    steps = np.asarray(num_training_steps_per_epoch, dtype=np.int64).reshape(-1)
+    out = np.empty(int(steps.sum()) * N_EPOCHS, dtype=np.int64)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(BATCH_PERM_SEED + int(user_id))
+
+    offset = 0
+    for steps_per_epoch in steps:
+        n = int(steps_per_epoch)
+        for _ in range(N_EPOCHS):
+            next_offset = offset + n
+            if n > 0:
+                out[offset:next_offset] = torch.randperm(n, generator=generator).numpy()
+            offset = next_offset
+
+    return out
+
+
+def build_batch_perm_cat_for_users(
+    user_ids: Sequence[int],
+    num_training_steps_per_epoch: np.ndarray,
+) -> np.ndarray:
+    steps = np.asarray(num_training_steps_per_epoch, dtype=np.int64).reshape(-1)
+    if len(user_ids) == 0:
+        return np.empty(0, dtype=np.int64)
+
+    steps_by_user = steps.reshape(len(user_ids), N_SPLITS)
+    out = np.empty(int(steps.sum()) * N_EPOCHS, dtype=np.int64)
+
+    offset = 0
+    for user_id, user_steps in zip(user_ids, steps_by_user, strict=True):
+        user_perm = build_user_batch_perm(int(user_id), user_steps)
+        next_offset = offset + user_perm.size
+        out[offset:next_offset] = user_perm
+        offset = next_offset
+
+    return out
 
 
 def _open_cache_env(
@@ -281,7 +324,7 @@ def _rebuild_tensor_cache(
             lambda split_i, infos: _build_flat_field(source_env, cache_env, split_i, infos, "split", "splits"),
         ),
         ("derived", lambda split_i, infos: _build_small_derived_tensors(cache_env, split_i, infos)),
-        ("train_setup", lambda split_i, infos: _build_train_setup(cache_env, split_i)),
+        ("train_setup", lambda split_i, infos: _build_train_setup(cache_env, split_i, infos)),
     ]
 
     for split_i, users in enumerate(tqdm(user_splits, desc="Tensor cache splits", smoothing=0.03)):
@@ -320,8 +363,8 @@ def _read_user_info(txn: lmdb.Transaction, user_id: int) -> _SourceUserInfo:
 
 
 def _put_cache_array(cache_env: lmdb.Environment, split_i: int, name: str, array: np.ndarray) -> None:
-    size_gb = array.nbytes / 1_000_000_000
-    tqdm.write(f"split {split_i + 1}: writing {name} ({size_gb:.3f} GB)")
+    # size_gb = array.nbytes / 1_000_000_000
+    # tqdm.write(f"split {split_i + 1}: writing {name} ({size_gb:.3f} GB)")
 
     def on_chunk_write(chunk_i: int, chunk_count: int, chunk_bytes: int) -> None:
         if chunk_count > 1:
@@ -457,7 +500,11 @@ def _build_small_derived_tensors(
     del user_flat_offset
 
 
-def _build_train_setup(cache_env: lmdb.Environment, split_i: int) -> None:
+def _build_train_setup(
+    cache_env: lmdb.Environment,
+    split_i: int,
+    infos: list[_SourceUserInfo],
+) -> None:
     with cache_env.begin(write=False, buffers=True) as cache_txn:
         train_split_lengths = get_array(
             cache_txn,
@@ -497,7 +544,7 @@ def _build_train_setup(cache_env: lmdb.Environment, split_i: int) -> None:
             json.dumps(batch_num_inner_batches).encode(),
         )
 
-    _build_batch_perm_cat(cache_env, split_i, num_training_steps_per_epoch, num_training_steps)
+    _build_batch_perm_cat(cache_env, split_i, infos, num_training_steps_per_epoch, num_training_steps)
     del train_split_lengths
     del num_training_steps_per_epoch
     del num_training_steps
@@ -524,23 +571,12 @@ def _batch_num_inner_batches(num_training_steps: np.ndarray) -> int:
 def _build_batch_perm_cat(
     cache_env: lmdb.Environment,
     split_i: int,
+    infos: list[_SourceUserInfo],
     num_training_steps_per_epoch: np.ndarray,
     num_training_steps: np.ndarray,
 ) -> None:
-    total = int(num_training_steps.sum())
-    out = np.empty(total, dtype=np.int64)
-    generator = torch.Generator()
-    generator.manual_seed(BATCH_PERM_SEED)
-
-    offset = 0
-    for steps_per_epoch in num_training_steps_per_epoch:
-        n = int(steps_per_epoch)
-        for _ in range(N_EPOCHS):
-            perm = torch.randperm(n, generator=generator).numpy()
-            next_offset = offset + n
-            out[offset:next_offset] = perm
-            offset = next_offset
-            del perm
-
+    user_ids = [info.user_id for info in infos]
+    out = build_batch_perm_cat_for_users(user_ids, num_training_steps_per_epoch)
+    assert out.size == int(num_training_steps.sum())
     _put_cache_array(cache_env, split_i, "batch_perm_cat", out)
     del out

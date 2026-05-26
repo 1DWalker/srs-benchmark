@@ -26,7 +26,7 @@ from parallel.config import (
     LMDB_PATH,
     LMDB_SIZE,
     N_SPLITS,
-    USER_IDS,
+    PREPARE_USER_IDS,
     USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
 )
 from models.model_factory import create_model
@@ -414,7 +414,7 @@ def main() -> None:
     parser = create_parser()
     args, _ = parser.parse_known_args()
     config = Config(args)
-    user_ids = USER_IDS
+    user_ids = PREPARE_USER_IDS
 
     executor = ProcessPoolExecutor(
         max_workers=config.num_processes,
