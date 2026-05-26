@@ -218,33 +218,31 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         print("prepare iteration", time.time() - ts)
         ts = time.time()
 
-        for l in [0]:
-            re = seq_lens.size(0)
-            batch_indices = indices[l:re]
-            batch_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))[batch_indices]
-            batch_epoch_lens = train_split_lengths_cat[batch_indices]
-            assert (batch_epoch_lens > 0).all()
-            start_indices = review_data_indices - seq_lens + 1
-            out = run_cpp_train_pass(
-                data.review_data.elapsed_days_real, 
-                data.review_data.rating, 
-                start_indices,
-                seq_lens,
-                batch_fsrs_params,
-            )
-            assert not out.isnan().any()
-            grad = (out * legal.unsqueeze(-1)).sum(dim=1)
-            batch_fsrs_params.backward(grad)
+        batch_indices = indices
+        batch_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))[batch_indices]
+        batch_epoch_lens = train_split_lengths_cat[batch_indices]
+        assert (batch_epoch_lens > 0).all()
+        start_indices = review_data_indices - seq_lens + 1
+        out = run_cpp_train_pass(
+            data.review_data.elapsed_days_real, 
+            data.review_data.rating, 
+            start_indices,
+            seq_lens,
+            batch_fsrs_params,
+        )
+        assert not out.isnan().any()
+        grad = (out * legal.unsqueeze(-1)).sum(dim=1)
+        batch_fsrs_params.backward(grad)
 
-            # TODO l2 loss
+        # TODO l2 loss
 
-            # print(batch_fsrs_params.shape)
-            # torch.cuda.synchronize()
-            # tl2 = time.time()
-            # l2_grad = fsrs_v7.l2_penalty_per_review(batch_fsrs_params, batch_epoch_lens)
-            # l2_grad.sum().backward()
-            # torch.cuda.synchronize()
-            # print("L2 time", time.time() - tl2)
+        # print(batch_fsrs_params.shape)
+        # torch.cuda.synchronize()
+        # tl2 = time.time()
+        # l2_grad = fsrs_v7.l2_penalty_per_review(batch_fsrs_params, batch_epoch_lens)
+        # l2_grad.sum().backward()
+        # torch.cuda.synchronize()
+        # print("L2 time", time.time() - tl2)
 
         # print(fsrs_params.grad)
         # exit()
