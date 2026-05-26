@@ -127,14 +127,13 @@ def run_cpp_train_pass(elapsed_days_real, rating, start_indices, seq_lens, batch
     seq_lens_Ux_max = seq_lens_UxT.max(dim=-1).values
     # seq_lens_Ux_max_cumsum = seq_lens_UxT_max.view(-1).cumsum(dim=-1).view(U, B // THREADS_PER_BLOCK)
     flat = seq_lens_Ux_max.view(-1)
+    seq_lens_Ux_max_cumsum_inc = (flat * THREADS_PER_BLOCK).cumsum(dim=0, dtype=torch.int32)
     seq_lens_Ux_max_cumsum = torch.nn.functional.pad(
-        (flat * THREADS_PER_BLOCK).cumsum(dim=0, dtype=torch.int32)[:-1],
+        seq_lens_Ux_max_cumsum_inc[:-1],
         (1, 0),
         value=0,
     ).view(U, B // THREADS_PER_BLOCK)
-    buffer_req_size = seq_lens_Ux_max_cumsum[-1, -1].item()
-    print(seq_lens_Ux_max)
-    print(seq_lens_Ux_max_cumsum)
+    buffer_req_size = seq_lens_Ux_max_cumsum_inc[-1].item()
     return enzyme_sample.fsrs7_train(
         elapsed_days_real, 
         rating, 
@@ -244,17 +243,14 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
             assert (batch_epoch_lens > 0).all()
             # batch_review_data_indices = review_data_indices_filtered[slice]
             batch_review_data_indices = review_data_indices[l:re]
-            print(batch_review_data_indices.shape, batch_fsrs_params.shape, batch_indices.shape, legal.shape)
-            print(seq_lens.shape)
+            # print(batch_review_data_indices.shape, batch_fsrs_params.shape, batch_indices.shape, legal.shape)
+            # print(seq_lens.shape)
             seq_lens_u_cumsum = seq_lens.cumsum(dim=-1)
-            print(seq_lens_u_cumsum)
             seq_lens_cumsum = seq_lens_u_cumsum[:, -1].cumsum(dim=-1)
             # print(seq_lens_cumsum)
-            print(seq_lens_cumsum[-1], train_buffer_float_size)
             start_indices = review_data_indices - seq_lens + 1
-            print(start_indices)
-            torch.cuda.synchronize()
-            ts = time.time()
+            # torch.cuda.synchronize()
+            # ts = time.time()
             out = run_cpp_train_pass(
                 data.review_data.elapsed_days_real, 
                 data.review_data.rating, 
@@ -263,15 +259,16 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
                 batch_fsrs_params,
             )
             assert not out.isnan().any()
-            print(legal)
-            print(out.shape, legal.shape)
+            # print(out.shape, legal.shape)
+            # print(legal)
+            # print(out)
             grad = (out * legal.unsqueeze(-1)).sum(dim=1)
-            torch.cuda.synchronize()
-            print("HERE", time.time() - ts)
+            batch_fsrs_params.backward(grad)
+            # torch.cuda.synchronize()
+            # print("HERE", time.time() - ts)
             # print(out)
             # print(grad)
-            exit()
-            print("intermediate", time.time() - ts)
+            # print("intermediate", time.time() - ts)
             # p, loss, grad = predict_loss_grad(data.review_data, batch_review_data_indices, batch_fsrs_params, batch_epoch_lens)
             # assert not p.isnan().any()
             # torch.cuda.synchronize()
@@ -306,22 +303,22 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
 
         # TODO ADAMW betas
 
-        # with torch.no_grad():
-        #     if fsrs_params.grad.isnan().any():
-        #         print(fsrs_params.grad.cpu().detach().tolist())
-        #     assert not fsrs_params.grad.isnan().any()
-        #     flat_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))
-        #     flat_grad = fsrs_params.grad.view_as(flat_fsrs_params)
-        #     new_flat_fsrs_params, optim_state = adamw.adamw_step(
-        #         flat_fsrs_params,
-        #         flat_grad,
-        #         optim_state,
-        #         lr=lr_schedule_multi,
-        #         mask=active_params_mask,
-        #     )
-        #     new_flat_fsrs_params_clipped = fsrs_v7_constants.apply_parameter_clipper(new_flat_fsrs_params)
-        #     flat_fsrs_params.copy_(new_flat_fsrs_params_clipped)
-        #     assert not flat_fsrs_params.isnan().any()
+        with torch.no_grad():
+            if fsrs_params.grad.isnan().any():
+                print(fsrs_params.grad.cpu().detach().tolist())
+            assert not fsrs_params.grad.isnan().any()
+            flat_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))
+            flat_grad = fsrs_params.grad.view_as(flat_fsrs_params)
+            new_flat_fsrs_params, optim_state = adamw.adamw_step(
+                flat_fsrs_params,
+                flat_grad,
+                optim_state,
+                lr=lr_schedule_multi,
+                mask=active_params_mask,
+            )
+            new_flat_fsrs_params_clipped = fsrs_v7_constants.apply_parameter_clipper(new_flat_fsrs_params)
+            flat_fsrs_params.copy_(new_flat_fsrs_params_clipped)
+            assert not flat_fsrs_params.isnan().any()
 
         fsrs_params.grad = None
         step_i_cat[indices] += 1
@@ -415,7 +412,7 @@ def run(
 
     # fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
     initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
-    fsrs_params = initial_params.view(1, 1, -1).repeat(len(users), N_SPLITS, 1)
+    fsrs_params = initial_params.view(1, 1, -1).repeat(len(users), N_SPLITS, 1).requires_grad_(True)
     fsrs_params = train(fsrs_params, users, data)
 
     print("skip test")
