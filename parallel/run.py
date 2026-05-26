@@ -27,7 +27,7 @@ from parallel.tensors import Data, DataBuilder, ParamKey, ReviewData, UserTensor
 
 enzyme_sample = srs_ops.enzyme_sample
 THREADS_PER_BLOCK = srs_ops.THREADS_PER_BLOCK
-TRAIN_BUFFER_FLOAT_SIZE = TRAIN_BUFFER_SIZE_GB * 1_000_000_000 // 4
+TRAIN_BUFFER_FLOAT_SIZE = int(TRAIN_BUFFER_SIZE_GB * 1_000_000_000) // 4
 
 def ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
@@ -147,7 +147,7 @@ def run_cpp_train_pass(
     )
 
 
-@torch.compile(fullgraph=True, dynamic=False)
+@torch.compile(fullgraph=True)
 def train_iter(
     flat_fsrs_params: torch.Tensor,
     optim_state: adamw.AdamWState,
@@ -240,12 +240,9 @@ def train_iter(
 
 def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("start train")
-    print(data.train_split_lengths)
     train_split_lengths_cat = data.train_split_lengths
     num_training_steps_per_epoch_cat = (train_split_lengths_cat + BATCH_SIZE - 1) // BATCH_SIZE
     num_training_steps_cat = N_EPOCHS * num_training_steps_per_epoch_cat
-    print(num_training_steps_per_epoch_cat)
-    
     batch_perm_cat = torch.cat([torch.randperm(n) for n in num_training_steps_per_epoch_cat.cpu().numpy() for _ in range(N_EPOCHS)]).to(DEVICE)
     # Map: (user, split) -> batch_perm_cat start index
     batch_perm_user_flat_offset = torch.nn.functional.pad(
@@ -258,16 +255,10 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         torch.cumsum(train_split_lengths_cat, dim=-1)[:-1],
         (1, 0),
     ).view(len(users), N_SPLITS)
-
-    print(batch_perm_user_flat_offset)
-    print(batch_perm_cat, len(batch_perm_cat))
     train_splits_length_cat_sum = int(num_training_steps_cat.sum().item())
     train_splits_length_cat_max = int(num_training_steps_cat.max().item())
     batch_num_inner_batches = ceil_div(train_splits_length_cat_sum, train_splits_length_cat_max)
     
-    print(num_training_steps_cat)
-    print("Inner batches per batch:", batch_num_inner_batches, "Train iters (max):", train_splits_length_cat_max)
-    # exit()
     step_i_cat = torch.zeros_like(num_training_steps_cat)
     flat_fsrs_params = fsrs_params.detach().view(-1, fsrs_params.size(-1))
     optim_state = adamw.init_adamw_state(flat_fsrs_params)
@@ -304,7 +295,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     param_keys = data.get_test_index_param_key()
 
     test_seq_len = data.review_data.seq_len[data.test_index]
-    sorted_test_seq_len, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True, descending=True)
+    _, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True, descending=True)
     torch.cuda.synchronize()
     print("sort done", time.time() - ts)
 
@@ -313,25 +304,12 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     num_batches = ceil_div(N, TEST_BATCH_SIZE_MAX)
     batch_size = ceil_div(N, num_batches)
     gather_p = []
-    # batches = get_batches_test(sorted_test_seq_len)
-    # print(batches)
 
-    # enzyme_sample.fsrs7_forward(
-    #     data.review_data.elapsed_days_real, 
-    #     data.review_data.rating, 
-    #     data.review_data.seq_len, 
-    #     sorted_test_index_permutation,
-    # )
-    # exit()
-    # for (l, re) in tqdm(batches, desc="Test set", smoothing=0.03):
     for perm_slice in tqdm(sorted_test_index_permutation.split(batch_size), desc="Test set", smoothing=0.03):
-        # perm_slice = sorted_test_index_permutation[l:re]
         batch_fsrs_params = fsrs_params[param_keys.user_index[perm_slice], param_keys.split_index[perm_slice]]
-        # p = predict(data.review_data, data.test_index[perm_slice], batch_fsrs_params)
         test_index_perm_slice = data.test_index[perm_slice]
         seq_lens = data.review_data.seq_len[test_index_perm_slice]
         start_indices = test_index_perm_slice - seq_lens + 1
-        # print(seq_lens.size(0))
         p = enzyme_sample.fsrs7_test(
                 data.review_data.elapsed_days_real, 
                 data.review_data.rating, 
@@ -393,7 +371,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 1000))
+    users = list(range(1, 5000))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
