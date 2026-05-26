@@ -334,7 +334,6 @@ def train(
 
 def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("eval on test")
-    torch.cuda.synchronize()
     torch.cuda.empty_cache()
     tz = time.time()
     ts = time.time()
@@ -343,8 +342,6 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     # test_seq_len = data.review_data.seq_len[data.test_index]
     test_seq_len = data.review_data.seq_len[data.test_index].size(0)
     # _, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True, descending=True)
-    torch.cuda.synchronize()
-    print("sort done", time.time() - ts)
 
     # TODO use the same load balancing as training
     N = data.test_index.size(0)
@@ -367,9 +364,6 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
                 batch_fsrs_params,
             )
         gather_p.append(p)
-
-    torch.cuda.synchronize()
-    print("took", time.time() - tz)
     
     # restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
     # restore_test_index_permutation[sorted_test_index_permutation] = torch.arange(
@@ -385,12 +379,13 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     # time.sleep(10)
     # exit()
 
-    p_by_user = p_concat.split(data.test_index_lens)
-    label_by_user = (data.review_data.rating[data.test_index] > 1).split(data.test_index_lens)
+    label = data.review_data.rating[data.test_index] > 1
 
-    # for user, pred, label in zip(users, p_by_user, label_by_user):
-    #     logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
-    #     print(f"User: {user}, logloss={logloss:.3f}")
+    p_by_user = p_concat.split(data.test_index_lens)
+    label_by_user = label.split(data.test_index_lens)
+    for user, pred, label in zip(users, p_by_user, label_by_user):
+        logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
+        print(f"User: {user}, logloss={logloss:.3f}")
 
 def run(
     users: list[int],
@@ -412,7 +407,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 5000))
+    users = list(range(1, 100))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
