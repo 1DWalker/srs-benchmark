@@ -3,6 +3,7 @@
 #include <c10/cuda/CUDAException.h>
 #include <cuda_runtime_api.h>
 #include <torch/extension.h>
+#include <torch/library.h>
 #include <stdio.h>
 #include "buffer.hpp"
 
@@ -119,8 +120,78 @@ torch::Tensor fsrs7_train(
     return grad;
 }
 
+torch::Tensor fsrs7_train_dispatch(
+    const torch::Tensor& elapsed_days_real_flat,
+    const torch::Tensor& rating_flat,
+    const torch::Tensor& start_index_UxT,
+    const torch::Tensor& seq_len_UxT,
+    const torch::Tensor& seq_len_Ux_max,
+    const torch::Tensor& seq_len_Ux_max_cumsum,
+    const torch::Tensor& fsrs_params_UP,
+    const torch::Tensor& state_buffer_tensor
+) {
+    check_sample_tensor(elapsed_days_real_flat, "elapsed_days_real_flat", torch::kFloat32);
+    check_sample_tensor(rating_flat, "rating_flat", torch::kInt8);
+    check_sample_tensor(start_index_UxT, "start index", torch::kInt32);
+    check_sample_tensor(seq_len_UxT, "seq_len", torch::kInt32);
+    check_sample_tensor(seq_len_Ux_max, "seq_len max", torch::kInt32);
+    check_sample_tensor(seq_len_Ux_max_cumsum, "seq_len max cumsum", torch::kInt32);
+    check_sample_tensor(fsrs_params_UP, "fsrs_params", torch::kFloat32);
+    check_sample_tensor(state_buffer_tensor, "state_buffer", torch::kFloat32);
+
+    const int U = seq_len_UxT.size(0);
+    const int x = seq_len_UxT.size(1);
+    const int T = seq_len_UxT.size(2);
+    const int P = fsrs_params_UP.size(1);
+    TORCH_CHECK(T == THREADS_PER_BLOCK, "seq_len_UxT last dimension must equal THREADS_PER_BLOCK");
+
+    c10::cuda::CUDAGuard device_guard(elapsed_days_real_flat.device());
+    torch::Tensor grad = torch::zeros(
+        {U, x * T, P},
+        fsrs_params_UP.options()
+    );
+
+    fsrs_train_cuda(
+        elapsed_days_real_flat.data_ptr<float>(),
+        rating_flat.data_ptr<int8_t>(),
+        start_index_UxT.data_ptr<int32_t>(),
+        seq_len_UxT.data_ptr<int32_t>(),
+        seq_len_Ux_max.data_ptr<int32_t>(),
+        seq_len_Ux_max_cumsum.data_ptr<int32_t>(),
+        reinterpret_cast<const fsrs_params_t*>(fsrs_params_UP.data_ptr<float>()),
+        U,
+        x,
+        THREADS_PER_BLOCK,
+        at::cuda::getCurrentCUDAStream().stream(),
+        reinterpret_cast<fsrs_state_t*>(state_buffer_tensor.data_ptr<float>()),
+        reinterpret_cast<fsrs_params_t*>(grad.data_ptr<float>())
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    return grad;
+}
+
 int threads_per_block() {
     return THREADS_PER_BLOCK;
+}
+
+TORCH_LIBRARY(srs, m) {
+    m.def(
+        "fsrs7_train("
+        "Tensor elapsed_days_real_flat, "
+        "Tensor rating_flat, "
+        "Tensor start_index_UxT, "
+        "Tensor seq_len_UxT, "
+        "Tensor seq_len_Ux_max, "
+        "Tensor seq_len_Ux_max_cumsum, "
+        "Tensor fsrs_params_UP, "
+        "Tensor state_buffer"
+        ") -> Tensor"
+    );
+}
+
+TORCH_LIBRARY_IMPL(srs, CUDA, m) {
+    m.impl("fsrs7_train", &fsrs7_train_dispatch);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
