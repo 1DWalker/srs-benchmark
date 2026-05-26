@@ -24,7 +24,7 @@ from parallel.tensor_lmdb import (
     get_array,
     get_tensor,
     get_tensor_meta,
-    put_array,
+    put_array_to_env,
     user_tensor_prefix,
 )
 from parallel.tensors import Data, ReviewData
@@ -277,8 +277,21 @@ def _read_user_info(txn: lmdb.Transaction, user_id: int) -> _SourceUserInfo:
 def _put_cache_array(cache_env: lmdb.Environment, split_i: int, name: str, array: np.ndarray) -> None:
     size_gb = array.nbytes / 1_000_000_000
     tqdm.write(f"split {split_i + 1}: writing {name} ({size_gb:.3f} GB)")
-    with cache_env.begin(write=True) as cache_txn:
-        put_array(cache_txn, _cache_tensor_prefix(split_i, name), array)
+
+    def on_chunk_write(chunk_i: int, chunk_count: int, chunk_bytes: int) -> None:
+        if chunk_count > 1:
+            chunk_gb = chunk_bytes / 1_000_000_000
+            tqdm.write(
+                f"split {split_i + 1}: writing {name} chunk "
+                f"{chunk_i + 1}/{chunk_count} ({chunk_gb:.3f} GB)"
+            )
+
+    put_array_to_env(
+        cache_env,
+        _cache_tensor_prefix(split_i, name),
+        array,
+        on_chunk_write=on_chunk_write,
+    )
 
 
 def _build_review_field(

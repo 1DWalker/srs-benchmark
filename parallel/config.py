@@ -4,9 +4,9 @@ from pathlib import Path
 
 
 LMDB_PATH = Path("parallel_db")
-LMDB_SIZE = 50_000_000_000
+LMDB_SIZE = 32_569_171_968
 TENSOR_CACHE_PATH = Path("/tensor-cache/lmdb")
-TENSOR_CACHE_SIZE = 100_000_000_000
+TENSOR_CACHE_SIZE = 22_319_083_520
 TENSOR_CACHE_VERSION = 1
 USER_IDS = list(range(1, 10001))
 DEVICE = "cuda"
