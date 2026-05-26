@@ -16,6 +16,9 @@ services:
         source: ../anki-revlogs-10k
         target: /anki-revlogs-10k
         read_only: true
+      - type: volume
+        source: tensor-cache
+        target: /tensor-cache
     deploy:
       resources:
         reservations:
@@ -23,3 +26,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+volumes:
+  tensor-cache:
