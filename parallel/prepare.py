@@ -433,7 +433,7 @@ def main() -> None:
             for idx, future in enumerate(futures)
         }
 
-        for future in tqdm(as_completed(futures), total=len(futures), smoothing=0.03):
+        for future in tqdm(as_completed(futures), total=len(futures), smoothing=0.1):
             user_max_train_split_lengths[future_to_index[future]] = future.result()
     except KeyboardInterrupt:
         stop_executor_now(executor, futures)

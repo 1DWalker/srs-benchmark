@@ -377,9 +377,9 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     p_by_user = p_concat.split(data.test_index_lens)
     label_by_user = (data.review_data.rating[data.test_index] > 1).split(data.test_index_lens)
 
-    for user, pred, label in zip(users, p_by_user, label_by_user):
-        logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
-        print(f"User: {user}, logloss={logloss:.3f}")
+    # for user, pred, label in zip(users, p_by_user, label_by_user):
+        # logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
+        # print(f"User: {user}, logloss={logloss:.3f}")
 
 def run(
     users: list[int],
@@ -405,11 +405,11 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 10000))
+    users = list(range(1, 10001))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
-    split_factor_k = 3
+    split_factor_k = 2
     with env.begin(write=False) as txn:
         user_max_train_split_lengths = load_metadata_tensor(
             txn,
@@ -421,6 +421,7 @@ def main() -> None:
         user_max_train_split_lengths,
         split_factor_k,
     )
+    # user_splits = [users]  # overwrite
     cache_env = load_or_rebuild_tensor_cache(env, user_splits)
     try:
         for split_i, user_subset in enumerate(user_splits):

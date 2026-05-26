@@ -9,6 +9,7 @@ from pathlib import Path
 import lmdb
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from parallel.config import (
     BATCH_PERM_SEED,
@@ -190,20 +191,75 @@ def _rebuild_tensor_cache(
     cache_env: lmdb.Environment,
     user_splits: list[list[int]],
 ) -> None:
-    for split_i, users in enumerate(user_splits):
-        print(f"rebuilding tensor cache split {split_i + 1}/{len(user_splits)}")
-        with source_env.begin(write=False) as source_txn:
-            infos = [_read_user_info(source_txn, user_id) for user_id in users]
+    build_steps = [
+        ("rating", lambda split_i, infos: _build_review_field(source_env, cache_env, split_i, infos, "rating")),
+        (
+            "elapsed_days_real",
+            lambda split_i, infos: _build_review_field(
+                source_env,
+                cache_env,
+                split_i,
+                infos,
+                "elapsed_days_real",
+            ),
+        ),
+        ("seq_len", lambda split_i, infos: _build_review_field(source_env, cache_env, split_i, infos, "seq_len")),
+        (
+            "train_index",
+            lambda split_i, infos: _build_offset_index_field(
+                source_env,
+                cache_env,
+                split_i,
+                infos,
+                "train_index",
+                "train_index",
+            ),
+        ),
+        (
+            "train_split_lengths",
+            lambda split_i, infos: _build_train_split_lengths(source_env, cache_env, split_i, infos),
+        ),
+        (
+            "test_index",
+            lambda split_i, infos: _build_offset_index_field(
+                source_env,
+                cache_env,
+                split_i,
+                infos,
+                "test_index",
+                "test_index",
+            ),
+        ),
+        (
+            "splits",
+            lambda split_i, infos: _build_flat_field(source_env, cache_env, split_i, infos, "split", "splits"),
+        ),
+        ("derived", lambda split_i, infos: _build_small_derived_tensors(cache_env, split_i, infos)),
+        ("train_setup", lambda split_i, infos: _build_train_setup(cache_env, split_i)),
+    ]
 
-        _build_review_field(source_env, cache_env, split_i, infos, "rating")
-        _build_review_field(source_env, cache_env, split_i, infos, "elapsed_days_real")
-        _build_review_field(source_env, cache_env, split_i, infos, "seq_len")
-        _build_offset_index_field(source_env, cache_env, split_i, infos, "train_index", "train_index")
-        _build_train_split_lengths(source_env, cache_env, split_i, infos)
-        _build_offset_index_field(source_env, cache_env, split_i, infos, "test_index", "test_index")
-        _build_flat_field(source_env, cache_env, split_i, infos, "split", "splits")
-        _build_small_derived_tensors(cache_env, split_i, infos)
-        _build_train_setup(cache_env, split_i)
+    for split_i, users in enumerate(tqdm(user_splits, desc="Tensor cache splits", smoothing=0.03)):
+        tqdm.write(f"rebuilding tensor cache split {split_i + 1}/{len(user_splits)} ({len(users)} users)")
+        with source_env.begin(write=False) as source_txn:
+            infos = [
+                _read_user_info(source_txn, user_id)
+                for user_id in tqdm(
+                    users,
+                    desc=f"Split {split_i + 1} metadata",
+                    leave=False,
+                    smoothing=0.03,
+                )
+            ]
+
+        step_progress = tqdm(
+            build_steps,
+            desc=f"Split {split_i + 1} tensors",
+            leave=False,
+            smoothing=0.03,
+        )
+        for step_name, build_step in step_progress:
+            step_progress.set_postfix_str(step_name)
+            build_step(split_i, infos)
 
 
 def _read_user_info(txn: lmdb.Transaction, user_id: int) -> _SourceUserInfo:
