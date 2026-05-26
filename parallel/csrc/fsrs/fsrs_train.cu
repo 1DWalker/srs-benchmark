@@ -130,16 +130,19 @@ __global__ void fsrs_train_kernel(
     __shared__ int32_t _state_buffer_step;
     __shared__ int32_t _state_buffer_offset;
     const int32_t thread_i_within_block = threadIdx.y * blockDim.x + threadIdx.x;
-    // const int32_t i = blockDim.y * blockIdx.x + blockIdx.y + thread_i_within_block;
     const int32_t threads_per_block = blockDim.x * blockDim.y * blockDim.z;
     const int32_t i = idx3(blockIdx.x, blockIdx.y, thread_i_within_block, gridDim.y, threads_per_block);
 
     if (threadIdx.y == 0 && threadIdx.x == 0) {
         params = fsrs_params_p[blockIdx.x];
     }
-    if (threadIdx.y == 1 && threadIdx.x == 0) {
-        _state_buffer_offset = seq_len_max_cumsum[idx2(blockIdx.x, blockIdx.y, gridDim.y)];
-        _state_buffer_step = seq_len_max[idx2(blockIdx.x, blockIdx.y, gridDim.y)];
+    if (threadIdx.y == 1) {
+        if (threadIdx.x == 0) {
+            _state_buffer_offset = seq_len_max_cumsum[idx2(blockIdx.x, blockIdx.y, gridDim.y)];
+        }
+        if (threadIdx.x == 1) {
+            _state_buffer_step = seq_len_max[idx2(blockIdx.x, blockIdx.y, gridDim.y)];
+        }
     }
     __syncthreads();
 
