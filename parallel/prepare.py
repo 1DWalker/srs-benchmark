@@ -4,6 +4,7 @@ import multiprocessing as mp
 import os
 import signal
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import fields
 from io import BytesIO
 from pathlib import Path
 from typing import NamedTuple
@@ -29,6 +30,13 @@ from parallel.config import (
     USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
 )
 from models.model_factory import create_model
+from parallel.tensor_lmdb import (
+    get_tensor,
+    put_tensor,
+    tensor_field_keys,
+    user_done_key,
+    user_tensor_prefix,
+)
 from parallel.tensors import UserTensorBlob
 from utils import get_bin
 
@@ -38,6 +46,7 @@ BATCH_LOADER_SEED = 2023
 
 lmdb_env: lmdb.Environment | None = None
 worker_config: Config | None = None
+USER_TENSOR_FIELDS = tuple(field.name for field in fields(UserTensorBlob))
 
 
 class BenchmarkTensors(NamedTuple):
@@ -53,20 +62,26 @@ class RawTensorLayout(NamedTuple):
     raw_to_grouped_index: np.ndarray
 
 
-def save_user_blob(
+def save_user_tensors(
     txn: lmdb.Transaction,
     user_id: int,
     blob: UserTensorBlob,
 ) -> None:
-    buffer = BytesIO()
-    torch.save(blob.to_dict(), buffer)
-    txn.put(f"{user_id}_packed".encode(), buffer.getvalue())
+    for field_name in USER_TENSOR_FIELDS:
+        put_tensor(
+            txn,
+            user_tensor_prefix(user_id, field_name),
+            getattr(blob, field_name),
+        )
 
 
-def load_user_blob_bytes(blob_bytes: bytes) -> UserTensorBlob:
-    buffer = BytesIO(blob_bytes)
-    tensors = torch.load(buffer, weights_only=True, map_location="cpu")
-    return UserTensorBlob.from_dict(tensors)
+def load_user_blob_fields(txn: lmdb.Transaction, user_id: int) -> UserTensorBlob:
+    return UserTensorBlob.from_dict(
+        {
+            field_name: get_tensor(txn, user_tensor_prefix(user_id, field_name))
+            for field_name in USER_TENSOR_FIELDS
+        }
+    )
 
 
 def save_metadata_tensor(
@@ -344,10 +359,11 @@ def build_benchmark_tensors(
 
 
 def get_user_keys(user_id: int) -> list[str]:
-    return [
-        f"{user_id}_packed",
-        f"{user_id}_done",
-    ]
+    keys: list[bytes] = []
+    for field_name in USER_TENSOR_FIELDS:
+        keys.extend(tensor_field_keys(user_tensor_prefix(user_id, field_name)))
+    keys.append(user_done_key(user_id))
+    return [key.decode() for key in keys]
 
 
 def process_user(user_id: int) -> int:
@@ -359,12 +375,9 @@ def process_user(user_id: int) -> int:
     user_keys = get_user_keys(user_id)
     with lmdb_env.begin(write=False) as txn:
         if all(txn.get(key.encode()) is not None for key in user_keys):
-            blob_bytes = txn.get(f"{user_id}_packed".encode())
-            if blob_bytes is None:
-                return 0
             try:
-                blob = load_user_blob_bytes(blob_bytes)
-            except TypeError:
+                blob = load_user_blob_fields(txn, user_id)
+            except (KeyError, TypeError, RuntimeError):
                 blob = None
             if blob is not None and is_current_user_blob(blob, worker_config):
                 return get_max_train_split_length(blob)
@@ -389,8 +402,8 @@ def process_user(user_id: int) -> int:
 
     with lmdb_env.begin(write=True) as txn:
         blob = pack_user_tensors(raw_layout.tensors, benchmark_tensors)
-        save_user_blob(txn, user_id, blob)
-        txn.put(f"{user_id}_done".encode(), b"true")
+        save_user_tensors(txn, user_id, blob)
+        txn.put(user_done_key(user_id), b"true")
 
     return get_max_train_split_length(blob)
 

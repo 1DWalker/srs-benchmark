@@ -11,6 +11,7 @@ import time
 
 from parallel import adamw, scheduler, srs_ops
 from parallel.config import (
+    BATCH_PERM_SEED,
     BATCH_SIZE,
     LMDB_PATH,
     LMDB_SIZE,
@@ -23,7 +24,12 @@ from parallel.config import (
 )
 from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.models import fsrs_v7, fsrs_v7_constants
-from parallel.tensors import Data, DataBuilder, ParamKey, ReviewData, UserTensorBlob
+from parallel.tensor_cache import (
+    TrainSetup,
+    load_cached_split,
+    load_or_rebuild_tensor_cache,
+)
+from parallel.tensors import Data, ParamKey
 
 enzyme_sample = srs_ops.enzyme_sample
 THREADS_PER_BLOCK = srs_ops.THREADS_PER_BLOCK
@@ -31,11 +37,6 @@ TRAIN_BUFFER_FLOAT_SIZE = int(TRAIN_BUFFER_SIZE_GB * 1_000_000_000) // 4
 
 def ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
-
-def load_blob_bytes(blob_bytes: bytes, map_location: str | torch.device = "cpu") -> UserTensorBlob:
-    buffer = BytesIO(blob_bytes)
-    tensors = torch.load(buffer, weights_only=True, map_location=map_location)
-    return UserTensorBlob.from_dict(tensors)
 
 def load_metadata_tensor(
     txn: lmdb.Transaction,
@@ -51,73 +52,63 @@ def load_metadata_tensor(
         map_location=map_location,
     )
 
-def load_user_blob(
-    txn: lmdb.Transaction,
-    user_id: int,
-    map_location: str | torch.device = "cpu",
-) -> UserTensorBlob:
-    blob_bytes = txn.get(f"{user_id}_packed".encode())
-    if blob_bytes is None:
-        raise LookupError(f"Packed blob not found for user {user_id}.")
-    return load_blob_bytes(blob_bytes, map_location=map_location)
 
+def split_users_by_train_length(
+    users: list[int],
+    user_max_train_split_lengths: torch.Tensor,
+    k: int,
+) -> list[list[int]]:
+    if k <= 0:
+        raise ValueError("k must be positive.")
+    if not users:
+        return []
 
-# def split_users_by_train_length(
-#     users: list[int],
-#     user_max_train_split_lengths: torch.Tensor,
-#     k: int,
-# ) -> list[list[int]]:
-#     if k <= 0:
-#         raise ValueError("k must be positive.")
-#     if not users:
-#         return []
+    lengths = user_max_train_split_lengths.cpu().to(dtype=torch.int64)
+    user_tensor = torch.tensor(users, dtype=torch.int64)
+    if int(user_tensor.min().item()) < 1 or int(user_tensor.max().item()) > lengths.numel():
+        raise ValueError("users must be 1-indexed into user_max_train_split_lengths.")
 
-#     lengths = user_max_train_split_lengths.cpu().to(dtype=torch.int64)
-#     user_tensor = torch.tensor(users, dtype=torch.int64)
-#     if int(user_tensor.min().item()) < 1 or int(user_tensor.max().item()) > lengths.numel():
-#         raise ValueError("users must be 1-indexed into user_max_train_split_lengths.")
+    selected_lengths = lengths[user_tensor - 1]
+    sorted_lengths, order = torch.sort(selected_lengths, descending=True, stable=True)
+    sorted_users = user_tensor[order]
+    n = sorted_users.numel()
+    section_count = min(k, n)
 
-#     selected_lengths = lengths[user_tensor - 1]
-#     sorted_lengths, order = torch.sort(selected_lengths, descending=True, stable=True)
-#     sorted_users = user_tensor[order]
-#     n = sorted_users.numel()
+    if int(sorted_lengths.sum().item()) == 0:
+        return [
+            sorted_users[
+                round(n * i / section_count) : round(n * (i + 1) / section_count)
+            ].tolist()
+            for i in range(section_count)
+        ]
 
-#     section_count = min(k, n)
-#     if int(sorted_lengths.sum().item()) == 0:
-#         return [
-#             sorted_users[
-#                 round(n * i / section_count) : round(n * (i + 1) / section_count)
-#             ].tolist()
-#             for i in range(section_count)
-#         ]
+    prefix = torch.cumsum(sorted_lengths, dim=0)
+    prefix_float = prefix.to(dtype=torch.float64)
+    total = int(prefix[-1].item())
+    boundaries = [0]
+    for section in range(1, section_count):
+        target = total * section / section_count
+        boundary = int(
+            torch.searchsorted(
+                prefix_float,
+                torch.tensor(target, dtype=prefix_float.dtype),
+                right=False,
+            ).item()
+        ) + 1
+        if boundary > 1:
+            prev_sum = int(prefix[boundary - 2].item())
+            cur_sum = int(prefix[boundary - 1].item())
+            if abs(prev_sum - target) <= abs(cur_sum - target):
+                boundary -= 1
+        boundary = max(boundaries[-1] + 1, boundary)
+        boundary = min(boundary, n - (section_count - section))
+        boundaries.append(boundary)
+    boundaries.append(n)
 
-#     prefix = torch.cumsum(sorted_lengths, dim=0)
-#     prefix_float = prefix.to(dtype=torch.float64)
-#     total = int(prefix[-1].item())
-#     boundaries = [0]
-#     for section in range(1, section_count):
-#         target = total * section / section_count
-#         boundary = int(
-#             torch.searchsorted(
-#                 prefix_float,
-#                 torch.tensor(target, dtype=prefix_float.dtype),
-#                 right=False,
-#             ).item()
-#         ) + 1
-#         if boundary > 1:
-#             prev_sum = int(prefix[boundary - 2].item())
-#             cur_sum = int(prefix[boundary - 1].item())
-#             if abs(prev_sum - target) <= abs(cur_sum - target):
-#                 boundary -= 1
-#         boundary = max(boundaries[-1] + 1, boundary)
-#         boundary = min(boundary, n - (section_count - section))
-#         boundaries.append(boundary)
-#     boundaries.append(n)
-
-#     return [
-#         sorted_users[boundaries[i] : boundaries[i + 1]].tolist()
-#         for i in range(section_count)
-#     ]
+    return [
+        sorted_users[boundaries[i] : boundaries[i + 1]].tolist()
+        for i in range(section_count)
+    ]
 
 def run_cpp_train_pass(
     elapsed_days_real,
@@ -240,26 +231,75 @@ def train_iter(
     return new_flat_fsrs_params, new_optim_state, new_step_i_cat
 
 
-def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
-    print("start train")
+def build_train_setup(data: Data, users: list[int]) -> TrainSetup:
     train_split_lengths_cat = data.train_split_lengths
     num_training_steps_per_epoch_cat = (train_split_lengths_cat + BATCH_SIZE - 1) // BATCH_SIZE
     num_training_steps_cat = N_EPOCHS * num_training_steps_per_epoch_cat
-    batch_perm_cat = torch.cat([torch.randperm(n) for n in num_training_steps_per_epoch_cat.cpu().numpy() for _ in range(N_EPOCHS)]).to(DEVICE)
-    # Map: (user, split) -> batch_perm_cat start index
+
+    generator = torch.Generator()
+    generator.manual_seed(BATCH_PERM_SEED)
+    batch_perm_parts = [
+        torch.randperm(int(n), generator=generator)
+        for n in num_training_steps_per_epoch_cat.cpu().numpy()
+        for _ in range(N_EPOCHS)
+    ]
+    if batch_perm_parts:
+        batch_perm_cat = torch.cat(batch_perm_parts).to(DEVICE)
+    else:
+        batch_perm_cat = torch.empty(0, dtype=torch.int64, device=DEVICE)
+
     batch_perm_user_flat_offset = torch.nn.functional.pad(
-        torch.cumsum(num_training_steps_cat, dim=-1)[:-1],
+        torch.cumsum(num_training_steps_cat.to(dtype=torch.int64), dim=-1)[:-1],
+        (1, 0),
+    ).view(len(users), N_SPLITS)
+    train_split_lengths_offset = torch.nn.functional.pad(
+        torch.cumsum(train_split_lengths_cat.to(dtype=torch.int64), dim=-1)[:-1],
         (1, 0),
     ).view(len(users), N_SPLITS)
 
-    # Map: (user, split) -> data.train_index start index
-    train_split_lengths_offset = torch.nn.functional.pad(
-        torch.cumsum(train_split_lengths_cat, dim=-1)[:-1],
-        (1, 0),
-    ).view(len(users), N_SPLITS)
     train_splits_length_cat_sum = int(num_training_steps_cat.sum().item())
-    train_splits_length_cat_max = int(num_training_steps_cat.max().item())
-    batch_num_inner_batches = ceil_div(train_splits_length_cat_sum, train_splits_length_cat_max)
+    train_splits_length_cat_max = (
+        int(num_training_steps_cat.max().item())
+        if num_training_steps_cat.numel() > 0
+        else 0
+    )
+    batch_num_inner_batches = (
+        ceil_div(train_splits_length_cat_sum, train_splits_length_cat_max)
+        if train_splits_length_cat_max > 0
+        else 0
+    )
+    return TrainSetup(
+        num_training_steps_per_epoch_cat=num_training_steps_per_epoch_cat,
+        num_training_steps_cat=num_training_steps_cat,
+        batch_perm_cat=batch_perm_cat,
+        batch_perm_user_flat_offset=batch_perm_user_flat_offset,
+        train_split_lengths_offset=train_split_lengths_offset,
+        batch_num_inner_batches=batch_num_inner_batches,
+    )
+
+
+def train(
+    fsrs_params: torch.Tensor,
+    users: list[int],
+    data: Data,
+    train_setup: TrainSetup | None = None,
+):
+    print("start train")
+    train_split_lengths_cat = data.train_split_lengths
+    if train_setup is None:
+        train_setup = build_train_setup(data, users)
+
+    num_training_steps_per_epoch_cat = train_setup.num_training_steps_per_epoch_cat
+    num_training_steps_cat = train_setup.num_training_steps_cat
+    batch_perm_cat = train_setup.batch_perm_cat
+    batch_perm_user_flat_offset = train_setup.batch_perm_user_flat_offset
+    train_split_lengths_offset = train_setup.train_split_lengths_offset
+    batch_num_inner_batches = train_setup.batch_num_inner_batches
+    train_splits_length_cat_max = (
+        int(num_training_steps_cat.max().item())
+        if num_training_steps_cat.numel() > 0
+        else 0
+    )
     
     step_i_cat = torch.zeros_like(num_training_steps_cat)
     flat_fsrs_params = fsrs_params.detach().view(-1, fsrs_params.size(-1))
@@ -342,27 +382,19 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         print(f"User: {user}, logloss={logloss:.3f}")
 
 def run(
-    env: lmdb.Environment,
     users: list[int],
+    data: Data,
+    train_setup: TrainSetup,
 ) -> None:
-    with env.begin(write=False) as txn:
-        data_builder = DataBuilder()
-        for user_id in tqdm(users, total=len(users), smoothing=0.03, desc="Loading user data"):
-            blob = load_user_blob(txn, user_id, map_location="cpu")
-            data_builder.append(blob)
-            del blob
-        data = data_builder.finish(device=DEVICE)
-        del data_builder
-
     # fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
     initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
     fsrs_params = initial_params.view(1, 1, -1).repeat(len(users), N_SPLITS, 1).requires_grad_(True)
-    fsrs_params = train(fsrs_params, users, data)
+    fsrs_params = train(fsrs_params, users, data, train_setup)
 
     print("skip test")
     # evaluate
-    # with torch.no_grad():
-    #     evaluate_on_test_set(fsrs_params, users, data)
+    with torch.no_grad():
+        evaluate_on_test_set(fsrs_params, users, data)
 
 def main() -> None:
     assert DEVICE == "cuda", "Only cuda is supported."
@@ -373,35 +405,37 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 100))
+    users = list(range(1, 10000))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
-    # split_factor_k = 2
-    # with env.begin(write=False) as txn:
-    #     user_max_train_split_lengths = load_metadata_tensor(
-    #         txn,
-    #         USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
-    #     )
+    split_factor_k = 3
+    with env.begin(write=False) as txn:
+        user_max_train_split_lengths = load_metadata_tensor(
+            txn,
+            USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
+        )
 
-    # user_splits = split_users_by_train_length(
-    #     users,
-    #     user_max_train_split_lengths,
-    #     split_factor_k,
-    # )
-    # for split_i, user_subset in enumerate(user_splits, start=1):
-    #     user_indices = torch.tensor(user_subset, dtype=torch.int64) - 1
-    #     split_work = int(user_max_train_split_lengths[user_indices].sum().item())
-    #     print(
-    #         f"Run split {split_i}/{len(user_splits)}: "
-    #         f"users={len(user_subset)}, max_train_split_length_sum={split_work}"
-    #     )
-    #     run(env, user_subset)
-    # for l in range(1, 10001, 3334):
-    #     r = min(10001, l + 3334)
-    #     run(env, users[l:r])
-
-    run(env, users)
+    user_splits = split_users_by_train_length(
+        users,
+        user_max_train_split_lengths,
+        split_factor_k,
+    )
+    cache_env = load_or_rebuild_tensor_cache(env, user_splits)
+    try:
+        for split_i, user_subset in enumerate(user_splits):
+            user_indices = torch.tensor(user_subset, dtype=torch.int64) - 1
+            split_work = int(user_max_train_split_lengths[user_indices].sum().item())
+            print(
+                f"Run split {split_i + 1}/{len(user_splits)}: "
+                f"users={len(user_subset)}, max_train_split_length_sum={split_work}"
+            )
+            data, train_setup = load_cached_split(cache_env, split_i, DEVICE)
+            run(user_subset, data, train_setup)
+            del data
+            del train_setup
+    finally:
+        cache_env.close()
     env.close()
 
 

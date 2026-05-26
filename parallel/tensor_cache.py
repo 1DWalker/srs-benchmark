@@ -1,0 +1,429 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import math
+import shutil
+from pathlib import Path
+
+import lmdb
+import numpy as np
+import torch
+
+from parallel.config import (
+    BATCH_PERM_SEED,
+    BATCH_SIZE,
+    N_EPOCHS,
+    N_SPLITS,
+    TENSOR_CACHE_PATH,
+    TENSOR_CACHE_SIZE,
+    TENSOR_CACHE_VERSION,
+)
+from parallel.tensor_lmdb import (
+    get_array,
+    get_tensor,
+    get_tensor_meta,
+    put_array,
+    user_tensor_prefix,
+)
+from parallel.tensors import Data, ReviewData
+
+
+@dataclass(frozen=True)
+class TrainSetup:
+    num_training_steps_per_epoch_cat: torch.Tensor
+    num_training_steps_cat: torch.Tensor
+    batch_perm_cat: torch.Tensor
+    batch_perm_user_flat_offset: torch.Tensor
+    train_split_lengths_offset: torch.Tensor
+    batch_num_inner_batches: int
+
+
+@dataclass(frozen=True)
+class _SourceUserInfo:
+    user_id: int
+    review_len: int
+    train_len: int
+    test_len: int
+    split_len: int
+    train_split_len: int
+
+
+_MANIFEST_KEY = b"manifest"
+
+
+def _cache_tensor_prefix(split_i: int, name: str) -> str:
+    return f"split:{split_i}:tensor:{name}"
+
+
+def _cache_json_key(split_i: int, name: str) -> bytes:
+    return f"split:{split_i}:json:{name}".encode()
+
+
+def _ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def _numel(shape: tuple[int, ...]) -> int:
+    return math.prod(shape)
+
+
+def _open_cache_env(
+    cache_path: Path = TENSOR_CACHE_PATH,
+    map_size: int = TENSOR_CACHE_SIZE,
+) -> lmdb.Environment:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    return lmdb.open(
+        str(cache_path),
+        map_size=map_size,
+        subdir=True,
+    )
+
+
+def _expected_manifest(user_splits: list[list[int]]) -> dict[str, object]:
+    return {
+        "version": TENSOR_CACHE_VERSION,
+        "user_splits": [[int(user_id) for user_id in split] for split in user_splits],
+        "batch_size": BATCH_SIZE,
+        "n_epochs": N_EPOCHS,
+        "n_splits": N_SPLITS,
+        "batch_perm_seed": BATCH_PERM_SEED,
+    }
+
+
+def _read_manifest(cache_env: lmdb.Environment) -> dict[str, object] | None:
+    with cache_env.begin(write=False) as txn:
+        raw = txn.get(_MANIFEST_KEY)
+    if raw is None:
+        return None
+    return json.loads(raw.decode())
+
+
+def _write_manifest(cache_env: lmdb.Environment, manifest: dict[str, object]) -> None:
+    with cache_env.begin(write=True) as txn:
+        txn.put(_MANIFEST_KEY, json.dumps(manifest, separators=(",", ":")).encode())
+
+
+def _clear_cache_path(cache_path: Path) -> None:
+    if cache_path.exists():
+        shutil.rmtree(cache_path)
+
+
+def load_or_rebuild_tensor_cache(
+    source_env: lmdb.Environment,
+    user_splits: list[list[int]],
+    cache_path: Path = TENSOR_CACHE_PATH,
+    map_size: int = TENSOR_CACHE_SIZE,
+) -> lmdb.Environment:
+    expected = _expected_manifest(user_splits)
+    cache_env = _open_cache_env(cache_path, map_size)
+    if _read_manifest(cache_env) == expected:
+        print("tensor cache hit")
+        return cache_env
+
+    print("tensor cache miss; rebuilding")
+    cache_env.close()
+    _clear_cache_path(cache_path)
+    cache_env = _open_cache_env(cache_path, map_size)
+    _rebuild_tensor_cache(source_env, cache_env, user_splits)
+    _write_manifest(cache_env, expected)
+    return cache_env
+
+
+def load_cached_split(
+    cache_env: lmdb.Environment,
+    split_i: int,
+    device: torch.device | str,
+) -> tuple[Data, TrainSetup]:
+    device = torch.device(device)
+    with cache_env.begin(write=False, buffers=True) as txn:
+        data = object.__new__(Data)
+        data.review_data = ReviewData(
+            rating=get_tensor(txn, _cache_tensor_prefix(split_i, "rating"), device),
+            elapsed_days_real=get_tensor(txn, _cache_tensor_prefix(split_i, "elapsed_days_real"), device),
+            seq_len=get_tensor(txn, _cache_tensor_prefix(split_i, "seq_len"), device),
+        )
+        data.device = data.review_data.rating.device
+        data.user_flat_offset = get_tensor(txn, _cache_tensor_prefix(split_i, "user_flat_offset"), device)
+        data.train_index = get_tensor(txn, _cache_tensor_prefix(split_i, "train_index"), device)
+        data.train_split_lengths = get_tensor(txn, _cache_tensor_prefix(split_i, "train_split_lengths"), device)
+        data.test_index = get_tensor(txn, _cache_tensor_prefix(split_i, "test_index"), device)
+        data.splits = get_tensor(txn, _cache_tensor_prefix(split_i, "splits"), device)
+        data.split_counts = get_tensor(txn, _cache_tensor_prefix(split_i, "split_counts"), device)
+        data.test_index_lens = get_tensor(
+            txn,
+            _cache_tensor_prefix(split_i, "test_index_lens"),
+            "cpu",
+        ).tolist()
+
+        setup = TrainSetup(
+            num_training_steps_per_epoch_cat=get_tensor(
+                txn,
+                _cache_tensor_prefix(split_i, "num_training_steps_per_epoch_cat"),
+                device,
+            ),
+            num_training_steps_cat=get_tensor(
+                txn,
+                _cache_tensor_prefix(split_i, "num_training_steps_cat"),
+                device,
+            ),
+            batch_perm_cat=get_tensor(txn, _cache_tensor_prefix(split_i, "batch_perm_cat"), device),
+            batch_perm_user_flat_offset=get_tensor(
+                txn,
+                _cache_tensor_prefix(split_i, "batch_perm_user_flat_offset"),
+                device,
+            ),
+            train_split_lengths_offset=get_tensor(
+                txn,
+                _cache_tensor_prefix(split_i, "train_split_lengths_offset"),
+                device,
+            ),
+            batch_num_inner_batches=int(
+                json.loads(bytes(txn.get(_cache_json_key(split_i, "batch_num_inner_batches"))).decode())
+            ),
+        )
+    return data, setup
+
+
+def _rebuild_tensor_cache(
+    source_env: lmdb.Environment,
+    cache_env: lmdb.Environment,
+    user_splits: list[list[int]],
+) -> None:
+    for split_i, users in enumerate(user_splits):
+        print(f"rebuilding tensor cache split {split_i + 1}/{len(user_splits)}")
+        with source_env.begin(write=False) as source_txn:
+            infos = [_read_user_info(source_txn, user_id) for user_id in users]
+
+        _build_review_field(source_env, cache_env, split_i, infos, "rating")
+        _build_review_field(source_env, cache_env, split_i, infos, "elapsed_days_real")
+        _build_review_field(source_env, cache_env, split_i, infos, "seq_len")
+        _build_offset_index_field(source_env, cache_env, split_i, infos, "train_index", "train_index")
+        _build_train_split_lengths(source_env, cache_env, split_i, infos)
+        _build_offset_index_field(source_env, cache_env, split_i, infos, "test_index", "test_index")
+        _build_flat_field(source_env, cache_env, split_i, infos, "split", "splits")
+        _build_small_derived_tensors(cache_env, split_i, infos)
+        _build_train_setup(cache_env, split_i)
+
+
+def _read_user_info(txn: lmdb.Transaction, user_id: int) -> _SourceUserInfo:
+    return _SourceUserInfo(
+        user_id=user_id,
+        review_len=_numel(get_tensor_meta(txn, user_tensor_prefix(user_id, "rating")).shape),
+        train_len=_numel(get_tensor_meta(txn, user_tensor_prefix(user_id, "train_index")).shape),
+        test_len=_numel(get_tensor_meta(txn, user_tensor_prefix(user_id, "test_index")).shape),
+        split_len=_numel(get_tensor_meta(txn, user_tensor_prefix(user_id, "split")).shape),
+        train_split_len=_numel(get_tensor_meta(txn, user_tensor_prefix(user_id, "train_split_lengths")).shape),
+    )
+
+
+def _put_cache_array(cache_env: lmdb.Environment, split_i: int, name: str, array: np.ndarray) -> None:
+    with cache_env.begin(write=True) as cache_txn:
+        put_array(cache_txn, _cache_tensor_prefix(split_i, name), array)
+
+
+def _build_review_field(
+    source_env: lmdb.Environment,
+    cache_env: lmdb.Environment,
+    split_i: int,
+    infos: list[_SourceUserInfo],
+    field: str,
+) -> None:
+    total = sum(info.review_len for info in infos)
+    with source_env.begin(write=False, buffers=True) as source_txn:
+        dtype = get_array(source_txn, user_tensor_prefix(infos[0].user_id, field)).dtype if infos else np.int8
+        out = np.empty(total, dtype=dtype)
+        offset = 0
+        for info in infos:
+            source = get_array(source_txn, user_tensor_prefix(info.user_id, field)).reshape(-1)
+            next_offset = offset + source.size
+            out[offset:next_offset] = source
+            offset = next_offset
+    _put_cache_array(cache_env, split_i, field, out)
+    del out
+
+
+def _build_flat_field(
+    source_env: lmdb.Environment,
+    cache_env: lmdb.Environment,
+    split_i: int,
+    infos: list[_SourceUserInfo],
+    source_field: str,
+    cache_name: str,
+) -> None:
+    total = sum(_numel_for_source_field(info, source_field) for info in infos)
+    with source_env.begin(write=False, buffers=True) as source_txn:
+        dtype = get_array(source_txn, user_tensor_prefix(infos[0].user_id, source_field)).dtype if infos else np.int32
+        out = np.empty(total, dtype=dtype)
+        offset = 0
+        for info in infos:
+            source = get_array(source_txn, user_tensor_prefix(info.user_id, source_field)).reshape(-1)
+            next_offset = offset + source.size
+            out[offset:next_offset] = source
+            offset = next_offset
+    _put_cache_array(cache_env, split_i, cache_name, out)
+    del out
+
+
+def _numel_for_source_field(info: _SourceUserInfo, field: str) -> int:
+    if field == "train_index":
+        return info.train_len
+    if field == "test_index":
+        return info.test_len
+    if field == "split":
+        return info.split_len
+    if field == "train_split_lengths":
+        return info.train_split_len
+    return info.review_len
+
+
+def _build_offset_index_field(
+    source_env: lmdb.Environment,
+    cache_env: lmdb.Environment,
+    split_i: int,
+    infos: list[_SourceUserInfo],
+    source_field: str,
+    cache_name: str,
+) -> None:
+    total = sum(_numel_for_source_field(info, source_field) for info in infos)
+    out = np.empty(total, dtype=np.int32)
+    review_offset = 0
+    write_offset = 0
+    with source_env.begin(write=False, buffers=True) as source_txn:
+        for info in infos:
+            source = get_array(source_txn, user_tensor_prefix(info.user_id, source_field)).reshape(-1)
+            next_write_offset = write_offset + source.size
+            np.add(source, review_offset, out=out[write_offset:next_write_offset], casting="unsafe")
+            write_offset = next_write_offset
+            review_offset += info.review_len
+    _put_cache_array(cache_env, split_i, cache_name, out)
+    del out
+
+
+def _build_train_split_lengths(
+    source_env: lmdb.Environment,
+    cache_env: lmdb.Environment,
+    split_i: int,
+    infos: list[_SourceUserInfo],
+) -> None:
+    _build_flat_field(
+        source_env,
+        cache_env,
+        split_i,
+        infos,
+        "train_split_lengths",
+        "train_split_lengths",
+    )
+
+
+def _build_small_derived_tensors(
+    cache_env: lmdb.Environment,
+    split_i: int,
+    infos: list[_SourceUserInfo],
+) -> None:
+    split_counts = np.array([info.split_len for info in infos], dtype=np.int32)
+    test_index_lens = np.array([info.test_len for info in infos], dtype=np.int64)
+    user_lengths = np.array([info.review_len for info in infos], dtype=np.int64)
+    if user_lengths.size == 0:
+        user_flat_offset = np.empty(0, dtype=np.int64)
+    else:
+        user_flat_offset = np.empty_like(user_lengths)
+        user_flat_offset[0] = 0
+        if user_lengths.size > 1:
+            user_flat_offset[1:] = np.cumsum(user_lengths[:-1], dtype=np.int64)
+
+    _put_cache_array(cache_env, split_i, "split_counts", split_counts)
+    del split_counts
+    _put_cache_array(cache_env, split_i, "test_index_lens", test_index_lens)
+    del test_index_lens
+    _put_cache_array(cache_env, split_i, "user_flat_offset", user_flat_offset)
+    del user_flat_offset
+
+
+def _build_train_setup(cache_env: lmdb.Environment, split_i: int) -> None:
+    with cache_env.begin(write=False, buffers=True) as cache_txn:
+        train_split_lengths = get_array(
+            cache_txn,
+            _cache_tensor_prefix(split_i, "train_split_lengths"),
+        ).astype(np.int32, copy=True)
+
+    num_training_steps_per_epoch = (
+        (train_split_lengths + BATCH_SIZE - 1) // BATCH_SIZE
+    ).astype(np.int32, copy=False)
+    num_training_steps = (N_EPOCHS * num_training_steps_per_epoch).astype(np.int32, copy=False)
+
+    _put_cache_array(cache_env, split_i, "num_training_steps_per_epoch_cat", num_training_steps_per_epoch)
+    _put_cache_array(cache_env, split_i, "num_training_steps_cat", num_training_steps)
+
+    batch_perm_user_flat_offset = _offsets_from_lengths(num_training_steps.astype(np.int64))
+    _put_cache_array(
+        cache_env,
+        split_i,
+        "batch_perm_user_flat_offset",
+        batch_perm_user_flat_offset.reshape(-1, N_SPLITS),
+    )
+    del batch_perm_user_flat_offset
+
+    train_split_lengths_offset = _offsets_from_lengths(train_split_lengths.astype(np.int64))
+    _put_cache_array(
+        cache_env,
+        split_i,
+        "train_split_lengths_offset",
+        train_split_lengths_offset.reshape(-1, N_SPLITS),
+    )
+    del train_split_lengths_offset
+
+    batch_num_inner_batches = _batch_num_inner_batches(num_training_steps)
+    with cache_env.begin(write=True) as cache_txn:
+        cache_txn.put(
+            _cache_json_key(split_i, "batch_num_inner_batches"),
+            json.dumps(batch_num_inner_batches).encode(),
+        )
+
+    _build_batch_perm_cat(cache_env, split_i, num_training_steps_per_epoch, num_training_steps)
+    del train_split_lengths
+    del num_training_steps_per_epoch
+    del num_training_steps
+
+
+def _offsets_from_lengths(lengths: np.ndarray) -> np.ndarray:
+    offsets = np.empty_like(lengths, dtype=np.int64)
+    if lengths.size == 0:
+        return offsets
+    offsets[0] = 0
+    if lengths.size > 1:
+        offsets[1:] = np.cumsum(lengths[:-1], dtype=np.int64)
+    return offsets
+
+
+def _batch_num_inner_batches(num_training_steps: np.ndarray) -> int:
+    total = int(num_training_steps.sum())
+    max_steps = int(num_training_steps.max()) if num_training_steps.size else 0
+    if max_steps == 0:
+        return 0
+    return _ceil_div(total, max_steps)
+
+
+def _build_batch_perm_cat(
+    cache_env: lmdb.Environment,
+    split_i: int,
+    num_training_steps_per_epoch: np.ndarray,
+    num_training_steps: np.ndarray,
+) -> None:
+    total = int(num_training_steps.sum())
+    out = np.empty(total, dtype=np.int64)
+    generator = torch.Generator()
+    generator.manual_seed(BATCH_PERM_SEED)
+
+    offset = 0
+    for steps_per_epoch in num_training_steps_per_epoch:
+        n = int(steps_per_epoch)
+        for _ in range(N_EPOCHS):
+            perm = torch.randperm(n, generator=generator).numpy()
+            next_offset = offset + n
+            out[offset:next_offset] = perm
+            offset = next_offset
+            del perm
+
+    _put_cache_array(cache_env, split_i, "batch_perm_cat", out)
+    del out
