@@ -23,7 +23,7 @@ from parallel.config import (
     TRAIN_BUFFER_SIZE_GB,
 )
 from parallel.load_balancer import get_batches_test, get_batches_train
-from parallel.models import fsrs_v7_constants
+from parallel.models import fsrs_v7, fsrs_v7_constants
 from parallel.tensors import Data, DataBuilder, ParamKey, ReviewData, UserTensorBlob
 
 enzyme_sample = importlib.import_module("parallel._enzyme_torch_sample")
@@ -134,7 +134,10 @@ def run_cpp_train_pass(elapsed_days_real, rating, start_indices, seq_lens, batch
         value=0,
     ).view(U, B // THREADS_PER_BLOCK)
     buffer_req_size = seq_lens_Ux_max_cumsum_inc[-1].item()
-    return enzyme_sample.fsrs7_train(
+
+    torch.cuda.synchronize()
+    t_c = time.time()
+    out = enzyme_sample.fsrs7_train(
         elapsed_days_real, 
         rating, 
         start_indices.view_as(seq_lens_UxT),
@@ -144,6 +147,9 @@ def run_cpp_train_pass(elapsed_days_real, rating, start_indices, seq_lens, batch
         batch_fsrs_params,
         buffer_req_size,
     )
+    torch.cuda.synchronize()
+    print("c++ ", time.time() - t_c)
+    return out
 
 
 def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
@@ -206,51 +212,19 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
 
         legal = train_range <= train_r.unsqueeze(-1)
         review_data_indices = data.train_index[(train_split_lengths_offset[user_indices, split_indices].unsqueeze(-1) + train_range).clamp_max(data.train_index.size(0) - 1)]
-        # print(review_data_indices, review_data_indices.shape)
-        # print(legal)
-        # print(train_split_lengths_cat[indices] - 1)
-
-        # indices_flat = indices_range.view(-1)
-        # review_data_indices_flat = review_data_indices.view(-1)
-        # legal_flat = legal.view(-1)
-        # assert legal_flat.shape == indices_flat.shape
-
-        # indices_filtered = indices_flat[legal_flat]
-        # review_data_indices_filtered = review_data_indices_flat[legal_flat]
-
-        # Sort by seq len
-        # seq_lens = data.review_data.seq_len[review_data_indices_filtered]
         seq_lens = data.review_data.seq_len[review_data_indices]
 
         torch.cuda.synchronize()
-        tb = time.time()
-        # batches = get_batches_train(seq_lens)
-        print("get batches", time.time() - tb)
-        torch.cuda.synchronize()
         print("prepare iteration", time.time() - ts)
-        # print(batches)
+        ts = time.time()
 
         for l in [0]:
-            # re = min(seq_lens.size(0), l + STEP)
             re = seq_lens.size(0)
-            ts = time.time()
-            # slice = torch.arange(l, re, re - l, device=indices.device)
-            # batch_fsrs_params = torch.tensor(fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]], requires_grad=True, device=indices.device)
-            # batch_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))[indices_filtered[l:re]].detach().clone().requires_grad_(True)
             batch_indices = indices[l:re]
             batch_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))[batch_indices]
             batch_epoch_lens = train_split_lengths_cat[batch_indices]
             assert (batch_epoch_lens > 0).all()
-            # batch_review_data_indices = review_data_indices_filtered[slice]
-            batch_review_data_indices = review_data_indices[l:re]
-            # print(batch_review_data_indices.shape, batch_fsrs_params.shape, batch_indices.shape, legal.shape)
-            # print(seq_lens.shape)
-            seq_lens_u_cumsum = seq_lens.cumsum(dim=-1)
-            seq_lens_cumsum = seq_lens_u_cumsum[:, -1].cumsum(dim=-1)
-            # print(seq_lens_cumsum)
             start_indices = review_data_indices - seq_lens + 1
-            # torch.cuda.synchronize()
-            # ts = time.time()
             out = run_cpp_train_pass(
                 data.review_data.elapsed_days_real, 
                 data.review_data.rating, 
@@ -259,33 +233,15 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
                 batch_fsrs_params,
             )
             assert not out.isnan().any()
-            # print(out.shape, legal.shape)
-            # print(legal)
-            # print(out)
             grad = (out * legal.unsqueeze(-1)).sum(dim=1)
             batch_fsrs_params.backward(grad)
-            # torch.cuda.synchronize()
-            # print("HERE", time.time() - ts)
-            # print(out)
-            # print(grad)
-            # print("intermediate", time.time() - ts)
-            # p, loss, grad = predict_loss_grad(data.review_data, batch_review_data_indices, batch_fsrs_params, batch_epoch_lens)
-            # assert not p.isnan().any()
-            # torch.cuda.synchronize()
-            # print("intermediate2", time.time() - ts)
-            # # print("Jax adapter output:")
-            # # print(p)
 
-            # # batch_fsrs_params.grad = grad
-            # # print(batch_fsrs_params)
-            # print(batch_epoch_lens)
-            # batch_fsrs_params.backward(grad)
+            # TODO l2 loss
 
             # print(batch_fsrs_params.shape)
             # torch.cuda.synchronize()
             # tl2 = time.time()
-            # l2_grad = fsrs_v7_constants.l2_penalty_per_review(batch_fsrs_params, batch_epoch_lens)
-            # print(l2_grad)
+            # l2_grad = fsrs_v7.l2_penalty_per_review(batch_fsrs_params, batch_epoch_lens)
             # l2_grad.sum().backward()
             # torch.cuda.synchronize()
             # print("L2 time", time.time() - tl2)
@@ -304,8 +260,6 @@ def train(fsrs_params: torch.Tensor, users: list[int], data: Data):
         # TODO ADAMW betas
 
         with torch.no_grad():
-            if fsrs_params.grad.isnan().any():
-                print(fsrs_params.grad.cpu().detach().tolist())
             assert not fsrs_params.grad.isnan().any()
             flat_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))
             flat_grad = fsrs_params.grad.view_as(flat_fsrs_params)
@@ -392,7 +346,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     p_by_user = p_concat.split(data.test_index_lens)
     label_by_user = (data.review_data.rating[data.test_index] > 1).split(data.test_index_lens)
 
-    for user, pred, label in tqdm(zip(users, p_by_user, label_by_user), smoothing=0.03):
+    for user, pred, label in zip(users, p_by_user, label_by_user):
         logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
         print(f"User: {user}, logloss={logloss:.3f}")
 
@@ -417,8 +371,8 @@ def run(
 
     print("skip test")
     # evaluate
-    with torch.no_grad():
-        evaluate_on_test_set(fsrs_params, users, data)
+    # with torch.no_grad():
+        # evaluate_on_test_set(fsrs_params, users, data)
 
 def main() -> None:
     assert DEVICE == "cuda", "Only cuda is supported."
@@ -429,7 +383,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 5))
+    users = list(range(1, 1000))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 

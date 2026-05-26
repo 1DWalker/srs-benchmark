@@ -29,13 +29,7 @@ def _reshape_for_params(value: float | torch.Tensor, params: torch.Tensor) -> to
     return out
 
 
-def _masked_lr(lr: float | torch.Tensor, mask: torch.Tensor) -> float | torch.Tensor:
-    if torch.is_tensor(lr) and lr.ndim > 0:
-        return lr[mask]
-    return lr
-
-
-# @torch.compile(fullgraph=True, dynamic=True)
+@torch.compile(fullgraph=True)
 def adamw_step(
     params: torch.Tensor,
     grad: torch.Tensor,
@@ -47,45 +41,7 @@ def adamw_step(
     eps: float = 1e-8,
     weight_decay: float = 0.01,
 ) -> tuple[torch.Tensor, AdamWState]:
-    if mask is not None:
-        if mask.shape != state.step.shape:
-            raise ValueError(
-                f"mask shape {tuple(mask.shape)} must match state.step shape "
-                f"{tuple(state.step.shape)}."
-            )
-        mask = mask.to(device=params.device, dtype=torch.bool)
-        if not bool(mask.any()):
-            return params, state
-
-        new_params = params.clone()
-        new_step = state.step.clone()
-        new_exp_avg = state.exp_avg.clone()
-        new_exp_avg_sq = state.exp_avg_sq.clone()
-
-        (
-            new_params[mask],
-            new_step[mask],
-            new_exp_avg[mask],
-            new_exp_avg_sq[mask],
-        ) = adamw_update(
-            params[mask],
-            grad[mask],
-            state.step[mask],
-            state.exp_avg[mask],
-            state.exp_avg_sq[mask],
-            lr=_masked_lr(lr, mask),
-            betas=betas,
-            eps=eps,
-            weight_decay=weight_decay,
-        )
-
-        return new_params, AdamWState(
-            step=new_step,
-            exp_avg=new_exp_avg,
-            exp_avg_sq=new_exp_avg_sq,
-        )
-
-    new_params, step, exp_avg, exp_avg_sq = adamw_update(
+    updated_params, updated_step, updated_exp_avg, updated_exp_avg_sq = adamw_update(
         params,
         grad,
         state.step,
@@ -97,10 +53,22 @@ def adamw_step(
         weight_decay=weight_decay,
     )
 
-    return new_params, AdamWState(
-        step=step,
-        exp_avg=exp_avg,
-        exp_avg_sq=exp_avg_sq,
+    if mask is None:
+        return updated_params, AdamWState(
+            step=updated_step,
+            exp_avg=updated_exp_avg,
+            exp_avg_sq=updated_exp_avg_sq,
+        )
+
+    mask = mask.to(device=params.device, dtype=torch.bool)
+    param_mask = mask
+    while param_mask.ndim < params.ndim:
+        param_mask = param_mask.unsqueeze(-1)
+
+    return torch.where(param_mask, updated_params, params), AdamWState(
+        step=torch.where(mask, updated_step, state.step),
+        exp_avg=torch.where(param_mask, updated_exp_avg, state.exp_avg),
+        exp_avg_sq=torch.where(param_mask, updated_exp_avg_sq, state.exp_avg_sq),
     )
 
 

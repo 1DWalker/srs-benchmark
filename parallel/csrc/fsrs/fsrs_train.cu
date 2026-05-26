@@ -158,10 +158,6 @@ __global__ void fsrs_train_kernel(
     for (int32_t l = 1; l < len - 1; ++l) {
         const int32_t review_index = start + l;
         state_buffer[get_state_buffer_index(l)] = state;
-
-        if (blockIdx.x == 3 && blockIdx.y == 1 && thread_i_within_block == 0) {
-            printf("%d %f %f\n", l, state.s, state.d);
-        }
         state = fsrs7_step(
             params,
             state,
@@ -178,18 +174,16 @@ __global__ void fsrs_train_kernel(
     );
     const float label = (float) (rating_flat[target_index] > 1);
     float grad_p = dloss_dp(p, label);
-    // if (thread_i_within_block == 0) {
-    //     printf("%d %d %f %f %f %f\n", blockIdx.x, blockIdx.y, p, elapsed_days_real_flat[target_index], label, grad_p);
-    // }
 
     fsrs_state_t grad_state{};
     fsrs_params_t grad_params{};
+    float _blank_p;
     __enzyme_autodiff_forgetting_curve(
         (void*) fsrs7_forgetting_curve_wrapper, 
         enzyme_dup, params, &grad_params,
         enzyme_const, elapsed_days_real_flat[target_index],
         enzyme_dup, state, &grad_state,
-        enzyme_dupnoneed, &p, &grad_p
+        enzyme_dupnoneed, &_blank_p, &grad_p
     );
 
     fsrs_state_t _blank_state{};
@@ -206,10 +200,6 @@ __global__ void fsrs_train_kernel(
             enzyme_dupnoneed, _blank_state, &grad_state
         );
         grad_state = new_grad_state;
-
-        if (blockIdx.x == 3 && blockIdx.y == 1 && thread_i_within_block == 0) {
-            printf("%d %f %f %d\n", l, state.s, state.d, get_state_buffer_index(l));
-        }
     }
 
     __enzyme_autodiff_fsrs7_init(

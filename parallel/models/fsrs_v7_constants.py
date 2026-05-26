@@ -162,7 +162,7 @@ def get_initial_params_for_optimization():
     return torch.tensor(FSRS7_DEFAULT_35_VALUES, dtype=torch.float32)
 
 
-# @torch.compile(fullgraph=True, dynamic=True)
+@torch.compile(fullgraph=True)
 def apply_parameter_clipper(parameters_b):
     lo = torch.tensor(
         FSRS_MIN_VALUES,

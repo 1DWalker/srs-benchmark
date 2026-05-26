@@ -93,7 +93,6 @@ torch::Tensor fsrs7_train(
     const int P = fsrs_params_UP.size(1);
 
     c10::cuda::CUDAGuard device_guard(elapsed_days_real_flat.device());
-    std::cout << "buffer size req: " << buffer_req_size << '\n';
     fsrs_state_t *state_buffer_ptr = state_buffer.ensure(buffer_req_size);
     torch::Tensor grad = torch::zeros(
         {U, x * T, P},
