@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, fields
 from collections.abc import Iterable
 
+import numpy as np
 import torch
 
 
@@ -80,62 +81,116 @@ def _device_specs_match(left: torch.device, right: torch.device) -> bool:
     return left.index is None or right.index is None or left.index == right.index
 
 
+_TORCH_TO_NUMPY_DTYPE: dict[torch.dtype, np.dtype] = {
+    torch.bool: np.dtype(np.bool_),
+    torch.int8: np.dtype(np.int8),
+    torch.int16: np.dtype(np.int16),
+    torch.int32: np.dtype(np.int32),
+    torch.int64: np.dtype(np.int64),
+    torch.uint8: np.dtype(np.uint8),
+    torch.float16: np.dtype(np.float16),
+    torch.float32: np.dtype(np.float32),
+    torch.float64: np.dtype(np.float64),
+}
+
+
+def _numpy_dtype_for(torch_dtype: torch.dtype) -> np.dtype:
+    try:
+        return _TORCH_TO_NUMPY_DTYPE[torch_dtype]
+    except KeyError as exc:
+        raise TypeError(f"Unsupported tensor dtype for DataBuilder: {torch_dtype}") from exc
+
+
 class _TensorVector:
     def __init__(
         self,
         dtype: torch.dtype | None = None,
         device: torch.device | str = "cpu",
     ) -> None:
+        device = torch.device(device)
+        if device.type != "cpu":
+            raise ValueError("DataBuilder only supports CPU-side construction.")
         self.dtype = dtype
-        self.device = torch.device(device)
-        self._buffer: torch.Tensor | None = None
+        self.device = torch.device("cpu")
+        self._buffer: np.ndarray | None = None
         self._size = 0
 
     @property
     def size(self) -> int:
         return self._size
 
-    def append(self, tensor: torch.Tensor, dtype: torch.dtype | None = None) -> None:
+    def append(
+        self,
+        tensor: torch.Tensor,
+        dtype: torch.dtype | None = None,
+        offset: int = 0,
+    ) -> None:
         target_dtype = dtype if dtype is not None else self.dtype
+        if tensor.device.type != "cpu":
+            raise ValueError("DataBuilder only accepts CPU tensors.")
+
         tensor = tensor.detach().reshape(-1)
-        if not _device_matches(tensor, self.device) or (
-            target_dtype is not None and tensor.dtype != target_dtype
-        ):
-            tensor = tensor.to(device=self.device, dtype=target_dtype or tensor.dtype)
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
 
-        if self.dtype is None:
-            self.dtype = tensor.dtype
-        elif tensor.dtype != self.dtype:
-            tensor = tensor.to(device=self.device, dtype=self.dtype)
+        if target_dtype is None:
+            target_dtype = tensor.dtype
 
-        required = self._size + tensor.numel()
+        target_np_dtype = _numpy_dtype_for(target_dtype)
+        array = tensor.numpy()
+        if array.dtype != target_np_dtype:
+            array = array.astype(target_np_dtype, copy=False)
+
+        if self.dtype is None:
+            self.dtype = target_dtype
+        elif target_dtype != self.dtype:
+            target_dtype = self.dtype
+            target_np_dtype = _numpy_dtype_for(target_dtype)
+            if array.dtype != target_np_dtype:
+                array = array.astype(target_np_dtype, copy=False)
+
+        if not array.flags.c_contiguous:
+            array = np.ascontiguousarray(array)
+
+        required = self._size + array.size
         if self._buffer is None:
             capacity = max(1, required)
-            self._buffer = torch.empty(capacity, dtype=self.dtype, device=self.device)
-        elif required > self._buffer.numel():
-            capacity = max(required, self._buffer.numel() * 2)
-            new_buffer = torch.empty(capacity, dtype=self.dtype, device=self.device)
-            new_buffer[: self._size].copy_(self._buffer[: self._size])
+            self._buffer = np.empty(capacity, dtype=target_np_dtype)
+        elif required > self._buffer.size:
+            capacity = max(required, int(self._buffer.size * 1.2))
+            new_buffer = np.empty(capacity, dtype=self._buffer.dtype)
+            new_buffer[: self._size] = self._buffer[: self._size]
             self._buffer = new_buffer
 
-        if tensor.numel() > 0:
-            self._buffer[self._size : required].copy_(tensor)
+        if array.size > 0:
+            target = self._buffer[self._size : required]
+            if offset:
+                np.add(array, offset, out=target, casting="unsafe")
+            else:
+                target[...] = array
         self._size = required
 
     def finish(self, dtype: torch.dtype | None = None, shrink: bool = True) -> torch.Tensor:
         if self._buffer is None:
             return torch.empty(0, dtype=dtype or self.dtype or torch.float32, device=self.device)
-        result = self._buffer[: self._size]
-        if shrink and result.numel() != self._buffer.numel():
-            result = result.clone()
+        result_array = self._buffer[: self._size]
+        if shrink and result_array.size != self._buffer.size:
+            result_array = result_array.copy()
+
+        self._buffer = None
+        self._size = 0
+        result = torch.from_numpy(result_array)
+        if dtype is not None and result.dtype != dtype:
+            result = result.to(dtype=dtype)
         return result
 
 
 class DataBuilder:
     def __init__(self, device: torch.device | str = "cpu") -> None:
-        self.device = torch.device(device)
+        device = torch.device(device)
+        if device.type != "cpu":
+            raise ValueError("DataBuilder only supports CPU-side construction.")
+        self.device = torch.device("cpu")
         self.rating = _TensorVector(device=self.device)
         self.elapsed_days_real = _TensorVector(device=self.device)
         self.seq_len = _TensorVector(device=self.device)
@@ -160,19 +215,19 @@ class DataBuilder:
         self.seq_len.append(user_data.seq_len)
 
         self.train_index.append(
-            user_data.train_index.detach().to(device=self.device)
-            + self.review_offset,
+            user_data.train_index,
+            offset=self.review_offset,
         )
         self.test_index.append(
-            user_data.test_index.detach().to(device=self.device)
-            + self.review_offset,
+            user_data.test_index,
+            offset=self.review_offset,
         )
 
         self.train_split_lengths.append(user_data.train_split_lengths)
         self.test_index_lens.append(user_data.test_index.numel())
         self.splits.append(user_data.split)
         self.split_counts.append(
-            torch.tensor([user_data.split.numel()], device=self.device),
+            torch.tensor([user_data.split.numel()], dtype=torch.int32),
         )
 
         user_length = user_data.rating.size(0)
