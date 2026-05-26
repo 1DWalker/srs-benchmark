@@ -138,25 +138,50 @@ def load_cached_split(
     device: torch.device | str,
 ) -> tuple[Data, TrainSetup]:
     device = torch.device(device)
+    review_data = load_cached_review_data(cache_env, split_i, device)
+    data, setup = load_cached_train_only(cache_env, split_i, device, review_data)
+    test_data = load_cached_test_only(cache_env, split_i, device, review_data)
     with cache_env.begin(write=False, buffers=True) as txn:
-        data = object.__new__(Data)
-        data.review_data = ReviewData(
+        data.user_flat_offset = get_tensor(txn, _cache_tensor_prefix(split_i, "user_flat_offset"), device)
+    data.test_index = test_data.test_index
+    data.splits = test_data.splits
+    data.split_counts = test_data.split_counts
+    data.test_index_lens = test_data.test_index_lens
+    return data, setup
+
+
+def load_cached_review_data(
+    cache_env: lmdb.Environment,
+    split_i: int,
+    device: torch.device | str,
+) -> ReviewData:
+    device = torch.device(device)
+    with cache_env.begin(write=False, buffers=True) as txn:
+        return ReviewData(
             rating=get_tensor(txn, _cache_tensor_prefix(split_i, "rating"), device),
             elapsed_days_real=get_tensor(txn, _cache_tensor_prefix(split_i, "elapsed_days_real"), device),
             seq_len=get_tensor(txn, _cache_tensor_prefix(split_i, "seq_len"), device),
         )
-        data.device = data.review_data.rating.device
-        data.user_flat_offset = get_tensor(txn, _cache_tensor_prefix(split_i, "user_flat_offset"), device)
+
+
+def _new_partial_data(review_data: ReviewData) -> Data:
+    data = object.__new__(Data)
+    data.review_data = review_data
+    data.device = review_data.rating.device
+    return data
+
+
+def load_cached_train_only(
+    cache_env: lmdb.Environment,
+    split_i: int,
+    device: torch.device | str,
+    review_data: ReviewData,
+) -> tuple[Data, TrainSetup]:
+    device = torch.device(device)
+    with cache_env.begin(write=False, buffers=True) as txn:
+        data = _new_partial_data(review_data)
         data.train_index = get_tensor(txn, _cache_tensor_prefix(split_i, "train_index"), device)
         data.train_split_lengths = get_tensor(txn, _cache_tensor_prefix(split_i, "train_split_lengths"), device)
-        data.test_index = get_tensor(txn, _cache_tensor_prefix(split_i, "test_index"), device)
-        data.splits = get_tensor(txn, _cache_tensor_prefix(split_i, "splits"), device)
-        data.split_counts = get_tensor(txn, _cache_tensor_prefix(split_i, "split_counts"), device)
-        data.test_index_lens = get_tensor(
-            txn,
-            _cache_tensor_prefix(split_i, "test_index_lens"),
-            "cpu",
-        ).tolist()
 
         setup = TrainSetup(
             num_training_steps_per_epoch_cat=get_tensor(
@@ -185,6 +210,26 @@ def load_cached_split(
             ),
         )
     return data, setup
+
+
+def load_cached_test_only(
+    cache_env: lmdb.Environment,
+    split_i: int,
+    device: torch.device | str,
+    review_data: ReviewData,
+) -> Data:
+    device = torch.device(device)
+    with cache_env.begin(write=False, buffers=True) as txn:
+        data = _new_partial_data(review_data)
+        data.test_index = get_tensor(txn, _cache_tensor_prefix(split_i, "test_index"), device)
+        data.splits = get_tensor(txn, _cache_tensor_prefix(split_i, "splits"), device)
+        data.split_counts = get_tensor(txn, _cache_tensor_prefix(split_i, "split_counts"), device)
+        data.test_index_lens = get_tensor(
+            txn,
+            _cache_tensor_prefix(split_i, "test_index_lens"),
+            "cpu",
+        ).tolist()
+    return data
 
 
 def _rebuild_tensor_cache(

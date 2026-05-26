@@ -208,29 +208,8 @@ __global__ void fsrs_train_kernel(
         enzyme_const, rating_flat[start],
         enzyme_dupnoneed, _blank_state, &grad_state
     );
-    // if (thread_i_within_block == 0) {
-    //     printf("%d %d %f %f %f %f\n", blockIdx.x, blockIdx.y, grad_state.s, grad_params.decay1, grad_params.decay2, grad_params.s0_good);
-    // }
 
     grad[i] = grad_params;
-
-
-    // // float x = 5.0;
-    // // float y = 2.0;
-    // // // float df_dx = __enzyme_fwddiff<float>((void*)square, enzyme_dup, x, dx); 
-    // // auto [df_dx, df_dy] = __enzyme_autodiff<float2>((void*)square, enzyme_out, x, enzyme_out, y); 
-    // // p[i] = df_dx;
-    // // printf("%f %f\n", df_dx, df_dy);
-    // B b = {3.0, 2.0};
-    // B db;
-    // A a;
-    // A lambda = {0.0, 1.0, 1.0};
-    // __enzyme_autodiff<B>((void*)barwrap, enzyme_dup, b, &db, enzyme_dupnoneed, a, lambda); 
-    // printf("%f %f\n", b.a, b.b);
-    // // printf("%f %f\n", db.x, db.y);
-    // printf("%f %f\n", db.a, db.b);
-    // // printf("%f %f\n", a.a, a.b);
-    // // p[i] = square(p[i]);
 }
 
 void fsrs_train_cuda(

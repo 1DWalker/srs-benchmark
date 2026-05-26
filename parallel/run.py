@@ -26,7 +26,9 @@ from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.models import fsrs_v7, fsrs_v7_constants
 from parallel.tensor_cache import (
     TrainSetup,
-    load_cached_split,
+    load_cached_review_data,
+    load_cached_test_only,
+    load_cached_train_only,
     load_or_rebuild_tensor_cache,
 )
 from parallel.tensors import Data, ParamKey
@@ -386,24 +388,20 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     p_by_user = p_concat.split(data.test_index_lens)
     label_by_user = (data.review_data.rating[data.test_index] > 1).split(data.test_index_lens)
 
-    for user, pred, label in zip(users, p_by_user, label_by_user):
-        logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
-        print(f"User: {user}, logloss={logloss:.3f}")
+    # for user, pred, label in zip(users, p_by_user, label_by_user):
+    #     logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
+    #     print(f"User: {user}, logloss={logloss:.3f}")
 
 def run(
     users: list[int],
     data: Data,
     train_setup: TrainSetup,
-) -> None:
+) -> torch.Tensor:
     # fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
     initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
     fsrs_params = initial_params.view(1, 1, -1).repeat(len(users), N_SPLITS, 1).requires_grad_(True)
     fsrs_params = train(fsrs_params, users, data, train_setup)
-
-    print("skip test")
-    # evaluate
-    with torch.no_grad():
-        evaluate_on_test_set(fsrs_params, users, data)
+    return fsrs_params
 
 def main() -> None:
     assert DEVICE == "cuda", "Only cuda is supported."
@@ -414,7 +412,7 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 100))
+    users = list(range(1, 5000))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
@@ -442,10 +440,25 @@ def main() -> None:
                 f"users={len(user_subset)}, max_train_split_length_sum={split_work}"
             )
             torch.cuda.empty_cache()
-            data, train_setup = load_cached_split(cache_env, split_i, DEVICE)
-            run(user_subset, data, train_setup)
-            del data
+            review_data = load_cached_review_data(cache_env, split_i, DEVICE)
+            train_data, train_setup = load_cached_train_only(
+                cache_env,
+                split_i,
+                DEVICE,
+                review_data,
+            )
+            fsrs_params = run(user_subset, train_data, train_setup).detach()
+            del train_data
             del train_setup
+            torch.cuda.empty_cache()
+
+            test_data = load_cached_test_only(cache_env, split_i, DEVICE, review_data)
+            with torch.no_grad():
+                evaluate_on_test_set(fsrs_params, user_subset, test_data)
+            del test_data
+            del review_data
+            del fsrs_params
+            torch.cuda.empty_cache()
     finally:
         cache_env.close()
     env.close()

@@ -68,7 +68,7 @@ torch::Tensor fsrs7_test(
     return p;
 }
 
-constexpr int THREADS_PER_BLOCK = 256; // must be a multiple of 32
+constexpr int THREADS_PER_BLOCK = 128; // must be a multiple of 32 and a divisor of the batch size
 StateBuffer<fsrs_state_t> state_buffer;
 
 torch::Tensor fsrs7_train(
