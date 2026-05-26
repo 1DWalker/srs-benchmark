@@ -333,12 +333,14 @@ def train(
 def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("eval on test")
     torch.cuda.synchronize()
+    torch.cuda.empty_cache()
     tz = time.time()
     ts = time.time()
     param_keys = data.get_test_index_param_key()
 
-    test_seq_len = data.review_data.seq_len[data.test_index]
-    _, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True, descending=True)
+    # test_seq_len = data.review_data.seq_len[data.test_index]
+    test_seq_len = data.review_data.seq_len[data.test_index].size(0)
+    # _, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True, descending=True)
     torch.cuda.synchronize()
     print("sort done", time.time() - ts)
 
@@ -348,9 +350,11 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     batch_size = ceil_div(N, num_batches)
     gather_p = []
 
-    for perm_slice in tqdm(sorted_test_index_permutation.split(batch_size), desc="Test set", smoothing=0.03):
-        batch_fsrs_params = fsrs_params[param_keys.user_index[perm_slice], param_keys.split_index[perm_slice]]
-        test_index_perm_slice = data.test_index[perm_slice]
+    # for perm_slice in tqdm(torch.arange(test_seq_len).split(batch_size), desc="Test set", smoothing=0.03):
+    for l in tqdm(range(0, test_seq_len, batch_size)):
+        re = min(test_seq_len, l + batch_size)
+        batch_fsrs_params = fsrs_params[param_keys.user_index[l:re], param_keys.split_index[l:re]]
+        test_index_perm_slice = data.test_index[l:re]
         seq_lens = data.review_data.seq_len[test_index_perm_slice]
         start_indices = test_index_perm_slice - seq_lens + 1
         p = enzyme_sample.fsrs7_test(
@@ -365,14 +369,19 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     torch.cuda.synchronize()
     print("took", time.time() - tz)
     
-    restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
-    restore_test_index_permutation[sorted_test_index_permutation] = torch.arange(
-        sorted_test_index_permutation.numel(),
-        device=sorted_test_index_permutation.device,
-    )
-    p_concat = torch.cat(gather_p, dim=-1)[restore_test_index_permutation]
-    del sorted_test_index_permutation
-    del restore_test_index_permutation
+    # restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
+    # restore_test_index_permutation[sorted_test_index_permutation] = torch.arange(
+    #     sorted_test_index_permutation.numel(),
+    #     device=sorted_test_index_permutation.device,
+    # )
+    p_concat = torch.cat(gather_p, dim=-1)
+    del param_keys
+    del test_seq_len
+    # del sorted_test_index_permutation
+    # del restore_test_index_permutation
+    torch.cuda.empty_cache()
+    # time.sleep(10)
+    # exit()
 
     p_by_user = p_concat.split(data.test_index_lens)
     label_by_user = (data.review_data.rating[data.test_index] > 1).split(data.test_index_lens)
@@ -393,8 +402,8 @@ def run(
 
     print("skip test")
     # evaluate
-    # with torch.no_grad():
-    #     evaluate_on_test_set(fsrs_params, users, data)
+    with torch.no_grad():
+        evaluate_on_test_set(fsrs_params, users, data)
 
 def main() -> None:
     assert DEVICE == "cuda", "Only cuda is supported."
@@ -405,11 +414,11 @@ def main() -> None:
         lock=False,
     )
     
-    users = list(range(1, 10001))
+    users = list(range(1, 100))
     # users = [1, 2]
     # TODO get length metadata, sort by users, run
 
-    split_factor_k = 2
+    split_factor_k = 1
     with env.begin(write=False) as txn:
         user_max_train_split_lengths = load_metadata_tensor(
             txn,
@@ -422,7 +431,7 @@ def main() -> None:
         split_factor_k,
     )
     user_splits.reverse()
-    # user_splits = [users]  # overwrite
+    user_splits = [users]  # overwrite
     cache_env = load_or_rebuild_tensor_cache(env, user_splits)
     try:
         for split_i, user_subset in enumerate(user_splits):
