@@ -140,7 +140,7 @@ def run_cpp_train_pass(
         batch_fsrs_params,
     )
 
-@torch.compile(fullgraph=True, dynamic=True)
+@torch.compile(fullgraph=True)
 def train_iter(
     flat_fsrs_params: torch.Tensor,
     optim_state: adamw.AdamWState,
@@ -320,7 +320,6 @@ def train(
             batch_num_inner_batches,
         )
 
-
     assert (step_i_cat >= num_training_steps_cat).all()
     assert (step_i_cat == num_training_steps_cat).any()
     print("------------------done train-----------------")
@@ -374,13 +373,16 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     # time.sleep(10)
     # exit()
 
-    label = data.review_data.rating[data.test_index] > 1
+    label = (data.review_data.rating[data.test_index] > 1).float()
+    loss = torch.nn.functional.binary_cross_entropy(p_concat, label, reduction='none')
+    logloss_weighted_by_reviews = loss.mean()
+    print("Log loss avg:", logloss_weighted_by_reviews, label.size(0))
 
     p_by_user = p_concat.split(data.test_index_lens)
     label_by_user = label.split(data.test_index_lens)
-    for user, pred, label in zip(users, p_by_user, label_by_user):
-        logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
-        print(f"User: {user}, logloss={logloss:.3f}")
+    # for user, pred, label in zip(users, p_by_user, label_by_user):
+    #     logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
+    #     print(f"User: {user}, logloss={logloss:.3f}")
 
 def run(
     users: list[int],
@@ -404,7 +406,7 @@ def main() -> None:
     
     users = list(range(USER_START, USER_END + 1))
 
-    split_factor_k = 2
+    split_factor_k = 1
     with env.begin(write=False) as txn:
         user_max_train_split_lengths = load_metadata_tensor(
             txn,
