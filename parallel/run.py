@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from io import BytesIO
 
 import lmdb
@@ -9,7 +10,7 @@ import torch
 from tqdm import tqdm
 import time
 
-from parallel import adamw, scheduler, srs_ops
+from parallel import scheduler, srs_ops
 from parallel.config import (
     BATCH_SIZE,
     LMDB_PATH,
@@ -22,8 +23,8 @@ from parallel.config import (
     USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
     USER_START,
 )
+from parallel.fsrs import fsrs_v7_constants, fsrs_v7_helpers, fsrs_v7_optimizer
 from parallel.load_balancer import get_batches_test, get_batches_train
-from parallel.models import fsrs_v7, fsrs_v7_constants
 from parallel.tensor_cache import (
     TrainSetup,
     build_batch_perm_cat_for_users,
@@ -36,6 +37,41 @@ from parallel.tensors import Data, ParamKey
 
 enzyme_sample = srs_ops.enzyme_sample
 THREADS_PER_BLOCK = srs_ops.THREADS_PER_BLOCK
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    logloss_by_review: float
+    logloss_by_user: float
+    review_count: int
+    user_count: int
+
+
+@dataclass
+class EvaluationAggregate:
+    review_loss_sum: float = 0.0
+    review_count: int = 0
+    user_loss_sum: float = 0.0
+    user_count: int = 0
+
+    def add(self, result: EvaluationResult) -> None:
+        self.review_loss_sum += result.logloss_by_review * result.review_count
+        self.review_count += result.review_count
+        self.user_loss_sum += result.logloss_by_user * result.user_count
+        self.user_count += result.user_count
+
+    @property
+    def logloss_by_review(self) -> float:
+        if self.review_count == 0:
+            return float("nan")
+        return self.review_loss_sum / self.review_count
+
+    @property
+    def logloss_by_user(self) -> float:
+        if self.user_count == 0:
+            return float("nan")
+        return self.user_loss_sum / self.user_count
+
 
 def ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
@@ -143,7 +179,7 @@ def run_cpp_train_pass(
 @torch.compile(fullgraph=True)
 def train_iter(
     flat_fsrs_params: torch.Tensor,
-    optim_state: adamw.AdamWState,
+    optim_state: fsrs_v7_optimizer.AdamWState,
     step_i_cat: torch.Tensor,
     batch_perm_cat: torch.Tensor,
     train_split_lengths_cat: torch.Tensor,
@@ -157,7 +193,7 @@ def train_iter(
     seq_len: torch.Tensor,
     threads_per_block: int,
     batch_num_inner_batches: int,
-) -> tuple[torch.Tensor, adamw.AdamWState, torch.Tensor]:
+) -> tuple[torch.Tensor, fsrs_v7_optimizer.AdamWState, torch.Tensor]:
     remaining = num_training_steps_cat - step_i_cat
     _, indices = torch.topk(remaining, k=batch_num_inner_batches)
     active_mask = remaining[indices] > 0
@@ -210,7 +246,7 @@ def train_iter(
         selected_grad,
     )
 
-    lr_schedule_multi = 2e-2 * scheduler.scheduler(step_i_cat, num_training_steps_cat)
+    lr_schedule_multi = fsrs_v7_constants.LR * scheduler.scheduler(step_i_cat, num_training_steps_cat)
     lr_schedule_multi = lr_schedule_multi.unsqueeze(-1).expand(-1, flat_fsrs_params.size(-1))
 
     active_params_mask_i = torch.zeros_like(step_i_cat).scatter_add(
@@ -220,14 +256,15 @@ def train_iter(
     )
     active_params_mask = torch.where(active_params_mask_i > 0, remaining > 0, torch.zeros_like(remaining, dtype=torch.bool))
 
-    new_flat_fsrs_params, new_optim_state = adamw.adamw_step(
+    new_flat_fsrs_params, new_optim_state = fsrs_v7_optimizer.adamw_step(
         flat_fsrs_params,
         flat_grad,
         optim_state,
         lr=lr_schedule_multi,
+        betas=fsrs_v7_constants.BETAS,
         mask=active_params_mask,
     )
-    new_flat_fsrs_params = fsrs_v7_constants.apply_parameter_clipper(new_flat_fsrs_params)
+    new_flat_fsrs_params = fsrs_v7_helpers.apply_parameter_clipper(new_flat_fsrs_params)
     new_step_i_cat = step_i_cat + active_params_mask_i
 
     return new_flat_fsrs_params, new_optim_state, new_step_i_cat
@@ -299,7 +336,7 @@ def train(
     
     step_i_cat = torch.zeros_like(num_training_steps_cat)
     flat_fsrs_params = fsrs_params.detach().view(-1, fsrs_params.size(-1))
-    optim_state = adamw.init_adamw_state(flat_fsrs_params)
+    optim_state = fsrs_v7_optimizer.init_adamw_state(flat_fsrs_params)
     for iter in tqdm(range(train_splits_length_cat_max), desc="Training", smoothing=0.06):
         flat_fsrs_params, optim_state, step_i_cat = train_iter(
             flat_fsrs_params,
@@ -321,7 +358,6 @@ def train(
 
     assert (step_i_cat >= num_training_steps_cat).all()
     assert (step_i_cat == num_training_steps_cat).any()
-    print("------------------done train-----------------")
     return flat_fsrs_params.view_as(fsrs_params)
 
 def predict_test_set(fsrs_params: torch.Tensor, data: Data) -> torch.Tensor:
@@ -353,7 +389,7 @@ def predict_test_set(fsrs_params: torch.Tensor, data: Data) -> torch.Tensor:
     return p_concat
 
 
-def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
+def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data) -> EvaluationResult:
     print("eval on test")
     assert data.split_counts.size(0) == len(users)
 
@@ -365,19 +401,26 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     logloss_weighted_by_reviews = loss.mean()
     logloss_weighted_by_user = \
         (loss * torch.repeat_interleave(1.0 / data.test_index_lens, data.test_index_lens)).sum() / len(users)
-    print(f"n: {label.size(0)}")
-    print(f"Log loss avg by review: {logloss_weighted_by_reviews.item():.5f}")
-    print(f"Log loss avg by user: {logloss_weighted_by_user.item():.5f}")
+    result = EvaluationResult(
+        logloss_by_review=float(logloss_weighted_by_reviews.item()),
+        logloss_by_user=float(logloss_weighted_by_user.item()),
+        review_count=int(label.size(0)),
+        user_count=len(users),
+    )
+    # print(f"n: {result.review_count}")
+    # print(f"Log loss avg by review: {result.logloss_by_review:.5f}")
+    # print(f"Log loss avg by user: {result.logloss_by_user:.5f}")
 
     # p_by_user = p_concat.split(data.test_index_lens)
     # label_by_user = label.split(data.test_index_lens)
     # for user, pred, label in zip(users, p_by_user, label_by_user):
     #     logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
     #     print(f"User: {user}, logloss={logloss:.3f}")
+    return result
 
 
 def make_initial_fsrs_params(user_count: int) -> torch.Tensor:
-    initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
+    initial_params = fsrs_v7_helpers.get_initial_params_for_optimization().to(DEVICE)
     return initial_params.view(1, 1, -1).repeat(user_count, N_SPLITS, 1).requires_grad_(True)
 
 
@@ -412,10 +455,10 @@ def evaluate_cached_split(
     users: list[int],
     review_data,
     fsrs_params: torch.Tensor,
-) -> None:
+) -> EvaluationResult:
     test_data = load_cached_test_only(cache_env, split_i, DEVICE, review_data)
     with torch.no_grad():
-        evaluate_on_test_set(fsrs_params, users, test_data)
+        return evaluate_on_test_set(fsrs_params, users, test_data)
 
 
 def run_cached_split(
@@ -424,7 +467,7 @@ def run_cached_split(
     split_count: int,
     user_subset: list[int],
     user_max_train_split_lengths: torch.Tensor,
-) -> None:
+) -> EvaluationResult:
     user_indices = torch.tensor(user_subset, dtype=torch.int32) - 1
     split_work = int(user_max_train_split_lengths[user_indices].sum().item())
     print(
@@ -437,8 +480,9 @@ def run_cached_split(
     fsrs_params = train_cached_split(cache_env, split_i, user_subset, review_data)
 
     torch.cuda.empty_cache()
-    evaluate_cached_split(cache_env, split_i, user_subset, review_data, fsrs_params)
+    result = evaluate_cached_split(cache_env, split_i, user_subset, review_data, fsrs_params)
     torch.cuda.empty_cache()
+    return result
 
 
 def main() -> None:
@@ -452,7 +496,7 @@ def main() -> None:
     
     users = list(range(USER_START, USER_END + 1))
 
-    split_factor_k = 1
+    split_factor_k = 2
     with env.begin(write=False) as txn:
         user_max_train_split_lengths = load_metadata_tensor(
             txn,
@@ -470,18 +514,25 @@ def main() -> None:
     # user_splits = [users]  # overwrite
     cache_env = load_or_rebuild_tensor_cache(env, user_splits)
 
+    eval_aggregate = EvaluationAggregate()
     try:
         for split_i, user_subset in enumerate(user_splits):
-            run_cached_split(
+            result = run_cached_split(
                 cache_env,
                 split_i,
                 len(user_splits),
                 user_subset,
                 user_max_train_split_lengths,
             )
+            eval_aggregate.add(result)
     finally:
         cache_env.close()
     env.close()
+
+    print(f"Users: {eval_aggregate.user_count}")
+    print(f"n reviews: {eval_aggregate.review_count}")
+    print(f"Log loss avg by review: {eval_aggregate.logloss_by_review:.5f}")
+    print(f"Log loss avg by user: {eval_aggregate.logloss_by_user:.5f}")
 
 
 if __name__ == "__main__":

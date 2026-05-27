@@ -4,6 +4,7 @@ from typing import NamedTuple
 
 import torch
 
+from parallel.fsrs import fsrs_v7_constants
 
 class AdamWState(NamedTuple):
     step: torch.Tensor
@@ -25,9 +26,9 @@ def adamw_step(
     *,
     lr: torch.Tensor,
     mask: torch.Tensor,
-    betas: tuple[float, float] = (0.9, 0.999),
+    betas: tuple[float, float],
     eps: float = 1e-8,
-    weight_decay: float = 0.01,
+    weight_decay: float = 0.00,
 ) -> tuple[torch.Tensor, AdamWState]:
     updated_params, updated_step, updated_exp_avg, updated_exp_avg_sq = adamw_update(
         params,
@@ -56,9 +57,9 @@ def adamw_update(
     exp_avg_sq: torch.Tensor,
     *,
     lr: torch.Tensor,
-    betas: tuple[float, float] = (0.9, 0.999),
-    eps: float = 1e-8,
-    weight_decay: float = 0.01,
+    betas: tuple[float, float],
+    eps: float,
+    weight_decay: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     beta1, beta2 = betas
     new_step = step + 1

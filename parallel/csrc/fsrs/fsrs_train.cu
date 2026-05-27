@@ -100,9 +100,12 @@ int32_t idx3(
 
 __device__ __forceinline__
 float dloss_dp(
-    const float p,
+    float p,
     const bool label
 ) {
+    constexpr float eps = 1e-5f;
+    p = fminf(fmaxf(p, eps), 1.0f - eps);
+
     return label ? (-1.0f / p) : (1.0f / (1.0f - p));
 }
 

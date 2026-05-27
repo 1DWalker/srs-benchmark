@@ -67,7 +67,8 @@ float fsrs7_forgetting_curve(
     const float weight2 = fsrs_params.base_weight2 * powf(state.s, fsrs_params.s_weight_power2);
     const float retention = (weight1 * r1 + weight2 * r2) / (weight1 + weight2);
 
-    return 1e-5f + (1.0f - 2e-5f) * retention;
+    // return 1e-5f + (1.0f - 2e-5f) * retention;
+    return retention;
 }
 
 __device__ __forceinline__
