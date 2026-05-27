@@ -54,6 +54,7 @@ class BenchmarkTensors(NamedTuple):
     rmse_bins: torch.Tensor
     split: torch.Tensor
     train_index: torch.Tensor
+    split_review_ord: torch.Tensor
     train_split_lengths: torch.Tensor
 
 
@@ -106,6 +107,8 @@ def is_current_user_blob(blob: UserTensorBlob, config: Config) -> bool:
     if blob.seq_len.numel() != blob.rating.numel():
         return False
     if blob.card_last_index.numel() != int((blob.seq_len == 1).sum().item()):
+        return False
+    if blob.split_review_ord.numel() != blob.train_index.numel():
         return False
     return blob.split.numel() == config.n_splits
 
@@ -237,6 +240,7 @@ def pack_user_tensors(
         rmse_bins=benchmark_tensors.rmse_bins,
         split=benchmark_tensors.split,
         train_index=benchmark_tensors.train_index,
+        split_review_ord=benchmark_tensors.split_review_ord,
         train_split_lengths=benchmark_tensors.train_split_lengths,
     )
 
@@ -248,6 +252,7 @@ def empty_benchmark_tensors() -> BenchmarkTensors:
         rmse_bins=torch.tensor([], dtype=torch.int8),
         split=empty_int32,
         train_index=empty_int32,
+        split_review_ord=empty_int32,
         train_split_lengths=empty_int32,
     )
 
@@ -271,25 +276,26 @@ def get_training_layout(
     batch_size: int,
     max_seq_len: int,
     raw_to_grouped_index: np.ndarray,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     batch_size = max(1, int(batch_size))
     if train_set.empty:
         empty = np.array([], dtype=np.int32)
-        return empty
+        return empty, empty
 
     train_set = train_set.copy()
     train_set["_seq_len"] = train_set["tensor"].map(len)
     train_set = train_set[train_set["_seq_len"] <= max_seq_len]
     if train_set.empty:
         empty = np.array([], dtype=np.int32)
-        return empty
+        return empty, empty
 
+    train_set["review_i"] = range(len(train_set))
     train_set = train_set.sort_values(by=["_seq_len"], kind="stable")
     train_index = review_th_to_grouped_index(
         train_set["review_th"],
         raw_to_grouped_index,
     )
-    return train_index
+    return train_index, train_set["review_i"].to_numpy()
 
 
 def concat_int32(arrays: list[np.ndarray]) -> np.ndarray:
@@ -322,6 +328,7 @@ def build_benchmark_tensors(
     rmse_bins = []
     split_test_lengths = []
     train_indices = []
+    split_review_ords = []
     train_split_lengths = []
     tscv = TimeSeriesSplit(n_splits=N_SPLITS)
     for train_index, test_index in tscv.split(feature_df):
@@ -331,23 +338,26 @@ def build_benchmark_tensors(
 
         train_set = feature_df.iloc[train_index]
         train_set = model.filter_training_data(train_set)
-        split_train_index = get_training_layout(
+        split_train_index, split_review_ord = get_training_layout(
             train_set,
             batch_size=batch_size,
             max_seq_len=max_seq_len,
             raw_to_grouped_index=raw_to_grouped_index,
         )
         train_indices.append(split_train_index)
+        split_review_ords.append(split_review_ord)
         train_split_lengths.append(len(split_train_index))
 
     test_indices = np.concatenate(test_indices)
     rmse_bins = np.concatenate(rmse_bins)
     train_indices_array = concat_int32(train_indices)
+    split_review_ord_array = concat_int32(split_review_ords)
     return BenchmarkTensors(
         test_index=torch.tensor(test_indices, dtype=torch.int32),
         rmse_bins=torch.tensor(rmse_bins, dtype=torch.int8),
         split=torch.tensor(split_test_lengths, dtype=torch.int32),
         train_index=torch.tensor(train_indices_array, dtype=torch.int32),
+        split_review_ord=torch.tensor(split_review_ord_array, dtype=torch.int32),
         train_split_lengths=torch.tensor(train_split_lengths, dtype=torch.int32),
     )
 
