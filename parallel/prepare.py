@@ -309,8 +309,6 @@ def build_benchmark_tensors(
 
     model = create_model(config)
     batch_size = getattr(model, "batch_size", config.batch_size)
-    # print("overwriting batch size")
-    # batch_size = 2
     max_seq_len = config.max_seq_len
 
     bins = feature_df.apply(get_bin, axis=1)
@@ -324,8 +322,6 @@ def build_benchmark_tensors(
     rmse_bins = []
     split_test_lengths = []
     train_indices = []
-    train_batch_lengths = []
-    batch_orders = []
     train_split_lengths = []
     tscv = TimeSeriesSplit(n_splits=N_SPLITS)
     for train_index, test_index in tscv.split(feature_df):
@@ -347,8 +343,6 @@ def build_benchmark_tensors(
     test_indices = np.concatenate(test_indices)
     rmse_bins = np.concatenate(rmse_bins)
     train_indices_array = concat_int32(train_indices)
-    train_batch_lengths_array = concat_int32(train_batch_lengths)
-    batch_order_array = concat_int32(batch_orders)
     return BenchmarkTensors(
         test_index=torch.tensor(test_indices, dtype=torch.int32),
         rmse_bins=torch.tensor(rmse_bins, dtype=torch.int8),

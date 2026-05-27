@@ -176,7 +176,7 @@ def run_cpp_train_pass(
         batch_fsrs_params,
     )
 
-@torch.compile(fullgraph=True)
+# @torch.compile(fullgraph=True)
 def train_iter(
     flat_fsrs_params: torch.Tensor,
     optim_state: fsrs_v7_optimizer.AdamWState,
@@ -245,6 +245,9 @@ def train_iter(
         indices.unsqueeze(-1).expand_as(selected_grad),
         selected_grad,
     )
+    # penalty = fsrs_v7_helpers.penalty(flat_fsrs_params[indices], train_r - train_l + 1, train_split_lengths_cat[indices])
+    # penalty.sum().backward()
+    # print(train_split_lengths_cat[indices].min())
 
     lr_schedule_multi = fsrs_v7_constants.LR * scheduler.scheduler(step_i_cat, num_training_steps_cat)
     lr_schedule_multi = lr_schedule_multi.unsqueeze(-1).expand(-1, flat_fsrs_params.size(-1))
@@ -314,14 +317,10 @@ def build_train_setup(data: Data, users: list[int]) -> TrainSetup:
 
 def train(
     fsrs_params: torch.Tensor,
-    users: list[int],
     data: Data,
-    train_setup: TrainSetup | None = None,
+    train_setup: TrainSetup,
 ):
     train_split_lengths_cat = data.train_split_lengths
-    if train_setup is None:
-        train_setup = build_train_setup(data, users)
-
     num_training_steps_per_epoch_cat = train_setup.num_training_steps_per_epoch_cat
     num_training_steps_cat = train_setup.num_training_steps_cat
     batch_perm_cat = train_setup.batch_perm_cat
@@ -335,7 +334,7 @@ def train(
     )
     
     step_i_cat = torch.zeros_like(num_training_steps_cat)
-    flat_fsrs_params = fsrs_params.detach().view(-1, fsrs_params.size(-1))
+    flat_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))
     optim_state = fsrs_v7_optimizer.init_adamw_state(flat_fsrs_params)
     for iter in tqdm(range(train_splits_length_cat_max), desc="Training", smoothing=0.06):
         flat_fsrs_params, optim_state, step_i_cat = train_iter(
@@ -430,7 +429,7 @@ def run(
     train_setup: TrainSetup,
 ) -> torch.Tensor:
     fsrs_params = make_initial_fsrs_params(len(users))
-    fsrs_params = train(fsrs_params, users, data, train_setup)
+    fsrs_params = train(fsrs_params, data, train_setup)
     return fsrs_params
 
 

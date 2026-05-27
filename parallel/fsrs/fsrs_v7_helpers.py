@@ -4,9 +4,6 @@ from parallel.fsrs import fsrs_v7_constants
 
 PENALTY_W_L2 = 0.5
 
-default_params = torch.tensor(fsrs_v7_constants.FSRS7_DEFAULT_35_VALUES, dtype=torch.float32)
-sigma = torch.tensor(fsrs_v7_constants.FSRS7_L2_SIGMA_35_VALUES, dtype=torch.float32)
-
 def get_initial_params_for_optimization():
     return torch.tensor(fsrs_v7_constants.FSRS7_DEFAULT_35_VALUES, dtype=torch.float32)
 
@@ -30,3 +27,9 @@ def apply_parameter_clipper(parameters_b):
     clipped[..., 28] = torch.maximum(clipped[..., 28], clipped[..., 27])
     clipped[..., 30] = torch.maximum(clipped[..., 30], clipped[..., 29])
     return clipped
+
+# @torch.compile(fullgraph=True)
+def penalty(parameters_b, batch_size_b, training_set_size_b):
+    default_params = torch.tensor(fsrs_v7_constants.FSRS7_DEFAULT_35_VALUES, device=parameters_b.device, dtype=parameters_b.dtype)
+    sigma = torch.tensor(fsrs_v7_constants.FSRS7_L2_SIGMA_35_VALUES, device=parameters_b.device, dtype=parameters_b.dtype)
+    return PENALTY_W_L2 * batch_size_b.float() / training_set_size_b.float() * torch.sum(torch.square(parameters_b - default_params.unsqueeze(0)) / torch.square(sigma.unsqueeze(0)), dim=-1)
