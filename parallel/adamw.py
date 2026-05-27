@@ -17,6 +17,7 @@ def init_adamw_state(params: torch.Tensor) -> AdamWState:
         exp_avg_sq=torch.zeros_like(params),
     )
 
+@torch.compile(fullgraph=True)
 def adamw_step(
     params: torch.Tensor,
     grad: torch.Tensor,

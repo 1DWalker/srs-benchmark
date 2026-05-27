@@ -121,31 +121,24 @@ def run_cpp_train_pass(
     threads_per_block: int,
 ):
     U, B = seq_lens.shape
-    # seq_lens_UxT = seq_lens.view(U, B // threads_per_block, threads_per_block)
-    # seq_lens_Ux_max = seq_lens_UxT.max(dim=-1).values
-    # flat = seq_lens_Ux_max.view(-1)
-    # seq_lens_Ux_max_cumsum_inc = (flat * threads_per_block).cumsum(dim=0, dtype=torch.int32)
-    # seq_lens_Ux_max_cumsum = torch.nn.functional.pad(
-    #     seq_lens_Ux_max_cumsum_inc[:-1],
-    #     (1, 0),
-    #     value=0,
-    # ).view(U, B // threads_per_block)
-    # result = torch.ops.srs.fsrs7_train(
-    #     elapsed_days_real, 
-    #     rating, 
-    #     start_indices.view_as(seq_lens_UxT),
-    #     seq_lens_UxT,
-    #     seq_lens_Ux_max,
-    #     seq_lens_Ux_max_cumsum,
-    #     batch_fsrs_params,
-    # )
-    return torch.zeros(
-        (U, B, 35),
-        device=seq_lens.device,
-        dtype=batch_fsrs_params.dtype,
+    seq_lens_UxT = seq_lens.view(U, B // threads_per_block, threads_per_block)
+    seq_lens_Ux_max = seq_lens_UxT.max(dim=-1).values
+    flat = seq_lens_Ux_max.view(-1)
+    seq_lens_Ux_max_cumsum_inc = (flat * threads_per_block).cumsum(dim=0, dtype=torch.int32)
+    seq_lens_Ux_max_cumsum = torch.nn.functional.pad(
+        seq_lens_Ux_max_cumsum_inc[:-1],
+        (1, 0),
+        value=0,
+    ).view(U, B // threads_per_block)
+    return torch.ops.srs.fsrs7_train(
+        elapsed_days_real, 
+        rating, 
+        start_indices.view_as(seq_lens_UxT),
+        seq_lens_UxT,
+        seq_lens_Ux_max,
+        seq_lens_Ux_max_cumsum,
+        batch_fsrs_params,
     )
-
-
 
 @torch.compile(fullgraph=True, dynamic=True)
 def train_iter(
@@ -167,9 +160,7 @@ def train_iter(
 ) -> tuple[torch.Tensor, adamw.AdamWState, torch.Tensor]:
     remaining = num_training_steps_cat - step_i_cat
     _, indices = torch.topk(remaining, k=batch_num_inner_batches)
-    # active_i = indices.to(dtype=step_i_cat.dtype)
     active_mask = remaining[indices] > 0
-    # indices = remaining[indices] > 0
 
     step_i = step_i_cat[indices]
     max_step_i = (num_training_steps_cat[indices] - 1).clamp_min(0)
@@ -224,22 +215,16 @@ def train_iter(
     active_params_mask_i = torch.zeros_like(step_i_cat).scatter_add(
         0,
         indices,
-        torch.ones_like(step_i_cat),
+        torch.ones_like(indices, dtype=step_i_cat.dtype),
     )
     active_params_mask = torch.where(active_params_mask_i > 0, remaining > 0, torch.zeros_like(remaining, dtype=torch.bool))
-    # print("-------------")
-    # print(indices)
-    # print(active_params_mask_i)
-    # print(active_params_mask)
 
     new_flat_fsrs_params, new_optim_state = adamw.adamw_step(
         flat_fsrs_params,
         flat_grad,
         optim_state,
         lr=lr_schedule_multi,
-        # lr=torch.zeros_like(lr_schedule_multi),
         mask=active_params_mask,
-        # mask=torch.zeros_like(active_params_mask),
     )
     new_flat_fsrs_params = fsrs_v7_constants.apply_parameter_clipper(new_flat_fsrs_params)
     new_step_i_cat = step_i_cat + active_params_mask_i
@@ -336,7 +321,6 @@ def train(
         )
 
 
-    # assert (step_i_cat == num_training_steps_cat).all()
     assert (step_i_cat >= num_training_steps_cat).all()
     assert (step_i_cat == num_training_steps_cat).any()
     print("------------------done train-----------------")
@@ -419,7 +403,6 @@ def main() -> None:
     )
     
     users = list(range(USER_START, USER_END + 1))
-    # TODO get length metadata, sort by users, run
 
     split_factor_k = 2
     with env.begin(write=False) as txn:
@@ -434,25 +417,13 @@ def main() -> None:
         split_factor_k,
     )
     user_splits.reverse()
-
-    # new_user_splits = []
-    # for l in user_splits:
-    #     import random
-    #     x = [z for z in l]
-    #     new_user_splits.append(l)   
-    #     new_user_splits.append(x)   
-    # user_splits = new_user_splits
-
+    for l in user_splits:
+        l.sort()
     # user_splits = [users]  # overwrite
     cache_env = load_or_rebuild_tensor_cache(env, user_splits)
 
     try:
         for split_i, user_subset in enumerate(user_splits):
-        # for display_i, split_i in enumerate(reversed(range(len(user_splits)))):
-        #     user_subset = user_splits[split_i]
-        #     review_data = load_cached_review_data(cache_env, split_i, DEVICE)
-        #     train_data, train_setup = load_cached_train_only(cache_env, split_i, DEVICE, review_data)
-
             user_indices = torch.tensor(user_subset, dtype=torch.int64) - 1
             split_work = int(user_max_train_split_lengths[user_indices].sum().item())
             print(
