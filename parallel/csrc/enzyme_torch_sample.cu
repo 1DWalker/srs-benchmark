@@ -11,8 +11,8 @@ __device__ void square_impl(double* x, double* y) {
 
 typedef void (*square_fn)(double*, double*);
 
-__global__ void square_forward_kernel(const double* x, double* y, int64_t n) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void square_forward_kernel(const double* x, double* y, int32_t n) {
+    int32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) {
         return;
     }
@@ -27,9 +27,9 @@ __global__ void square_backward_kernel(
     const double* x,
     const double* grad_out,
     double* grad_x,
-    int64_t n
+    int32_t n
 ) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    int32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) {
         return;
     }
@@ -46,7 +46,7 @@ extern "C" void enzyme_square_backward_cuda(
     const double* x,
     const double* grad_out,
     double* grad_x,
-    int64_t n,
+    int32_t n,
     cudaStream_t stream
 ) {
     if (n <= 0) {

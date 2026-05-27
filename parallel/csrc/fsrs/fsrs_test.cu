@@ -13,7 +13,7 @@ __global__ void fsrs_test_kernel(
     const int32_t N,
     float* __restrict__ p
 ) {
-    const int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
     const int32_t start = start_index[i];

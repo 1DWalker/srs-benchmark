@@ -250,12 +250,12 @@ class DataBuilder:
         )
         data.device = data.review_data.rating.device
 
-        user_lengths_t = torch.tensor(self.user_lengths, device=self.device)
+        user_lengths_t = torch.tensor(self.user_lengths, dtype=torch.int32, device=self.device)
         if user_lengths_t.numel() == 0:
-            data.user_flat_offset = torch.empty(0, device=self.device)
+            data.user_flat_offset = torch.empty(0, dtype=torch.int32, device=self.device)
         else:
             data.user_flat_offset = torch.nn.functional.pad(
-                torch.cumsum(user_lengths_t, dim=-1)[:-1],
+                torch.cumsum(user_lengths_t, dim=-1, dtype=torch.int32)[:-1],
                 (1, 0),
             )
 
@@ -263,7 +263,11 @@ class DataBuilder:
         data.train_split_lengths = self.train_split_lengths.finish(torch.int32, shrink=shrink)
 
         data.test_index = self.test_index.finish(shrink=shrink)
-        data.test_index_lens = self.test_index_lens
+        data.test_index_lens = torch.tensor(
+            self.test_index_lens,
+            dtype=torch.int32,
+            device=self.device,
+        )
         data.splits = self.splits.finish(torch.int32, shrink=shrink)
         data.split_counts = self.split_counts.finish(shrink=shrink)
 
@@ -302,6 +306,7 @@ class Data:
         self.train_index = self.train_index.to(device)
         self.train_split_lengths = self.train_split_lengths.to(device)
         self.test_index = self.test_index.to(device)
+        self.test_index_lens = self.test_index_lens.to(device)
         self.splits = self.splits.to(device)
         self.split_counts = self.split_counts.to(device)
         return self
@@ -318,20 +323,21 @@ class Data:
         # Delay the computation of this to save a bit of memory
         split_counts = self.split_counts
         split_offsets = torch.nn.functional.pad(
-            torch.cumsum(split_counts, dim=-1)[:-1],
+            torch.cumsum(split_counts, dim=-1, dtype=torch.int32)[:-1],
             (1, 0),
         )
         split_owner_offsets = torch.repeat_interleave(split_offsets, split_counts)
         split_index_per_split = torch.arange(
             self.splits.numel(),
             device=self.device,
+            dtype=torch.int32,
         ) - split_owner_offsets
         split_index = torch.repeat_interleave(
             split_index_per_split,
             self.splits,
         )
         user_index = torch.repeat_interleave(
-            torch.arange(len(self.test_index_lens), device=self.device),
-            torch.tensor(self.test_index_lens, device=self.device),
+            torch.arange(self.test_index_lens.size(0), device=self.device, dtype=torch.int32),
+            self.test_index_lens,
         )
         return ParamKey(user_index=user_index, split_index=split_index)

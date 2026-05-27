@@ -65,8 +65,8 @@ def split_users_by_train_length(
     if not users:
         return []
 
-    lengths = user_max_train_split_lengths.cpu().to(dtype=torch.int64)
-    user_tensor = torch.tensor(users, dtype=torch.int64)
+    lengths = user_max_train_split_lengths.cpu().to(dtype=torch.int32)
+    user_tensor = torch.tensor(users, dtype=torch.int32)
     if int(user_tensor.min().item()) < 1 or int(user_tensor.max().item()) > lengths.numel():
         raise ValueError("users must be 1-indexed into user_max_train_split_lengths.")
 
@@ -84,7 +84,7 @@ def split_users_by_train_length(
             for i in range(section_count)
         ]
 
-    prefix = torch.cumsum(sorted_lengths, dim=0)
+    prefix = torch.cumsum(sorted_lengths, dim=0, dtype=torch.int32)
     prefix_float = prefix.to(dtype=torch.float64)
     total = int(prefix[-1].item())
     boundaries = [0]
@@ -181,6 +181,7 @@ def train_iter(
     train_range = train_l.unsqueeze(-1) + torch.arange(
         BATCH_SIZE,
         device=train_l.device,
+        dtype=train_l.dtype,
     ).view(1, -1).expand(train_l.size(0), -1)
 
     legal = (train_range <= train_r.unsqueeze(-1)) & active_mask.unsqueeze(-1)
@@ -245,11 +246,11 @@ def build_train_setup(data: Data, users: list[int]) -> TrainSetup:
     ).to(DEVICE)
 
     batch_perm_user_flat_offset = torch.nn.functional.pad(
-        torch.cumsum(num_training_steps_cat.to(dtype=torch.int64), dim=-1)[:-1],
+        torch.cumsum(num_training_steps_cat.to(dtype=torch.int32), dim=-1, dtype=torch.int32)[:-1],
         (1, 0),
     ).view(len(users), N_SPLITS)
     train_split_lengths_offset = torch.nn.functional.pad(
-        torch.cumsum(train_split_lengths_cat.to(dtype=torch.int64), dim=-1)[:-1],
+        torch.cumsum(train_split_lengths_cat.to(dtype=torch.int32), dim=-1, dtype=torch.int32)[:-1],
         (1, 0),
     ).view(len(users), N_SPLITS)
 
@@ -336,11 +337,8 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     # print(data.splits, data.splits.view(-1, data.split_counts[0].item()))
     assert data.split_counts.size(0) == len(users)
     # test_dataset_size_by_user = data.splits.view(-1, N_SPLITS).sum(dim=-1)
-    test_index_lens = torch.tensor(data.test_index_lens, dtype=torch.int, device=fsrs_params.device)
-    per_user_weight_flat = torch.repeat_interleave(1.0 / per_user_weight, test_index_lens)
     # print(test_dataset_size_by_user, test_dataset_size_by_user.sum())
     # print(torch.tensor(data.test_index_lens))
-    print(per_user_weight_flat)
 
     test_seq_len = data.test_index.size(0)
     # _, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True, descending=True)
@@ -387,7 +385,8 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     label = (data.review_data.rating[data.test_index] > 1).float()
     loss = torch.nn.functional.binary_cross_entropy(p_concat, label, reduction='none')
     logloss_weighted_by_reviews = loss.mean()
-    logloss_weighted_by_user = (loss * per_user_weight_flat).sum() / len(users)
+    logloss_weighted_by_user = \
+        (loss * torch.repeat_interleave(1.0 / data.test_index_lens, data.test_index_lens)).sum() / len(users)
     print("Log loss avg:", logloss_weighted_by_reviews, label.size(0))
     print("Log loss avg by user:", logloss_weighted_by_user, label.size(0))
 
@@ -435,7 +434,7 @@ def main() -> None:
 
     try:
         for split_i, user_subset in enumerate(user_splits):
-            user_indices = torch.tensor(user_subset, dtype=torch.int64) - 1
+            user_indices = torch.tensor(user_subset, dtype=torch.int32) - 1
             split_work = int(user_max_train_split_lengths[user_indices].sum().item())
             print(
                 f"Run split {split_i + 1}/{len(user_splits)}: "

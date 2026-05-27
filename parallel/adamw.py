@@ -12,7 +12,7 @@ class AdamWState(NamedTuple):
 
 def init_adamw_state(params: torch.Tensor) -> AdamWState:
     return AdamWState(
-        step=torch.zeros(params.shape[:-1], dtype=torch.int64, device=params.device),
+        step=torch.zeros(params.shape[:-1], dtype=torch.int32, device=params.device),
         exp_avg=torch.zeros_like(params),
         exp_avg_sq=torch.zeros_like(params),
     )

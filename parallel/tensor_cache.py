@@ -74,8 +74,8 @@ def build_user_batch_perm(
     user_id: int,
     num_training_steps_per_epoch: np.ndarray,
 ) -> np.ndarray:
-    steps = np.asarray(num_training_steps_per_epoch, dtype=np.int64).reshape(-1)
-    out = np.empty(int(steps.sum()) * N_EPOCHS, dtype=np.int64)
+    steps = np.asarray(num_training_steps_per_epoch, dtype=np.int32).reshape(-1)
+    out = np.empty(int(steps.sum()) * N_EPOCHS, dtype=np.int32)
     generator = torch.Generator(device="cpu")
     generator.manual_seed(BATCH_PERM_SEED + int(user_id))
 
@@ -95,12 +95,12 @@ def build_batch_perm_cat_for_users(
     user_ids: Sequence[int],
     num_training_steps_per_epoch: np.ndarray,
 ) -> np.ndarray:
-    steps = np.asarray(num_training_steps_per_epoch, dtype=np.int64).reshape(-1)
+    steps = np.asarray(num_training_steps_per_epoch, dtype=np.int32).reshape(-1)
     if len(user_ids) == 0:
-        return np.empty(0, dtype=np.int64)
+        return np.empty(0, dtype=np.int32)
 
     steps_by_user = steps.reshape(len(user_ids), N_SPLITS)
-    out = np.empty(int(steps.sum()) * N_EPOCHS, dtype=np.int64)
+    out = np.empty(int(steps.sum()) * N_EPOCHS, dtype=np.int32)
 
     offset = 0
     for user_id, user_steps in zip(user_ids, steps_by_user, strict=True):
@@ -270,8 +270,8 @@ def load_cached_test_only(
         data.test_index_lens = get_tensor(
             txn,
             _cache_tensor_prefix(split_i, "test_index_lens"),
-            "cpu",
-        ).tolist()
+            device,
+        )
     return data
 
 
@@ -363,16 +363,8 @@ def _read_user_info(txn: lmdb.Transaction, user_id: int) -> _SourceUserInfo:
 
 
 def _put_cache_array(cache_env: lmdb.Environment, split_i: int, name: str, array: np.ndarray) -> None:
-    # size_gb = array.nbytes / 1_000_000_000
-    # tqdm.write(f"split {split_i + 1}: writing {name} ({size_gb:.3f} GB)")
-
     def on_chunk_write(chunk_i: int, chunk_count: int, chunk_bytes: int) -> None:
-        if chunk_count > 1:
-            chunk_gb = chunk_bytes / 1_000_000_000
-            tqdm.write(
-                f"split {split_i + 1}: writing {name} chunk "
-                f"{chunk_i + 1}/{chunk_count} ({chunk_gb:.3f} GB)"
-            )
+        pass
 
     put_array_to_env(
         cache_env,
@@ -482,15 +474,15 @@ def _build_small_derived_tensors(
     infos: list[_SourceUserInfo],
 ) -> None:
     split_counts = np.array([info.split_len for info in infos], dtype=np.int32)
-    test_index_lens = np.array([info.test_len for info in infos], dtype=np.int64)
-    user_lengths = np.array([info.review_len for info in infos], dtype=np.int64)
+    test_index_lens = np.array([info.test_len for info in infos], dtype=np.int32)
+    user_lengths = np.array([info.review_len for info in infos], dtype=np.int32)
     if user_lengths.size == 0:
-        user_flat_offset = np.empty(0, dtype=np.int64)
+        user_flat_offset = np.empty(0, dtype=np.int32)
     else:
         user_flat_offset = np.empty_like(user_lengths)
         user_flat_offset[0] = 0
         if user_lengths.size > 1:
-            user_flat_offset[1:] = np.cumsum(user_lengths[:-1], dtype=np.int64)
+            user_flat_offset[1:] = np.cumsum(user_lengths[:-1], dtype=np.int32)
 
     _put_cache_array(cache_env, split_i, "split_counts", split_counts)
     del split_counts
@@ -519,7 +511,7 @@ def _build_train_setup(
     _put_cache_array(cache_env, split_i, "num_training_steps_per_epoch_cat", num_training_steps_per_epoch)
     _put_cache_array(cache_env, split_i, "num_training_steps_cat", num_training_steps)
 
-    batch_perm_user_flat_offset = _offsets_from_lengths(num_training_steps.astype(np.int64))
+    batch_perm_user_flat_offset = _offsets_from_lengths(num_training_steps)
     _put_cache_array(
         cache_env,
         split_i,
@@ -528,7 +520,7 @@ def _build_train_setup(
     )
     del batch_perm_user_flat_offset
 
-    train_split_lengths_offset = _offsets_from_lengths(train_split_lengths.astype(np.int64))
+    train_split_lengths_offset = _offsets_from_lengths(train_split_lengths)
     _put_cache_array(
         cache_env,
         split_i,
@@ -551,12 +543,13 @@ def _build_train_setup(
 
 
 def _offsets_from_lengths(lengths: np.ndarray) -> np.ndarray:
-    offsets = np.empty_like(lengths, dtype=np.int64)
+    lengths = np.asarray(lengths, dtype=np.int32)
+    offsets = np.empty_like(lengths, dtype=np.int32)
     if lengths.size == 0:
         return offsets
     offsets[0] = 0
     if lengths.size > 1:
-        offsets[1:] = np.cumsum(lengths[:-1], dtype=np.int64)
+        offsets[1:] = np.cumsum(lengths[:-1], dtype=np.int32)
     return offsets
 
 

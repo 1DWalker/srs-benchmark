@@ -170,7 +170,7 @@ def load_user_parquet(data_path: Path, user_id: int) -> pd.DataFrame:
 
 
 def build_card_grouping(df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
-    raw_index = np.arange(len(df), dtype=np.int64)
+    raw_index = np.arange(len(df), dtype=np.int32)
     order_df = pd.DataFrame(
         {
             "card_id": df["card_id"].to_numpy(),
@@ -180,12 +180,12 @@ def build_card_grouping(df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray, np.
     card_sorted_index = order_df.sort_values(
         by=["card_id", "raw_index"],
         kind="stable",
-    )["raw_index"].to_numpy(dtype=np.int64)
+    )["raw_index"].to_numpy(dtype=np.int32)
 
-    raw_to_grouped_index = np.empty(len(card_sorted_index), dtype=np.int64)
+    raw_to_grouped_index = np.empty(len(card_sorted_index), dtype=np.int32)
     raw_to_grouped_index[card_sorted_index] = np.arange(
         len(card_sorted_index),
-        dtype=np.int64,
+        dtype=np.int32,
     )
     return df.iloc[card_sorted_index], card_sorted_index, raw_to_grouped_index
 
@@ -194,7 +194,7 @@ def build_raw_tensors(df: pd.DataFrame) -> RawTensorLayout:
     grouped_df, card_sorted_index, raw_to_grouped_index = build_card_grouping(df)
     seq_len = grouped_df.groupby("card_id").cumcount() + 1
     card_sizes = grouped_df.groupby("card_id", sort=False, dropna=False).size()
-    card_last_index = np.cumsum(card_sizes.to_numpy(dtype=np.int64)) - 1
+    card_last_index = np.cumsum(card_sizes.to_numpy(dtype=np.int32), dtype=np.int32) - 1
     return RawTensorLayout(
         tensors={
             "ratings": torch.tensor(grouped_df["rating"].to_numpy(), dtype=torch.int8),
@@ -218,7 +218,7 @@ def review_th_to_grouped_index(
     review_th: pd.Series,
     raw_to_grouped_index: np.ndarray,
 ) -> np.ndarray:
-    raw_index = review_th.to_numpy(dtype=np.int64) - 1
+    raw_index = review_th.to_numpy(dtype=np.int32) - 1
     return raw_to_grouped_index[raw_index].astype(np.int32)
 
 

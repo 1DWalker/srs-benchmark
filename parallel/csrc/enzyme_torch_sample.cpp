@@ -151,7 +151,14 @@ torch::Tensor fsrs7_train_dispatch(
     TORCH_CHECK(T == THREADS_PER_BLOCK, "seq_len_UxT last dimension must equal THREADS_PER_BLOCK");
 
     c10::cuda::CUDAGuard device_guard(elapsed_days_real_flat.device());
-    fsrs_state_t *state_buffer_ptr = state_buffer.ensure(TRAIN_SCRATCH_STATES);
+    torch::Tensor state_buffer_tensor = torch::empty(
+        {TRAIN_SCRATCH_BYTES},
+        torch::TensorOptions()
+            .dtype(torch::kUInt8)
+            .device(elapsed_days_real_flat.device())
+    );
+    fsrs_state_t *state_buffer_ptr =
+        reinterpret_cast<fsrs_state_t*>(state_buffer_tensor.data_ptr<uint8_t>());
     torch::Tensor grad = torch::zeros(
         {U, x * T, P},
         fsrs_params_UP.options()
