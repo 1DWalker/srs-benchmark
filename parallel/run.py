@@ -327,21 +327,33 @@ def train(
 
 def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
     print("eval on test")
+    # time.sleep(10)
+    # exit()
     # print(fsrs_params)
-    torch.cuda.empty_cache()
-    tz = time.time()
-    ts = time.time()
     param_keys = data.get_test_index_param_key()
+    # print(data.split_counts, data.split_counts.shape)
+    # assert (data.split_counts == data.split_counts[0]).all()
+    # print(data.splits, data.splits.view(-1, data.split_counts[0].item()))
+    assert data.split_counts.size(0) == len(users)
+    # test_dataset_size_by_user = data.splits.view(-1, N_SPLITS).sum(dim=-1)
+    test_index_lens = torch.tensor(data.test_index_lens, dtype=torch.int, device=fsrs_params.device)
+    per_user_weight_flat = torch.repeat_interleave(1.0 / per_user_weight, test_index_lens)
+    # print(test_dataset_size_by_user, test_dataset_size_by_user.sum())
+    # print(torch.tensor(data.test_index_lens))
+    print(per_user_weight_flat)
 
-    # test_seq_len = data.review_data.seq_len[data.test_index]
-    test_seq_len = data.review_data.seq_len[data.test_index].size(0)
+    test_seq_len = data.test_index.size(0)
     # _, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True, descending=True)
 
     # TODO use the same load balancing as training
     N = data.test_index.size(0)
     num_batches = ceil_div(N, TEST_BATCH_SIZE_MAX)
     batch_size = ceil_div(N, num_batches)
-    gather_p = []
+    p_concat = torch.empty(
+        (test_seq_len,),
+        device=fsrs_params.device,
+        dtype=fsrs_params.dtype,
+    )
 
     # for perm_slice in tqdm(torch.arange(test_seq_len).split(batch_size), desc="Test set", smoothing=0.03):
     for l in tqdm(range(0, test_seq_len, batch_size)):
@@ -357,14 +369,13 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
                 seq_lens,
                 batch_fsrs_params,
             )
-        gather_p.append(p)
+        p_concat[l:re].copy_(p)
     
     # restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
     # restore_test_index_permutation[sorted_test_index_permutation] = torch.arange(
     #     sorted_test_index_permutation.numel(),
     #     device=sorted_test_index_permutation.device,
     # )
-    p_concat = torch.cat(gather_p, dim=-1)
     del param_keys
     del test_seq_len
     # del sorted_test_index_permutation
@@ -376,10 +387,12 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     label = (data.review_data.rating[data.test_index] > 1).float()
     loss = torch.nn.functional.binary_cross_entropy(p_concat, label, reduction='none')
     logloss_weighted_by_reviews = loss.mean()
+    logloss_weighted_by_user = (loss * per_user_weight_flat).sum() / len(users)
     print("Log loss avg:", logloss_weighted_by_reviews, label.size(0))
+    print("Log loss avg by user:", logloss_weighted_by_user, label.size(0))
 
-    p_by_user = p_concat.split(data.test_index_lens)
-    label_by_user = label.split(data.test_index_lens)
+    # p_by_user = p_concat.split(data.test_index_lens)
+    # label_by_user = label.split(data.test_index_lens)
     # for user, pred, label in zip(users, p_by_user, label_by_user):
     #     logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
     #     print(f"User: {user}, logloss={logloss:.3f}")
@@ -389,10 +402,6 @@ def run(
     data: Data,
     train_setup: TrainSetup,
 ) -> torch.Tensor:
-    # fsrs_params = torch.zeros((len(users), N_SPLITS, 35), device=DEVICE)
-    initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
-    fsrs_params = initial_params.view(1, 1, -1).repeat(len(users), N_SPLITS, 1).requires_grad_(True)
-    fsrs_params = train(fsrs_params, users, data, train_setup)
     return fsrs_params
 
 def main() -> None:
@@ -434,16 +443,20 @@ def main() -> None:
             )
             torch.cuda.empty_cache()
             review_data = load_cached_review_data(cache_env, split_i, DEVICE)
-            train_data, train_setup = load_cached_train_only(
-                cache_env,
-                split_i,
-                DEVICE,
-                review_data,
-            )
-            fsrs_params = run(user_subset, train_data, train_setup).detach()
-            del train_data
-            del train_setup
-            torch.cuda.empty_cache()
+            # train_data, train_setup = load_cached_train_only(
+            #     cache_env,
+            #     split_i,
+            #     DEVICE,
+            #     review_data,
+            # )
+
+            initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
+            fsrs_params = initial_params.view(1, 1, -1).repeat(len(users), N_SPLITS, 1).requires_grad_(True)
+            # fsrs_params = train(fsrs_params, users, train_data, train_setup)
+
+            # del train_data
+            # del train_setup
+            # torch.cuda.empty_cache()
 
             test_data = load_cached_test_only(cache_env, split_i, DEVICE, review_data)
             with torch.no_grad():
