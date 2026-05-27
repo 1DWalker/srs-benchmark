@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 import time
 
-from parallel import scheduler, srs_ops
+from parallel import srs_ops
 from parallel.config import (
     BATCH_SIZE,
     LMDB_PATH,
@@ -23,6 +23,7 @@ from parallel.config import (
     USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
     USER_START,
 )
+from parallel.fsrs import fsrs_scheduler
 from parallel.fsrs import fsrs_v7_constants, fsrs_v7_helpers, fsrs_v7_optimizer
 from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.tensor_cache import (
@@ -176,7 +177,7 @@ def run_cpp_train_pass(
         batch_fsrs_params,
     )
 
-# @torch.compile(fullgraph=True)
+@torch.compile(fullgraph=True)
 def train_iter(
     flat_fsrs_params: torch.Tensor,
     optim_state: fsrs_v7_optimizer.AdamWState,
@@ -245,11 +246,11 @@ def train_iter(
         indices.unsqueeze(-1).expand_as(selected_grad),
         selected_grad,
     )
-    # penalty = fsrs_v7_helpers.penalty(flat_fsrs_params[indices], train_r - train_l + 1, train_split_lengths_cat[indices])
-    # penalty.sum().backward()
-    # print(train_split_lengths_cat[indices].min())
+    penalty = fsrs_v7_helpers.penalty(flat_fsrs_params[indices], train_r - train_l + 1, train_split_lengths_cat[indices])
+    penalty.sum().backward()
+    flat_grad = flat_grad + flat_fsrs_params.grad
 
-    lr_schedule_multi = fsrs_v7_constants.LR * scheduler.scheduler(step_i_cat, num_training_steps_cat)
+    lr_schedule_multi = fsrs_v7_constants.LR * fsrs_scheduler.scheduler(step_i_cat, num_training_steps_cat)
     lr_schedule_multi = lr_schedule_multi.unsqueeze(-1).expand(-1, flat_fsrs_params.size(-1))
 
     active_params_mask_i = torch.zeros_like(step_i_cat).scatter_add(
