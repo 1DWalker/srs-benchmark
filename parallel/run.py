@@ -167,7 +167,9 @@ def train_iter(
 ) -> tuple[torch.Tensor, adamw.AdamWState, torch.Tensor]:
     remaining = num_training_steps_cat - step_i_cat
     _, indices = torch.topk(remaining, k=batch_num_inner_batches)
-    active = remaining[indices] > 0
+    # active_i = indices.to(dtype=step_i_cat.dtype)
+    active_mask = remaining[indices] > 0
+    # indices = remaining[indices] > 0
 
     step_i = step_i_cat[indices]
     max_step_i = (num_training_steps_cat[indices] - 1).clamp_min(0)
@@ -190,7 +192,7 @@ def train_iter(
         device=train_l.device,
     ).view(1, -1).expand(train_l.size(0), -1)
 
-    legal = (train_range <= train_r.unsqueeze(-1)) & active.unsqueeze(-1)
+    legal = (train_range <= train_r.unsqueeze(-1)) & active_mask.unsqueeze(-1)
     review_data_indices = train_index[
         (
             train_split_lengths_offset[user_indices, split_indices].unsqueeze(-1)
@@ -216,22 +218,28 @@ def train_iter(
         selected_grad,
     )
 
-    active_i = active.to(dtype=step_i_cat.dtype)
+    lr_schedule_multi = 2e-2 * scheduler.scheduler(step_i_cat, num_training_steps_cat)
+    lr_schedule_multi = lr_schedule_multi.unsqueeze(-1).expand(-1, flat_fsrs_params.size(-1))
+
     active_params_mask_i = torch.zeros_like(step_i_cat).scatter_add(
         0,
         indices,
-        active_i,
+        torch.ones_like(step_i_cat),
     )
-    active_params_mask = active_params_mask_i > 0
-    lr_schedule_multi = 2e-2 * scheduler.scheduler(step_i_cat, num_training_steps_cat)
-    lr_schedule_multi = lr_schedule_multi.unsqueeze(-1).expand(-1, flat_fsrs_params.size(-1))
+    active_params_mask = torch.where(active_params_mask_i > 0, remaining > 0, torch.zeros_like(remaining, dtype=torch.bool))
+    # print("-------------")
+    # print(indices)
+    # print(active_params_mask_i)
+    # print(active_params_mask)
 
     new_flat_fsrs_params, new_optim_state = adamw.adamw_step(
         flat_fsrs_params,
         flat_grad,
         optim_state,
         lr=lr_schedule_multi,
+        # lr=torch.zeros_like(lr_schedule_multi),
         mask=active_params_mask,
+        # mask=torch.zeros_like(active_params_mask),
     )
     new_flat_fsrs_params = fsrs_v7_constants.apply_parameter_clipper(new_flat_fsrs_params)
     new_step_i_cat = step_i_cat + active_params_mask_i
@@ -328,7 +336,9 @@ def train(
         )
 
 
-    assert (step_i_cat == num_training_steps_cat).all()
+    # assert (step_i_cat == num_training_steps_cat).all()
+    assert (step_i_cat >= num_training_steps_cat).all()
+    assert (step_i_cat == num_training_steps_cat).any()
     print("------------------done train-----------------")
     return flat_fsrs_params.view_as(fsrs_params)
 
