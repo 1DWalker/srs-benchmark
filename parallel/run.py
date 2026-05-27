@@ -281,7 +281,6 @@ def train(
     data: Data,
     train_setup: TrainSetup | None = None,
 ):
-    print("start train")
     train_split_lengths_cat = data.train_split_lengths
     if train_setup is None:
         train_setup = build_train_setup(data, users)
@@ -301,7 +300,6 @@ def train(
     step_i_cat = torch.zeros_like(num_training_steps_cat)
     flat_fsrs_params = fsrs_params.detach().view(-1, fsrs_params.size(-1))
     optim_state = adamw.init_adamw_state(flat_fsrs_params)
-    print("Inner batches:", batch_num_inner_batches)
     for iter in tqdm(range(train_splits_length_cat_max), desc="Training", smoothing=0.06):
         flat_fsrs_params, optim_state, step_i_cat = train_iter(
             flat_fsrs_params,
@@ -326,24 +324,9 @@ def train(
     print("------------------done train-----------------")
     return flat_fsrs_params.view_as(fsrs_params)
 
-def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
-    print("eval on test")
-    # time.sleep(10)
-    # exit()
-    # print(fsrs_params)
+def predict_test_set(fsrs_params: torch.Tensor, data: Data) -> torch.Tensor:
     param_keys = data.get_test_index_param_key()
-    # print(data.split_counts, data.split_counts.shape)
-    # assert (data.split_counts == data.split_counts[0]).all()
-    # print(data.splits, data.splits.view(-1, data.split_counts[0].item()))
-    assert data.split_counts.size(0) == len(users)
-    # test_dataset_size_by_user = data.splits.view(-1, N_SPLITS).sum(dim=-1)
-    # print(test_dataset_size_by_user, test_dataset_size_by_user.sum())
-    # print(torch.tensor(data.test_index_lens))
-
     test_seq_len = data.test_index.size(0)
-    # _, sorted_test_index_permutation = torch.sort(test_seq_len, stable=True, descending=True)
-
-    # TODO use the same load balancing as training
     N = data.test_index.size(0)
     num_batches = ceil_div(N, TEST_BATCH_SIZE_MAX)
     batch_size = ceil_div(N, num_batches)
@@ -353,7 +336,6 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         dtype=fsrs_params.dtype,
     )
 
-    # for perm_slice in tqdm(torch.arange(test_seq_len).split(batch_size), desc="Test set", smoothing=0.03):
     for l in tqdm(range(0, test_seq_len, batch_size)):
         re = min(test_seq_len, l + batch_size)
         batch_fsrs_params = fsrs_params[param_keys.user_index[l:re], param_keys.split_index[l:re]]
@@ -368,19 +350,15 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
                 batch_fsrs_params,
             )
         p_concat[l:re].copy_(p)
-    
-    # restore_test_index_permutation = torch.empty_like(sorted_test_index_permutation)
-    # restore_test_index_permutation[sorted_test_index_permutation] = torch.arange(
-    #     sorted_test_index_permutation.numel(),
-    #     device=sorted_test_index_permutation.device,
-    # )
-    del param_keys
-    del test_seq_len
-    # del sorted_test_index_permutation
-    # del restore_test_index_permutation
+    return p_concat
+
+
+def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data):
+    print("eval on test")
+    assert data.split_counts.size(0) == len(users)
+
+    p_concat = predict_test_set(fsrs_params, data)
     torch.cuda.empty_cache()
-    # time.sleep(10)
-    # exit()
 
     label = (data.review_data.rating[data.test_index] > 1).float()
     loss = torch.nn.functional.binary_cross_entropy(p_concat, label, reduction='none')
@@ -396,12 +374,71 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     #     logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
     #     print(f"User: {user}, logloss={logloss:.3f}")
 
+
+def make_initial_fsrs_params(user_count: int) -> torch.Tensor:
+    initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
+    return initial_params.view(1, 1, -1).repeat(user_count, N_SPLITS, 1).requires_grad_(True)
+
+
 def run(
     users: list[int],
     data: Data,
     train_setup: TrainSetup,
 ) -> torch.Tensor:
+    fsrs_params = make_initial_fsrs_params(len(users))
+    fsrs_params = train(fsrs_params, users, data, train_setup)
     return fsrs_params
+
+
+def train_cached_split(
+    cache_env: lmdb.Environment,
+    split_i: int,
+    users: list[int],
+    review_data,
+) -> torch.Tensor:
+    train_data, train_setup = load_cached_train_only(
+        cache_env,
+        split_i,
+        DEVICE,
+        review_data,
+    )
+    return run(users, train_data, train_setup).detach()
+
+
+def evaluate_cached_split(
+    cache_env: lmdb.Environment,
+    split_i: int,
+    users: list[int],
+    review_data,
+    fsrs_params: torch.Tensor,
+) -> None:
+    test_data = load_cached_test_only(cache_env, split_i, DEVICE, review_data)
+    with torch.no_grad():
+        evaluate_on_test_set(fsrs_params, users, test_data)
+
+
+def run_cached_split(
+    cache_env: lmdb.Environment,
+    split_i: int,
+    split_count: int,
+    user_subset: list[int],
+    user_max_train_split_lengths: torch.Tensor,
+) -> None:
+    user_indices = torch.tensor(user_subset, dtype=torch.int32) - 1
+    split_work = int(user_max_train_split_lengths[user_indices].sum().item())
+    print(
+        f"Run split {split_i + 1}/{split_count}: "
+        f"users={len(user_subset)}, max_train_split_length_sum={split_work}"
+    )
+
+    torch.cuda.empty_cache()
+    review_data = load_cached_review_data(cache_env, split_i, DEVICE)
+    fsrs_params = train_cached_split(cache_env, split_i, user_subset, review_data)
+
+    torch.cuda.empty_cache()
+    evaluate_cached_split(cache_env, split_i, user_subset, review_data, fsrs_params)
+    torch.cuda.empty_cache()
+
 
 def main() -> None:
     assert DEVICE == "cuda", "Only cuda is supported."
@@ -434,36 +471,13 @@ def main() -> None:
 
     try:
         for split_i, user_subset in enumerate(user_splits):
-            user_indices = torch.tensor(user_subset, dtype=torch.int32) - 1
-            split_work = int(user_max_train_split_lengths[user_indices].sum().item())
-            print(
-                f"Run split {split_i + 1}/{len(user_splits)}: "
-                f"users={len(user_subset)}, max_train_split_length_sum={split_work}"
+            run_cached_split(
+                cache_env,
+                split_i,
+                len(user_splits),
+                user_subset,
+                user_max_train_split_lengths,
             )
-            torch.cuda.empty_cache()
-            review_data = load_cached_review_data(cache_env, split_i, DEVICE)
-            # train_data, train_setup = load_cached_train_only(
-            #     cache_env,
-            #     split_i,
-            #     DEVICE,
-            #     review_data,
-            # )
-
-            initial_params = fsrs_v7_constants.get_initial_params_for_optimization().to(DEVICE)
-            fsrs_params = initial_params.view(1, 1, -1).repeat(len(users), N_SPLITS, 1).requires_grad_(True)
-            # fsrs_params = train(fsrs_params, users, train_data, train_setup)
-
-            # del train_data
-            # del train_setup
-            # torch.cuda.empty_cache()
-
-            test_data = load_cached_test_only(cache_env, split_i, DEVICE, review_data)
-            with torch.no_grad():
-                evaluate_on_test_set(fsrs_params, user_subset, test_data)
-            del test_data
-            del review_data
-            del fsrs_params
-            torch.cuda.empty_cache()
     finally:
         cache_env.close()
     env.close()
