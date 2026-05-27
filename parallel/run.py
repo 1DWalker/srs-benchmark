@@ -177,6 +177,11 @@ def run_cpp_train_pass(
         batch_fsrs_params,
     )
 
+def masked_penalty(parameters_kp, mask_k, batch_size_k, training_set_size_k):
+    return (mask_k * fsrs_v7_helpers.penalty_loss(parameters_kp, batch_size_k, training_set_size_k)).sum()
+
+_penalty_grad = torch.func.grad(masked_penalty, argnums=0)
+
 @torch.compile(fullgraph=True)
 def train_iter(
     flat_fsrs_params: torch.Tensor,
@@ -241,14 +246,13 @@ def train_iter(
         threads_per_block,
     )
     selected_grad = (per_example_grad * legal.unsqueeze(-1)).sum(dim=1)
+    penalty_grad = _penalty_grad(batch_fsrs_params, active_mask, train_r - train_l + 1, train_split_lengths_cat[indices])
+    grad = selected_grad + penalty_grad
     flat_grad = torch.zeros_like(flat_fsrs_params).scatter_add(
         0,
-        indices.unsqueeze(-1).expand_as(selected_grad),
-        selected_grad,
+        indices.unsqueeze(-1).expand_as(grad),
+        grad,
     )
-    penalty = fsrs_v7_helpers.penalty(flat_fsrs_params[indices], train_r - train_l + 1, train_split_lengths_cat[indices])
-    penalty.sum().backward()
-    flat_grad = flat_grad + flat_fsrs_params.grad
 
     lr_schedule_multi = fsrs_v7_constants.LR * fsrs_scheduler.scheduler(step_i_cat, num_training_steps_cat)
     lr_schedule_multi = lr_schedule_multi.unsqueeze(-1).expand(-1, flat_fsrs_params.size(-1))
@@ -421,7 +425,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
 
 def make_initial_fsrs_params(user_count: int) -> torch.Tensor:
     initial_params = fsrs_v7_helpers.get_initial_params_for_optimization().to(DEVICE)
-    return initial_params.view(1, 1, -1).repeat(user_count, N_SPLITS, 1).requires_grad_(True)
+    return initial_params.view(1, 1, -1).repeat(user_count, N_SPLITS, 1)
 
 
 def run(

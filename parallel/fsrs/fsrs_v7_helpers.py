@@ -30,7 +30,25 @@ def apply_parameter_clipper(parameters_b):
     return clipped
 
 @torch.compile(fullgraph=True)
-def penalty(parameters_b, batch_size_b, training_set_size_b):
-    default_params = torch.tensor(fsrs_v7_constants.FSRS7_DEFAULT_35_VALUES, device=parameters_b.device, dtype=parameters_b.dtype)
-    sigma = torch.tensor(fsrs_v7_constants.FSRS7_L2_SIGMA_35_VALUES, device=parameters_b.device, dtype=parameters_b.dtype)
-    return PENALTY_W_L2 * batch_size_b.float() / training_set_size_b.float() * torch.sum(torch.square(parameters_b - default_params.unsqueeze(0)) / torch.square(sigma.unsqueeze(0)), dim=-1)
+def penalty_loss(parameters_kp, batch_size_k, training_set_size_k):
+    default_params = torch.tensor(
+        fsrs_v7_constants.FSRS7_DEFAULT_35_VALUES,
+        device=parameters_kp.device,
+        dtype=parameters_kp.dtype,
+    )
+    sigma = torch.tensor(
+        fsrs_v7_constants.FSRS7_L2_SIGMA_35_VALUES,
+        device=parameters_kp.device,
+        dtype=parameters_kp.dtype,
+    )
+    l2_k = torch.sum(
+        torch.square(parameters_kp - default_params.unsqueeze(0))
+        / torch.square(sigma.unsqueeze(0)),
+        dim=-1,
+    )
+    penalty_k = (
+        PENALTY_W_L2
+        * batch_size_k / training_set_size_k
+        * l2_k
+    )
+    return penalty_k
