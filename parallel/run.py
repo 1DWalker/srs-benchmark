@@ -365,8 +365,9 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     logloss_weighted_by_reviews = loss.mean()
     logloss_weighted_by_user = \
         (loss * torch.repeat_interleave(1.0 / data.test_index_lens, data.test_index_lens)).sum() / len(users)
-    print("Log loss avg:", logloss_weighted_by_reviews, label.size(0))
-    print("Log loss avg by user:", logloss_weighted_by_user, label.size(0))
+    print(f"n: {label.size(0)}")
+    print(f"Log loss avg by review: {logloss_weighted_by_reviews.item():.5f}")
+    print(f"Log loss avg by user: {logloss_weighted_by_user.item():.5f}")
 
     # p_by_user = p_concat.split(data.test_index_lens)
     # label_by_user = label.split(data.test_index_lens)

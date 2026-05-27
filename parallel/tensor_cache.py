@@ -52,6 +52,7 @@ class _SourceUserInfo:
 
 
 _MANIFEST_KEY = b"manifest"
+_BATCH_PERM_MANIFEST_KEY = b"batch_perm_manifest"
 
 
 def _cache_tensor_prefix(split_i: int, name: str) -> str:
@@ -73,11 +74,14 @@ def _numel(shape: tuple[int, ...]) -> int:
 def build_user_batch_perm(
     user_id: int,
     num_training_steps_per_epoch: np.ndarray,
+    seed: int | None = None,
 ) -> np.ndarray:
+    if seed is None:
+        seed = BATCH_PERM_SEED
     steps = np.asarray(num_training_steps_per_epoch, dtype=np.int32).reshape(-1)
     out = np.empty(int(steps.sum()) * N_EPOCHS, dtype=np.int32)
     generator = torch.Generator(device="cpu")
-    generator.manual_seed(BATCH_PERM_SEED + int(user_id))
+    generator.manual_seed(seed + int(user_id))
 
     offset = 0
     for steps_per_epoch in steps:
@@ -94,7 +98,10 @@ def build_user_batch_perm(
 def build_batch_perm_cat_for_users(
     user_ids: Sequence[int],
     num_training_steps_per_epoch: np.ndarray,
+    seed: int | None = None,
 ) -> np.ndarray:
+    if seed is None:
+        seed = BATCH_PERM_SEED
     steps = np.asarray(num_training_steps_per_epoch, dtype=np.int32).reshape(-1)
     if len(user_ids) == 0:
         return np.empty(0, dtype=np.int32)
@@ -104,7 +111,7 @@ def build_batch_perm_cat_for_users(
 
     offset = 0
     for user_id, user_steps in zip(user_ids, steps_by_user, strict=True):
-        user_perm = build_user_batch_perm(int(user_id), user_steps)
+        user_perm = build_user_batch_perm(int(user_id), user_steps, seed)
         next_offset = offset + user_perm.size
         out[offset:next_offset] = user_perm
         offset = next_offset
@@ -132,7 +139,17 @@ def _expected_manifest(user_splits: list[list[int]]) -> dict[str, object]:
         "batch_size": BATCH_SIZE,
         "n_epochs": N_EPOCHS,
         "n_splits": N_SPLITS,
+    }
+
+
+def _expected_batch_perm_manifest(user_splits: list[list[int]]) -> dict[str, object]:
+    return {
+        "version": TENSOR_CACHE_VERSION,
         "batch_perm_seed": BATCH_PERM_SEED,
+        "user_splits": [[int(user_id) for user_id in split] for split in user_splits],
+        "batch_size": BATCH_SIZE,
+        "n_epochs": N_EPOCHS,
+        "n_splits": N_SPLITS,
     }
 
 
@@ -149,6 +166,19 @@ def _write_manifest(cache_env: lmdb.Environment, manifest: dict[str, object]) ->
         txn.put(_MANIFEST_KEY, json.dumps(manifest, separators=(",", ":")).encode())
 
 
+def _read_batch_perm_manifest(cache_env: lmdb.Environment) -> dict[str, object] | None:
+    with cache_env.begin(write=False) as txn:
+        raw = txn.get(_BATCH_PERM_MANIFEST_KEY)
+    if raw is None:
+        return None
+    return json.loads(raw.decode())
+
+
+def _write_batch_perm_manifest(cache_env: lmdb.Environment, manifest: dict[str, object]) -> None:
+    with cache_env.begin(write=True) as txn:
+        txn.put(_BATCH_PERM_MANIFEST_KEY, json.dumps(manifest, separators=(",", ":")).encode())
+
+
 def _clear_cache_path(cache_path: Path) -> None:
     if cache_path.exists():
         shutil.rmtree(cache_path)
@@ -163,7 +193,7 @@ def load_or_rebuild_tensor_cache(
     expected = _expected_manifest(user_splits)
     cache_env = _open_cache_env(cache_path, map_size)
     if _read_manifest(cache_env) == expected:
-        print("tensor cache hit")
+        _ensure_batch_perm_cache(cache_env, user_splits)
         return cache_env
 
     print("tensor cache miss; rebuilding")
@@ -172,6 +202,7 @@ def load_or_rebuild_tensor_cache(
     cache_env = _open_cache_env(cache_path, map_size)
     _rebuild_tensor_cache(source_env, cache_env, user_splits)
     _write_manifest(cache_env, expected)
+    _ensure_batch_perm_cache(cache_env, user_splits)
     return cache_env
 
 
@@ -332,12 +363,7 @@ def _rebuild_tensor_cache(
         with source_env.begin(write=False) as source_txn:
             infos = [
                 _read_user_info(source_txn, user_id)
-                for user_id in tqdm(
-                    users,
-                    desc=f"Split {split_i + 1} metadata",
-                    leave=False,
-                    smoothing=0.03,
-                )
+                for user_id in users
             ]
 
         step_progress = tqdm(
@@ -349,6 +375,36 @@ def _rebuild_tensor_cache(
         for step_name, build_step in step_progress:
             step_progress.set_postfix_str(step_name)
             build_step(split_i, infos)
+
+
+def _ensure_batch_perm_cache(
+    cache_env: lmdb.Environment,
+    user_splits: list[list[int]],
+) -> None:
+    expected = _expected_batch_perm_manifest(user_splits)
+    if _read_batch_perm_manifest(cache_env) == expected:
+        return
+
+    print("batch perm cache miss; rebuilding")
+    for split_i, users in enumerate(user_splits):
+        with cache_env.begin(write=False, buffers=True) as cache_txn:
+            num_training_steps_per_epoch = get_array(
+                cache_txn,
+                _cache_tensor_prefix(split_i, "num_training_steps_per_epoch_cat"),
+            ).astype(np.int32, copy=True)
+            num_training_steps = get_array(
+                cache_txn,
+                _cache_tensor_prefix(split_i, "num_training_steps_cat"),
+            ).astype(np.int32, copy=True)
+        _build_batch_perm_cat(
+            cache_env,
+            split_i,
+            users,
+            num_training_steps_per_epoch,
+            num_training_steps,
+            BATCH_PERM_SEED,
+        )
+    _write_batch_perm_manifest(cache_env, expected)
 
 
 def _read_user_info(txn: lmdb.Transaction, user_id: int) -> _SourceUserInfo:
@@ -536,7 +592,6 @@ def _build_train_setup(
             json.dumps(batch_num_inner_batches).encode(),
         )
 
-    _build_batch_perm_cat(cache_env, split_i, infos, num_training_steps_per_epoch, num_training_steps)
     del train_split_lengths
     del num_training_steps_per_epoch
     del num_training_steps
@@ -564,12 +619,12 @@ def _batch_num_inner_batches(num_training_steps: np.ndarray) -> int:
 def _build_batch_perm_cat(
     cache_env: lmdb.Environment,
     split_i: int,
-    infos: list[_SourceUserInfo],
+    user_ids: Sequence[int],
     num_training_steps_per_epoch: np.ndarray,
     num_training_steps: np.ndarray,
+    seed: int,
 ) -> None:
-    user_ids = [info.user_id for info in infos]
-    out = build_batch_perm_cat_for_users(user_ids, num_training_steps_per_epoch)
+    out = build_batch_perm_cat_for_users(user_ids, num_training_steps_per_epoch, seed)
     assert out.size == int(num_training_steps.sum())
     _put_cache_array(cache_env, split_i, "batch_perm_cat", out)
     del out
