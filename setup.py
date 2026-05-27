@@ -1,13 +1,13 @@
 import os
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
 from setuptools._distutils import log
 from setuptools import setup
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
 
 ROOT = Path(__file__).resolve().parent
@@ -20,11 +20,70 @@ ENZYME_BUILD_VERBOSE = os.environ.get("ENZYME_BUILD_VERBOSE") == "1"
 ENZYME_PLUGIN = Path(
     os.environ.get("ENZYME_CLANG_PLUGIN", "/opt/enzyme/lib/ClangEnzyme-18.so")
 )
+INPLACE_EXTENSION_PATH = (
+    ROOT
+    / "parallel"
+    / f"_enzyme_torch_sample{sysconfig.get_config_var('EXT_SUFFIX')}"
+)
+
+
+def _source_newer(source_path: Path, output_path: Path) -> bool:
+    return not output_path.exists() or source_path.stat().st_mtime > output_path.stat().st_mtime
+
+
+def _any_newer(source_paths: list[Path], output_path: Path) -> bool:
+    return not output_path.exists() or any(
+        _source_newer(source_path, output_path) for source_path in source_paths
+    )
+
+
+def _build_ext_requested() -> bool:
+    return "build_ext" in sys.argv
+
+
+def _force_requested() -> bool:
+    return "--force" in sys.argv or "-f" in sys.argv or os.environ.get("ENZYME_FORCE_BUILD") == "1"
+
+
+def _exit_if_inplace_extension_is_current() -> None:
+    if not _build_ext_requested() or _force_requested():
+        return
+    dependencies = [
+        ROOT / "parallel" / "csrc" / "enzyme_torch_sample.cpp",
+        *CXX_DEPENDENCIES,
+        *ENZYME_CUDA_DEPENDENCIES,
+    ]
+    if _any_newer(dependencies, INPLACE_EXTENSION_PATH):
+        return
+    if ENZYME_BUILD_VERBOSE:
+        log.info("skipping Enzyme Torch extension build; in-place extension is up-to-date")
+    raise SystemExit(0)
+
+
+_exit_if_inplace_extension_is_current()
 
 if not ENZYME_BUILD_VERBOSE:
     if "-q" not in sys.argv and "--quiet" not in sys.argv:
         sys.argv.insert(1, "-q")
     log.set_threshold(log.WARN)
+
+
+def cuda_build_available() -> bool:
+    import torch
+
+    if os.environ.get("ENZYME_FORCE_BUILD") == "1":
+        return True
+    cuda_home = os.environ.get("CUDA_HOME") or "/usr/local/cuda"
+    return torch.cuda.is_available() and Path(cuda_home).exists()
+
+
+SHOULD_BUILD_ENZYME_EXTENSION = cuda_build_available()
+if SHOULD_BUILD_ENZYME_EXTENSION:
+    from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+else:
+    BuildExtension = object
+    CUDAExtension = None
+    CUDA_HOME = None
 
 
 @contextmanager
@@ -118,13 +177,11 @@ class EnzymeBuildExtension(BuildExtension):
 
     @staticmethod
     def _source_newer(source_path: Path, output_path: Path) -> bool:
-        return not output_path.exists() or source_path.stat().st_mtime > output_path.stat().st_mtime
+        return _source_newer(source_path, output_path)
 
     @classmethod
     def _any_newer(cls, source_paths: list[Path], output_path: Path) -> bool:
-        return not output_path.exists() or any(
-            cls._source_newer(source_path, output_path) for source_path in source_paths
-        )
+        return _any_newer(source_paths, output_path)
 
     @staticmethod
     def _add_enzyme_object(extension, object_path: Path) -> None:
@@ -205,17 +262,26 @@ class EnzymeBuildExtension(BuildExtension):
             )
 
 
-setup(
-    name="srs-benchmark-enzyme-torch-sample",
-    packages=[],
-    ext_modules=[
+ext_modules = []
+cmdclass = {}
+if SHOULD_BUILD_ENZYME_EXTENSION:
+    ext_modules.append(
         CUDAExtension(
             name="parallel._enzyme_torch_sample",
             sources=["parallel/csrc/enzyme_torch_sample.cpp"],
             extra_compile_args={
                 "cxx": ["-O2", "-std=c++17"],
             },
-        ),
-    ],
-    cmdclass={"build_ext": EnzymeBuildExtension},
+        )
+    )
+    cmdclass["build_ext"] = EnzymeBuildExtension
+elif ENZYME_BUILD_VERBOSE:
+    log.warn("skipping Enzyme Torch extension build because CUDA is unavailable")
+
+
+setup(
+    name="srs-benchmark-enzyme-torch-sample",
+    packages=[],
+    ext_modules=ext_modules,
+    cmdclass=cmdclass,
 )
