@@ -15,14 +15,15 @@ TEST_BATCH_SIZE_MAX = 10_000_000
 BATCH_PERM_SEED = 1234
 
 # Writes to the result file if set to True, but incurs a large time cost.
-WRITE_RESULT = True
+WRITE_RESULT = False
 WRITE_RESULT_FILE = "result/FSRS-7-dev.jsonl"
 
-# Invalidates the cache
+BATCH_SIZE = 1024  # Should be a multiple of 128, the block sized used by the cuda kernel
+N_EPOCHS = 1 # nonnegative integer, set to 0 for no optimization
+
+# Invalidates the cache (slow)
 USER_START = 1
-USER_END = 1000
-BATCH_SIZE = 1024
-N_EPOCHS = 0 # nonnegative integer
+USER_END = 10000
 
 # Requires a prepare.py run to change, and untested
 N_SPLITS = 5 

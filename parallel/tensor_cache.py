@@ -138,7 +138,6 @@ def _expected_manifest(user_splits: list[list[int]]) -> dict[str, object]:
     return {
         "version": TENSOR_CACHE_VERSION,
         "user_splits": [[int(user_id) for user_id in split] for split in user_splits],
-        "batch_size": BATCH_SIZE,
         "n_splits": N_SPLITS,
     }
 
@@ -177,6 +176,7 @@ def _main_manifest_matches(actual: dict[str, object] | None, expected: dict[str,
         return False
     actual = dict(actual)
     actual.pop("n_epochs", None)
+    actual.pop("batch_size", None)
     return actual == expected
 
 

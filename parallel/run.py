@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from io import BytesIO
+import math
 
 import lmdb
 import torch
@@ -23,7 +24,7 @@ from parallel.config import (
     WRITE_RESULT,
     WRITE_RESULT_FILE,
 )
-from parallel.fsrs import fsrs_scheduler
+from parallel.fsrs import fsrs_v7_scheduler
 from parallel.fsrs import fsrs_v7_constants, fsrs_v7_helpers, fsrs_v7_optimizer
 from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.result_metrics import write_user_result_jsonl
@@ -285,7 +286,7 @@ def train_iter(
         grad,
     )
 
-    lr_schedule_multi = fsrs_v7_constants.LR * fsrs_scheduler.scheduler(step_i_cat, num_training_steps_cat)
+    lr_schedule_multi = fsrs_v7_constants.LR * fsrs_v7_scheduler.scheduler(step_i_cat, num_training_steps_cat)
     lr_schedule_multi = lr_schedule_multi.unsqueeze(-1).expand(-1, flat_fsrs_params.size(-1))
 
     active_params_mask_i = torch.zeros_like(step_i_cat).scatter_add(
@@ -548,6 +549,12 @@ def run_cached_split(
     torch.cuda.empty_cache()
     return result
 
+def get_split_factor_k(req_size):
+    props = torch.cuda.get_device_properties(0)
+    cuda_mem_GB = props.total_memory / 1000 ** 3 - 0.5
+    gb_req = req_size / 510540097 * 22.9
+    # smallest x such that cuda_mem_GB * x >= gb_req
+    return math.ceil(gb_req / cuda_mem_GB)
 
 def main() -> None:
     assert DEVICE == "cuda", "Only cuda is supported."
@@ -560,13 +567,14 @@ def main() -> None:
     
     users = list(range(USER_START, USER_END + 1))
 
-    split_factor_k = 1
     with env.begin(write=False) as txn:
         user_max_train_split_lengths = load_metadata_tensor(
             txn,
             USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
         )
 
+    rel_user_sum = user_max_train_split_lengths[torch.tensor(users) - 1]
+    split_factor_k = get_split_factor_k(rel_user_sum.sum())
     user_splits = split_users_by_train_length(
         users,
         user_max_train_split_lengths,
