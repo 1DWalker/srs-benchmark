@@ -11,11 +11,16 @@ from setuptools import setup
 
 
 ROOT = Path(__file__).resolve().parent
-ENZYME_CUDA_SOURCE = ROOT / "parallel" / "csrc" / "enzyme_torch_sample.cu"
-FSRS_CUDA_DIR = ROOT / "parallel" / "csrc" / "fsrs"
+ENZYME_CUDA_SOURCE = ROOT / "parallel" / "csrc" / "fsrs_extension.cu"
+FSRS_CORE_DIR = ROOT / "parallel" / "csrc" / "fsrs"
+FSRS_KERNEL_DIR = ROOT / "parallel" / "csrc" / "fsrs_kernel"
 CXX_DEPENDENCIES = sorted((ROOT / "parallel" / "csrc").glob("*.h*"))
-ENZYME_CUDA_DEPENDENCIES = [ENZYME_CUDA_SOURCE, *sorted(FSRS_CUDA_DIR.glob("*.*"))]
-ENZYME_EXTENSION_NAME = "parallel._enzyme_torch_sample"
+ENZYME_CUDA_DEPENDENCIES = [
+    ENZYME_CUDA_SOURCE,
+    *sorted(FSRS_CORE_DIR.glob("*.*")),
+    *sorted(FSRS_KERNEL_DIR.glob("*.*")),
+]
+FSRS_EXTENSION_NAME = "parallel._fsrs_extension"
 ENZYME_BUILD_VERBOSE = os.environ.get("ENZYME_BUILD_VERBOSE") == "1"
 ENZYME_PLUGIN = Path(
     os.environ.get("ENZYME_CLANG_PLUGIN", "/opt/enzyme/lib/ClangEnzyme-18.so")
@@ -23,7 +28,7 @@ ENZYME_PLUGIN = Path(
 INPLACE_EXTENSION_PATH = (
     ROOT
     / "parallel"
-    / f"_enzyme_torch_sample{sysconfig.get_config_var('EXT_SUFFIX')}"
+    / f"_fsrs_extension{sysconfig.get_config_var('EXT_SUFFIX')}"
 )
 
 
@@ -49,7 +54,7 @@ def _exit_if_inplace_extension_is_current() -> None:
     if not _build_ext_requested() or _force_requested():
         return
     dependencies = [
-        ROOT / "parallel" / "csrc" / "enzyme_torch_sample.cpp",
+        ROOT / "parallel" / "csrc" / "fsrs_extension.cpp",
         *CXX_DEPENDENCIES,
         *ENZYME_CUDA_DEPENDENCIES,
     ]
@@ -133,11 +138,11 @@ def quiet_success_output():
 
 class EnzymeBuildExtension(BuildExtension):
     def build_extension(self, extension) -> None:
-        if extension.name != ENZYME_EXTENSION_NAME:
+        if extension.name != FSRS_EXTENSION_NAME:
             super().build_extension(extension)
             return
 
-        object_path = Path(self.build_temp) / "enzyme_torch_sample.o"
+        object_path = Path(self.build_temp) / "fsrs_extension_cuda.o"
         self._add_enzyme_object(extension, object_path)
         self._add_enzyme_dependency(extension)
 
@@ -267,8 +272,8 @@ cmdclass = {}
 if SHOULD_BUILD_ENZYME_EXTENSION:
     ext_modules.append(
         CUDAExtension(
-            name="parallel._enzyme_torch_sample",
-            sources=["parallel/csrc/enzyme_torch_sample.cpp"],
+            name="parallel._fsrs_extension",
+            sources=["parallel/csrc/fsrs_extension.cpp"],
             extra_compile_args={
                 "cxx": ["-O2", "-std=c++17"],
             },
@@ -280,7 +285,7 @@ elif ENZYME_BUILD_VERBOSE:
 
 
 setup(
-    name="srs-benchmark-enzyme-torch-sample",
+    name="srs-benchmark-fsrs-extension",
     packages=[],
     ext_modules=ext_modules,
     cmdclass=cmdclass,
