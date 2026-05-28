@@ -1,4 +1,4 @@
-Requirements: Linux, or Windows with WSL and Docker.
+Requirements: Linux or Windows with WSL, and Docker.
 
 Prepare the dataset.
 
