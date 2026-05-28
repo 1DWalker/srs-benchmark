@@ -37,7 +37,7 @@ from parallel.tensor_cache import (
 )
 from parallel.tensors import Data, ParamKey
 
-enzyme_sample = srs_ops.enzyme_sample
+fsrs_extension = srs_ops.fsrs_extension
 THREADS_PER_BLOCK = srs_ops.THREADS_PER_BLOCK
 
 
@@ -418,7 +418,7 @@ def predict_test_set(fsrs_params: torch.Tensor, data: Data) -> torch.Tensor:
         test_index_perm_slice = data.test_index[l:re]
         seq_lens = data.review_data.seq_len[test_index_perm_slice]
         start_indices = test_index_perm_slice - seq_lens + 1
-        p = enzyme_sample.fsrs7_test(
+        p = fsrs_extension.fsrs7_test(
                 data.review_data.elapsed_days_real, 
                 data.review_data.rating, 
                 start_indices,

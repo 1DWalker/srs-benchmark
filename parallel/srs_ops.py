@@ -5,8 +5,8 @@ import importlib
 import torch
 
 
-enzyme_sample = importlib.import_module("parallel._enzyme_torch_sample")
-THREADS_PER_BLOCK = int(enzyme_sample.threads_per_block())
+fsrs_extension = importlib.import_module("parallel._fsrs_extension")
+THREADS_PER_BLOCK = int(fsrs_extension.threads_per_block())
 
 
 def _fake_srs_fsrs7_train(

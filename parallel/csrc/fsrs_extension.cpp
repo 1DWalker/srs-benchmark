@@ -5,7 +5,6 @@
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <stdio.h>
-#include "buffer.hpp"
 
 #include "fsrs/fsrs7.cuh"
 #include "fsrs/fsrs_test.cuh"
@@ -87,13 +86,6 @@ torch::Tensor fsrs7_test(
 
 constexpr int THREADS_PER_BLOCK = 128; // must be a multiple of 32 and a divisor of the batch size
 constexpr int64_t TRAIN_SCRATCH_BYTES = 500LL * 1000LL * 1000LL;
-static_assert(
-    TRAIN_SCRATCH_BYTES % static_cast<int64_t>(sizeof(fsrs_state_t)) == 0,
-    "train scratch size must be a whole number of fsrs_state_t values"
-);
-constexpr int64_t TRAIN_SCRATCH_STATES =
-    TRAIN_SCRATCH_BYTES / static_cast<int64_t>(sizeof(fsrs_state_t));
-StateBuffer<fsrs_state_t> state_buffer;
 
 torch::Tensor fsrs7_train_dispatch(
     const torch::Tensor& elapsed_days_real_flat,
@@ -179,7 +171,6 @@ TORCH_LIBRARY_IMPL(srs, CUDA, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    // m.def("fsrs7_train", &fsrs7_train, "fsrs7 gradient");
     m.def("fsrs7_test", &fsrs7_test, "fsrs7 test forward pass");
     m.def("threads_per_block", &threads_per_block, "threads per block");
 }
