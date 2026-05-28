@@ -53,6 +53,7 @@ class _SourceUserInfo:
 
 
 _MANIFEST_KEY = b"manifest"
+_TRAIN_SETUP_MANIFEST_KEY = b"train_setup_manifest"
 _BATCH_PERM_MANIFEST_KEY = b"batch_perm_manifest"
 
 
@@ -138,6 +139,15 @@ def _expected_manifest(user_splits: list[list[int]]) -> dict[str, object]:
         "version": TENSOR_CACHE_VERSION,
         "user_splits": [[int(user_id) for user_id in split] for split in user_splits],
         "batch_size": BATCH_SIZE,
+        "n_splits": N_SPLITS,
+    }
+
+
+def _expected_train_setup_manifest(user_splits: list[list[int]]) -> dict[str, object]:
+    return {
+        "version": TENSOR_CACHE_VERSION,
+        "user_splits": [[int(user_id) for user_id in split] for split in user_splits],
+        "batch_size": BATCH_SIZE,
         "n_epochs": N_EPOCHS,
         "n_splits": N_SPLITS,
     }
@@ -162,9 +172,30 @@ def _read_manifest(cache_env: lmdb.Environment) -> dict[str, object] | None:
     return json.loads(raw.decode())
 
 
+def _main_manifest_matches(actual: dict[str, object] | None, expected: dict[str, object]) -> bool:
+    if actual is None:
+        return False
+    actual = dict(actual)
+    actual.pop("n_epochs", None)
+    return actual == expected
+
+
 def _write_manifest(cache_env: lmdb.Environment, manifest: dict[str, object]) -> None:
     with cache_env.begin(write=True) as txn:
         txn.put(_MANIFEST_KEY, json.dumps(manifest, separators=(",", ":")).encode())
+
+
+def _read_train_setup_manifest(cache_env: lmdb.Environment) -> dict[str, object] | None:
+    with cache_env.begin(write=False) as txn:
+        raw = txn.get(_TRAIN_SETUP_MANIFEST_KEY)
+    if raw is None:
+        return None
+    return json.loads(raw.decode())
+
+
+def _write_train_setup_manifest(cache_env: lmdb.Environment, manifest: dict[str, object]) -> None:
+    with cache_env.begin(write=True) as txn:
+        txn.put(_TRAIN_SETUP_MANIFEST_KEY, json.dumps(manifest, separators=(",", ":")).encode())
 
 
 def _read_batch_perm_manifest(cache_env: lmdb.Environment) -> dict[str, object] | None:
@@ -193,7 +224,8 @@ def load_or_rebuild_tensor_cache(
 ) -> lmdb.Environment:
     expected = _expected_manifest(user_splits)
     cache_env = _open_cache_env(cache_path, map_size)
-    if _read_manifest(cache_env) == expected:
+    if _main_manifest_matches(_read_manifest(cache_env), expected):
+        _ensure_train_setup_cache(cache_env, user_splits)
         _ensure_batch_perm_cache(cache_env, user_splits)
         return cache_env
 
@@ -203,6 +235,7 @@ def load_or_rebuild_tensor_cache(
     cache_env = _open_cache_env(cache_path, map_size)
     _rebuild_tensor_cache(source_env, cache_env, user_splits)
     _write_manifest(cache_env, expected)
+    _ensure_train_setup_cache(cache_env, user_splits)
     _ensure_batch_perm_cache(cache_env, user_splits)
     return cache_env
 
@@ -368,7 +401,6 @@ def _rebuild_tensor_cache(
             lambda split_i, infos: _build_flat_field(source_env, cache_env, split_i, infos, "split", "splits"),
         ),
         ("derived", lambda split_i, infos: _build_small_derived_tensors(cache_env, split_i, infos)),
-        ("train_setup", lambda split_i, infos: _build_train_setup(cache_env, split_i, infos)),
     ]
 
     for split_i, users in enumerate(tqdm(user_splits, desc="Tensor cache splits", smoothing=0.03)):
@@ -390,6 +422,19 @@ def _rebuild_tensor_cache(
             build_step(split_i, infos)
 
 
+def _ensure_train_setup_cache(
+    cache_env: lmdb.Environment,
+    user_splits: list[list[int]],
+) -> None:
+    expected = _expected_train_setup_manifest(user_splits)
+    if _read_train_setup_manifest(cache_env) == expected:
+        return
+
+    for split_i, _ in enumerate(user_splits):
+        _build_train_setup(cache_env, split_i)
+    _write_train_setup_manifest(cache_env, expected)
+
+
 def _ensure_batch_perm_cache(
     cache_env: lmdb.Environment,
     user_splits: list[list[int]],
@@ -398,7 +443,6 @@ def _ensure_batch_perm_cache(
     if _read_batch_perm_manifest(cache_env) == expected:
         return
 
-    print("batch perm cache miss; rebuilding")
     for split_i, users in enumerate(user_splits):
         with cache_env.begin(write=False, buffers=True) as cache_txn:
             num_training_steps_per_epoch = get_array(
@@ -564,7 +608,6 @@ def _build_small_derived_tensors(
 def _build_train_setup(
     cache_env: lmdb.Environment,
     split_i: int,
-    infos: list[_SourceUserInfo],
 ) -> None:
     with cache_env.begin(write=False, buffers=True) as cache_txn:
         train_split_lengths = get_array(

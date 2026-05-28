@@ -418,7 +418,7 @@ def main() -> None:
     parser = create_parser()
     args, _ = parser.parse_known_args()
     config = Config(args)
-    user_ids = PREPARE_USER_IDS
+    user_ids = list(range(1, 10001))
 
     executor = ProcessPoolExecutor(
         max_workers=config.num_processes,

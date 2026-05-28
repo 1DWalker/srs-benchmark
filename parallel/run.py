@@ -238,7 +238,7 @@ def train_iter(
     batch_seq_lens = seq_len[review_data_indices]
     start_indices = review_data_indices - batch_seq_lens + 1
     batch_fsrs_params = flat_fsrs_params[indices]
-    grad_weight = fsrs_v7_helpers.recency_weight(split_review_ord[index_within_flat], train_split_lengths_cat[indices])
+    grad_weight = fsrs_v7_helpers.gradient_weight(split_review_ord[index_within_flat], train_split_lengths_cat[indices])
 
     per_example_grad = run_cpp_train_pass(
         elapsed_days_real,
@@ -507,7 +507,7 @@ def main() -> None:
     
     users = list(range(USER_START, USER_END + 1))
 
-    split_factor_k = 2
+    split_factor_k = 1
     with env.begin(write=False) as txn:
         user_max_train_split_lengths = load_metadata_tensor(
             txn,
