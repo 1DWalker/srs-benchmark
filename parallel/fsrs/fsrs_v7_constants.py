@@ -1,6 +1,11 @@
 LR: float = 2e-2
 BETAS: tuple = (0.8, 0.85)  # this is for Adam, default is (0.9, 0.999)
 
+RECENCY_C0 = 0.25
+RECENCY_C1 = 0.75
+
+PENALTY_W_L2 = 0.5
+
 FSRS7_DEFAULT_35_VALUES = (
     0.041,
     2.4175,

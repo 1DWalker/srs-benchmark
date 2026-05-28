@@ -38,6 +38,7 @@ class TrainSetup:
     batch_perm_cat: torch.Tensor
     batch_perm_user_flat_offset: torch.Tensor
     train_split_lengths_offset: torch.Tensor
+    split_review_ord: torch.Tensor
     batch_num_inner_batches: int
 
 
@@ -279,6 +280,7 @@ def load_cached_train_only(
                 _cache_tensor_prefix(split_i, "train_split_lengths_offset"),
                 device,
             ),
+            split_review_ord=get_tensor(txn, _cache_tensor_prefix(split_i, "split_review_ord"), device),
             batch_num_inner_batches=int(
                 json.loads(bytes(txn.get(_cache_json_key(split_i, "batch_num_inner_batches"))).decode())
             ),
@@ -333,6 +335,17 @@ def _rebuild_tensor_cache(
                 infos,
                 "train_index",
                 "train_index",
+            ),
+        ),
+        (
+            "split_review_ord",
+            lambda split_i, infos: _build_flat_field(
+                source_env,
+                cache_env,
+                split_i,
+                infos,
+                "split_review_ord",
+                "split_review_ord",
             ),
         ),
         (
@@ -474,7 +487,7 @@ def _build_flat_field(
 
 
 def _numel_for_source_field(info: _SourceUserInfo, field: str) -> int:
-    if field == "train_index":
+    if field in ("train_index", "split_review_ord"):
         return info.train_len
     if field == "test_index":
         return info.test_len

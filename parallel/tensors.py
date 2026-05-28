@@ -36,6 +36,7 @@ class UserTensorBlob:
 
     # Train
     train_index: torch.Tensor
+    split_review_ord: torch.Tensor
     train_split_lengths: torch.Tensor
 
     def to_dict(self) -> dict[str, torch.Tensor]:
@@ -195,6 +196,7 @@ class DataBuilder:
         self.elapsed_days_real = _TensorVector(device=self.device)
         self.seq_len = _TensorVector(device=self.device)
         self.train_index = _TensorVector(torch.int32, device=self.device)
+        self.split_review_ord = _TensorVector(torch.int32, device=self.device)
         self.test_index = _TensorVector(torch.int32, device=self.device)
         self.train_split_lengths = _TensorVector(torch.int32, device=self.device)
         self.splits = _TensorVector(torch.int32, device=self.device)
@@ -218,6 +220,7 @@ class DataBuilder:
             user_data.train_index,
             offset=self.review_offset,
         )
+        self.split_review_ord.append(user_data.split_review_ord)
         self.test_index.append(
             user_data.test_index,
             offset=self.review_offset,
@@ -260,6 +263,7 @@ class DataBuilder:
             )
 
         data.train_index = self.train_index.finish(shrink=shrink)
+        data.split_review_ord = self.split_review_ord.finish(torch.int32, shrink=shrink)
         data.train_split_lengths = self.train_split_lengths.finish(torch.int32, shrink=shrink)
 
         data.test_index = self.test_index.finish(shrink=shrink)
@@ -304,6 +308,7 @@ class Data:
         self.device = self.review_data.rating.device
         self.user_flat_offset = self.user_flat_offset.to(device)
         self.train_index = self.train_index.to(device)
+        self.split_review_ord = self.split_review_ord.to(device)
         self.train_split_lengths = self.train_split_lengths.to(device)
         self.test_index = self.test_index.to(device)
         self.test_index_lens = self.test_index_lens.to(device)

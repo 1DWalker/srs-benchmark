@@ -154,6 +154,7 @@ def run_cpp_train_pass(
     rating,
     start_indices,
     seq_lens,
+    grad_weight,
     batch_fsrs_params,
     threads_per_block: int,
 ):
@@ -171,6 +172,7 @@ def run_cpp_train_pass(
         elapsed_days_real, 
         rating, 
         start_indices.view_as(seq_lens_UxT),
+        grad_weight.view_as(seq_lens_UxT),
         seq_lens_UxT,
         seq_lens_Ux_max,
         seq_lens_Ux_max_cumsum,
@@ -182,7 +184,7 @@ def masked_penalty(parameters_kp, mask_k, batch_size_k, training_set_size_k):
 
 _penalty_grad = torch.func.grad(masked_penalty, argnums=0)
 
-@torch.compile(fullgraph=True)
+@torch.compile(fullgraph=True, dynamic=False)
 def train_iter(
     flat_fsrs_params: torch.Tensor,
     optim_state: fsrs_v7_optimizer.AdamWState,
@@ -194,6 +196,7 @@ def train_iter(
     batch_perm_user_flat_offset: torch.Tensor,
     train_split_lengths_offset: torch.Tensor,
     train_index: torch.Tensor,
+    split_review_ord: torch.Tensor,
     elapsed_days_real: torch.Tensor,
     rating: torch.Tensor,
     seq_len: torch.Tensor,
@@ -227,21 +230,22 @@ def train_iter(
     ).view(1, -1).expand(train_l.size(0), -1)
 
     legal = (train_range <= train_r.unsqueeze(-1)) & active_mask.unsqueeze(-1)
-    review_data_indices = train_index[
-        (
+    index_within_flat = (
             train_split_lengths_offset[user_indices, split_indices].unsqueeze(-1)
             + train_range
         ).clamp_max(train_index.size(0) - 1)
-    ]
+    review_data_indices = train_index[index_within_flat]
     batch_seq_lens = seq_len[review_data_indices]
     start_indices = review_data_indices - batch_seq_lens + 1
     batch_fsrs_params = flat_fsrs_params[indices]
+    grad_weight = fsrs_v7_helpers.recency_weight(split_review_ord[index_within_flat], train_split_lengths_cat[indices])
 
     per_example_grad = run_cpp_train_pass(
         elapsed_days_real,
         rating,
         start_indices,
         batch_seq_lens,
+        grad_weight,
         batch_fsrs_params,
         threads_per_block,
     )
@@ -316,6 +320,7 @@ def build_train_setup(data: Data, users: list[int]) -> TrainSetup:
         batch_perm_cat=batch_perm_cat,
         batch_perm_user_flat_offset=batch_perm_user_flat_offset,
         train_split_lengths_offset=train_split_lengths_offset,
+        split_review_ord=data.split_review_ord,
         batch_num_inner_batches=batch_num_inner_batches,
     )
 
@@ -331,6 +336,7 @@ def train(
     batch_perm_cat = train_setup.batch_perm_cat
     batch_perm_user_flat_offset = train_setup.batch_perm_user_flat_offset
     train_split_lengths_offset = train_setup.train_split_lengths_offset
+    split_review_ord = train_setup.split_review_ord
     batch_num_inner_batches = train_setup.batch_num_inner_batches
     train_splits_length_cat_max = (
         int(num_training_steps_cat.max().item())
@@ -353,6 +359,7 @@ def train(
             batch_perm_user_flat_offset,
             train_split_lengths_offset,
             data.train_index,
+            split_review_ord,
             data.review_data.elapsed_days_real,
             data.review_data.rating,
             data.review_data.seq_len,

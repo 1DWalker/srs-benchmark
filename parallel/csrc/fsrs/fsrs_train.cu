@@ -113,6 +113,7 @@ __global__ void fsrs_train_kernel(
     const float* __restrict__ elapsed_days_real_flat,
     const int8_t* __restrict__ rating_flat,
     const int32_t* __restrict__ start_index,
+    const float* __restrict__ grad_weight,
     const int32_t* __restrict__ seq_len_p,
     const int32_t* __restrict__ seq_len_max,
     const int32_t* __restrict__ seq_len_max_cumsum,
@@ -179,7 +180,7 @@ __global__ void fsrs_train_kernel(
         state
     );
     const float label = (float) (rating_flat[target_index] > 1);
-    float grad_p = dloss_dp(p, label);
+    float grad_p = grad_weight[i] * dloss_dp(p, label);
 
     fsrs_state_t grad_state{};
     fsrs_params_t grad_params{};
@@ -222,6 +223,7 @@ void fsrs_train_cuda(
     const float* __restrict__ elapsed_days_real_flat,
     const int8_t* __restrict__ rating_flat,
     const int32_t* __restrict__ start_index,
+    const float* __restrict__ grad_weight,
     const int32_t* __restrict__ seq_len_UxT,
     const int32_t* __restrict__ seq_len_Ux_max,
     const int32_t* __restrict__ seq_len_Ux_max_cumsum,
@@ -239,6 +241,7 @@ void fsrs_train_cuda(
         elapsed_days_real_flat,
         rating_flat,
         start_index,
+        grad_weight,
         seq_len_UxT,
         seq_len_Ux_max,
         seq_len_Ux_max_cumsum,

@@ -2,8 +2,6 @@ import torch
 
 from parallel.fsrs import fsrs_v7_constants
 
-PENALTY_W_L2 = 0.5
-
 def get_initial_params_for_optimization():
     return torch.tensor(fsrs_v7_constants.FSRS7_DEFAULT_35_VALUES, dtype=torch.float32)
 
@@ -47,8 +45,12 @@ def penalty_loss(parameters_kp, batch_size_k, training_set_size_k):
         dim=-1,
     )
     penalty_k = (
-        PENALTY_W_L2
+        fsrs_v7_constants.PENALTY_W_L2
         * batch_size_k / training_set_size_k
         * l2_k
     )
     return penalty_k
+
+def recency_weight(review_ord_kb, training_set_size_k):
+    review_ord_lin = review_ord_kb / training_set_size_k.unsqueeze(-1)
+    return fsrs_v7_constants.RECENCY_C0 + fsrs_v7_constants.RECENCY_C1 * torch.pow(review_ord_lin, 3)
