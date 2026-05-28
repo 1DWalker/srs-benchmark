@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include "buffer.hpp"
 
-#include "fsrs/fsrs7_constants.cuh"
+#include "fsrs/fsrs7.cuh"
 #include "fsrs/fsrs_test.cuh"
 #include "fsrs/fsrs_train.cuh"
 

@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
-#include "fsrs7_constants.cuh"
+#include "fsrs7.cuh"
 
 __device__ __forceinline__
 float fsrs7_clamp(const float x, const float lo, const float hi) {
