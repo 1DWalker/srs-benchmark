@@ -7,7 +7,13 @@ from pathlib import Path
 
 import lmdb
 import numpy as np
-from sklearn.metrics import log_loss, roc_auc_score, root_mean_squared_error
+from sklearn.metrics import (
+    log_loss,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    root_mean_squared_error,
+)
 import torch
 from tqdm import tqdm
 import time
@@ -101,8 +107,19 @@ def _result_parameters_by_split(parameters: torch.Tensor) -> dict[str, list[floa
 
 
 def _metrics_for_user(p: torch.Tensor, label: torch.Tensor) -> dict[str, float | None]:
+    import relplot
+    from statsmodels.nonparametric.smoothers_lowess import lowess  # type: ignore
+
     p_array = p.numpy()
     label_array = label.numpy().astype(int)
+    p_calibrated = lowess(
+        label_array,
+        p_array,
+        it=0,
+        delta=0.01 * (float(p_array.max()) - float(p_array.min())),
+        return_sorted=False,
+    )
+    y_hat_90 = (p_array >= 0.9).astype(int)
     try:
         auc = round(float(roc_auc_score(y_true=label_array, y_score=p_array)), 6)
     except Exception:
@@ -110,7 +127,12 @@ def _metrics_for_user(p: torch.Tensor, label: torch.Tensor) -> dict[str, float |
     return {
         "RMSE": round(float(root_mean_squared_error(y_true=label_array, y_pred=p_array)), 6),
         "LogLoss": round(float(log_loss(y_true=label_array, y_pred=p_array, labels=[0, 1])), 6),
+        "smECE": round(float(relplot.smECE(p_array, label_array)), 6),
         "AUC": auc,
+        "precision@90": round(float(precision_score(label_array, y_hat_90, zero_division=0)), 6),
+        "recall@90": round(float(recall_score(label_array, y_hat_90, zero_division=0)), 6),
+        "ICI": round(float(np.mean(np.abs(p_calibrated - p_array))), 6),
+        "MBE": round(float(np.mean(p_array - label_array)), 6),
     }
 
 
