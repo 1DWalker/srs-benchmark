@@ -54,23 +54,34 @@ def mean_bias_error(y, p):
     return np.mean(np.array(p) - np.array(y))
 
 
+def rmse_matrix_bin_key(row):
+    delta_t = round(
+        2.48
+        * np.power(3.62, np.floor(np.log(max(row["elapsed_days"], 1e-6)) / np.log(3.62))),
+        2,
+    )
+    i = round(1.99 * np.power(1.89, np.floor(np.log(row["i"]) / np.log(1.89))), 0)
+    rmse_bins_lapse = (
+        round(
+            1.65
+            * np.power(
+                1.73,
+                np.floor(np.log(row["rmse_bins_lapse"]) / np.log(1.73)),
+            ),
+            0,
+        )
+        if row["rmse_bins_lapse"] != 0
+        else 0
+    )
+    return (delta_t, i, rmse_bins_lapse)
+
+
 def rmse_matrix(df):
     tmp = df.copy()
-    tmp["delta_t"] = tmp["elapsed_days"].map(
-        lambda x: round(
-            2.48 * np.power(3.62, np.floor(np.log(max(x, 1e-6)) / np.log(3.62))), 2
-        )
-    )
-    tmp["i"] = tmp["i"].map(
-        lambda x: round(1.99 * np.power(1.89, np.floor(np.log(x) / np.log(1.89))), 0)
-    )
-    tmp["rmse_bins_lapse"] = tmp["rmse_bins_lapse"].map(
-        lambda x: (
-            round(1.65 * np.power(1.73, np.floor(np.log(x) / np.log(1.73))), 0)
-            if x != 0
-            else 0
-        )
-    )
+    keys = tmp.apply(rmse_matrix_bin_key, axis=1)
+    tmp["delta_t"] = keys.map(lambda x: x[0])
+    tmp["i"] = keys.map(lambda x: x[1])
+    tmp["rmse_bins_lapse"] = keys.map(lambda x: x[2])
     if "weights" not in tmp.columns:
         tmp["weights"] = 1
     tmp = (
