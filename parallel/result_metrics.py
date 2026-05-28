@@ -33,13 +33,10 @@ def rounded_parameter_list(parameters: torch.Tensor) -> list[float]:
     return [round(float(value), 6) for value in parameters.tolist()]
 
 
-def result_parameters_by_split(parameters: torch.Tensor) -> dict[str, list[float]]:
+def result_parameters(parameters: torch.Tensor) -> dict[str, list[float]]:
     if parameters.ndim == 1:
         return {"0": rounded_parameter_list(parameters)}
-    return {
-        str(split_i): rounded_parameter_list(split_parameters)
-        for split_i, split_parameters in enumerate(parameters)
-    }
+    return {"0": rounded_parameter_list(parameters[-1])}
 
 
 def metrics_for_user(
@@ -100,6 +97,6 @@ def write_user_result_jsonl(
                 ),
                 "user": int(user),
                 "size": int(label.numel()),
-                "parameters": result_parameters_by_split(fsrs_params_by_user[user]),
+                "parameters": result_parameters(fsrs_params_by_user[user]),
             }
             f.write(json.dumps(result, ensure_ascii=False) + "\n")
