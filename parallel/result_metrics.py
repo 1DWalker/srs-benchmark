@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,40 @@ from sklearn.metrics import (
 )
 import torch
 from tqdm import tqdm
+
+
+@dataclass(frozen=True)
+class FsrsParamSummary:
+    count: int
+    mean: torch.Tensor
+    median: torch.Tensor
+    bottom_10: torch.Tensor
+    top_10: torch.Tensor
+    std: torch.Tensor
+
+
+def flatten_fsrs_params_for_summary(fsrs_params: torch.Tensor) -> torch.Tensor:
+    return fsrs_params.detach().cpu().reshape(-1, fsrs_params.size(-1))
+
+
+def summarize_fsrs_param_rows(rows: torch.Tensor) -> FsrsParamSummary:
+    rows = rows.to(dtype=torch.float32)
+    return FsrsParamSummary(
+        count=rows.size(0),
+        mean=rows.mean(dim=0),
+        median=torch.quantile(rows, 0.5, dim=0),
+        bottom_10=torch.quantile(rows, 0.1, dim=0),
+        top_10=torch.quantile(rows, 0.9, dim=0),
+        std=rows.std(dim=0, unbiased=False),
+    )
+
+
+def summarize_fsrs_param_parts(parts: list[torch.Tensor]) -> FsrsParamSummary:
+    return summarize_fsrs_param_rows(torch.cat(parts, dim=0))
+
+
+def format_param_stat(values: torch.Tensor) -> str:
+    return str([round(float(value), 6) for value in values.tolist()])
 
 
 def rmse_bins_score(

@@ -26,7 +26,13 @@ from parallel.config import (
 )
 from parallel.fsrs import fsrs_v7_scheduler
 from parallel.fsrs import fsrs_v7_constants, fsrs_v7_helpers, fsrs_v7_optimizer
-from parallel.result_metrics import write_user_result_jsonl
+from parallel.result_metrics import (
+    FsrsParamSummary,
+    flatten_fsrs_params_for_summary,
+    format_param_stat,
+    summarize_fsrs_param_parts,
+    write_user_result_jsonl,
+)
 from parallel.tensor_cache import (
     TrainSetup,
     build_batch_perm_cat_for_users,
@@ -51,6 +57,7 @@ class EvaluationResult:
     label_by_user: dict[int, torch.Tensor]
     rmse_bins_by_user: dict[int, torch.Tensor]
     fsrs_params_by_user: dict[int, torch.Tensor]
+    fsrs_param_rows: torch.Tensor
 
 
 @dataclass
@@ -63,6 +70,7 @@ class EvaluationAggregate:
     label_by_user: dict[int, torch.Tensor] = field(default_factory=dict)
     rmse_bins_by_user: dict[int, torch.Tensor] = field(default_factory=dict)
     fsrs_params_by_user: dict[int, torch.Tensor] = field(default_factory=dict)
+    fsrs_param_rows_parts: list[torch.Tensor] = field(default_factory=list)
 
     def add(self, result: EvaluationResult) -> None:
         self.review_loss_sum += result.logloss_by_review * result.review_count
@@ -73,6 +81,7 @@ class EvaluationAggregate:
         self.label_by_user.update(result.label_by_user)
         self.rmse_bins_by_user.update(result.rmse_bins_by_user)
         self.fsrs_params_by_user.update(result.fsrs_params_by_user)
+        self.fsrs_param_rows_parts.append(result.fsrs_param_rows)
 
     @property
     def logloss_by_review(self) -> float:
@@ -85,6 +94,9 @@ class EvaluationAggregate:
         if self.user_count == 0:
             return float("nan")
         return self.user_loss_sum / self.user_count
+
+    def fsrs_param_summary(self) -> FsrsParamSummary:
+        return summarize_fsrs_param_parts(self.fsrs_param_rows_parts)
 
 
 def write_evaluation_results(
@@ -446,6 +458,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     label_by_user: dict[int, torch.Tensor] = {}
     rmse_bins_by_user: dict[int, torch.Tensor] = {}
     fsrs_params_by_user: dict[int, torch.Tensor] = {}
+    fsrs_param_rows = flatten_fsrs_params_for_summary(fsrs_params)
     if WRITE_RESULT:
         test_index_lens = data.test_index_lens.cpu().tolist()
         p_by_user_parts = p_concat.detach().cpu().split(test_index_lens)
@@ -454,7 +467,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         p_by_user = dict(zip(users, p_by_user_parts))
         label_by_user = dict(zip(users, label_by_user_parts))
         rmse_bins_by_user = dict(zip(users, rmse_bins_by_user_parts))
-        fsrs_params_cpu = fsrs_params.detach().cpu()
+        fsrs_params_cpu = fsrs_param_rows.view_as(fsrs_params)
         fsrs_params_by_user = dict(zip(users, fsrs_params_cpu.unbind(0)))
 
     result = EvaluationResult(
@@ -466,6 +479,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         label_by_user=label_by_user,
         rmse_bins_by_user=rmse_bins_by_user,
         fsrs_params_by_user=fsrs_params_by_user,
+        fsrs_param_rows=fsrs_param_rows,
     )
     # print(f"n: {result.review_count}")
     # print(f"Log loss avg by review: {result.logloss_by_review:.5f}")
@@ -604,6 +618,13 @@ def main() -> None:
     print(f"n reviews: {eval_aggregate.review_count}")
     print(f"Log loss avg by review: {eval_aggregate.logloss_by_review:.5f}")
     print(f"Log loss avg by user: {eval_aggregate.logloss_by_user:.5f}")
+    fsrs_param_summary = eval_aggregate.fsrs_param_summary()
+    print(f"FSRS params count: {fsrs_param_summary.count}")
+    print(f"FSRS params mean: {format_param_stat(fsrs_param_summary.mean)}")
+    print(f"FSRS params median: {format_param_stat(fsrs_param_summary.median)}")
+    print(f"FSRS params bottom 10%: {format_param_stat(fsrs_param_summary.bottom_10)}")
+    print(f"FSRS params top 10%: {format_param_stat(fsrs_param_summary.top_10)}")
+    print(f"FSRS params std: {format_param_stat(fsrs_param_summary.std)}")
 
     if WRITE_RESULT:
         write_evaluation_results(eval_aggregate)
