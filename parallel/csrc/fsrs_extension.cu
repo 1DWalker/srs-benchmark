@@ -1,2 +1,2 @@
-#include "fsrs/fsrs_test.cu"
-#include "fsrs/fsrs_train.cu"
+#include "fsrs_kernel/fsrs_test.cu"
+#include "fsrs_kernel/fsrs_train.cu"

@@ -7,8 +7,8 @@
 #include <stdio.h>
 
 #include "fsrs/fsrs7.cuh"
-#include "fsrs/fsrs_test.cuh"
-#include "fsrs/fsrs_train.cuh"
+#include "fsrs_kernel/fsrs_test.cuh"
+#include "fsrs_kernel/fsrs_train.cuh"
 
 
 namespace {

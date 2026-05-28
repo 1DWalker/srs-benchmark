@@ -3,7 +3,7 @@
 #include <cuda_runtime_api.h>
 #include <stdint.h>
 
-#include "fsrs7.cuh"
+#include "../fsrs/fsrs7.cuh"
 
 extern "C" void fsrs_train_cuda(
     const float* elapsed_days_real_flat,

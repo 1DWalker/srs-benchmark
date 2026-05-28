@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
-#include "fsrs7.cu"
+#include "../fsrs/fsrs7.cu"
 #include "fsrs_test.cuh"
 
 __global__ void fsrs_test_kernel(

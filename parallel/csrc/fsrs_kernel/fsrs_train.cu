@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <iostream>
 #include <stdio.h>
-#include "fsrs7.cu"
+#include "../fsrs/fsrs7.cu"
 #include "fsrs_train.cuh"
 
 int __device__ enzyme_dup;
