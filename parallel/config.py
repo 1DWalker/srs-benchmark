@@ -14,11 +14,15 @@ TEST_BATCH_SIZE_MAX = 10_000_000
 
 BATCH_PERM_SEED = 1234
 
+# Writes to the result file if set to True, but incurs a large time cost.
+WRITE_RESULT = True
+WRITE_RESULT_FILE = "result/FSRS-7-dev.jsonl"
+
 # Invalidates the cache
 USER_START = 1
-USER_END = 10000
+USER_END = 1000
 BATCH_SIZE = 1024
-N_EPOCHS = 8 # nonnegative integer
+N_EPOCHS = 0 # nonnegative integer
 
 # Requires a prepare.py run to change, and untested
 N_SPLITS = 5 

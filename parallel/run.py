@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
+import json
+from pathlib import Path
 
 import lmdb
 import numpy as np
-from sklearn.metrics import log_loss
+from sklearn.metrics import log_loss, roc_auc_score, root_mean_squared_error
 import torch
 from tqdm import tqdm
 import time
@@ -22,6 +24,8 @@ from parallel.config import (
     USER_END,
     USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
     USER_START,
+    WRITE_RESULT,
+    WRITE_RESULT_FILE,
 )
 from parallel.fsrs import fsrs_scheduler
 from parallel.fsrs import fsrs_v7_constants, fsrs_v7_helpers, fsrs_v7_optimizer
@@ -46,6 +50,9 @@ class EvaluationResult:
     logloss_by_user: float
     review_count: int
     user_count: int
+    p_by_user: dict[int, torch.Tensor]
+    label_by_user: dict[int, torch.Tensor]
+    fsrs_params_by_user: dict[int, torch.Tensor]
 
 
 @dataclass
@@ -54,12 +61,18 @@ class EvaluationAggregate:
     review_count: int = 0
     user_loss_sum: float = 0.0
     user_count: int = 0
+    p_by_user: dict[int, torch.Tensor] = field(default_factory=dict)
+    label_by_user: dict[int, torch.Tensor] = field(default_factory=dict)
+    fsrs_params_by_user: dict[int, torch.Tensor] = field(default_factory=dict)
 
     def add(self, result: EvaluationResult) -> None:
         self.review_loss_sum += result.logloss_by_review * result.review_count
         self.review_count += result.review_count
         self.user_loss_sum += result.logloss_by_user * result.user_count
         self.user_count += result.user_count
+        self.p_by_user.update(result.p_by_user)
+        self.label_by_user.update(result.label_by_user)
+        self.fsrs_params_by_user.update(result.fsrs_params_by_user)
 
     @property
     def logloss_by_review(self) -> float:
@@ -72,6 +85,55 @@ class EvaluationAggregate:
         if self.user_count == 0:
             return float("nan")
         return self.user_loss_sum / self.user_count
+
+
+def _rounded_parameter_list(parameters: torch.Tensor) -> list[float]:
+    return [round(float(value), 6) for value in parameters.tolist()]
+
+
+def _result_parameters_by_split(parameters: torch.Tensor) -> dict[str, list[float]]:
+    if parameters.ndim == 1:
+        return {"0": _rounded_parameter_list(parameters)}
+    return {
+        str(split_i): _rounded_parameter_list(split_parameters)
+        for split_i, split_parameters in enumerate(parameters)
+    }
+
+
+def _metrics_for_user(p: torch.Tensor, label: torch.Tensor) -> dict[str, float | None]:
+    p_array = p.numpy()
+    label_array = label.numpy().astype(int)
+    try:
+        auc = round(float(roc_auc_score(y_true=label_array, y_score=p_array)), 6)
+    except Exception:
+        auc = None
+    return {
+        "RMSE": round(float(root_mean_squared_error(y_true=label_array, y_pred=p_array)), 6),
+        "LogLoss": round(float(log_loss(y_true=label_array, y_pred=p_array, labels=[0, 1])), 6),
+        "AUC": auc,
+    }
+
+
+def write_evaluation_results(
+    aggregate: EvaluationAggregate,
+    output_file: str | Path = WRITE_RESULT_FILE,
+) -> None:
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    users = sorted(aggregate.p_by_user)
+    with output_path.open("w", encoding="utf-8", newline="\n") as f:
+        for user in tqdm(users, desc="Writing to file"):
+            p = aggregate.p_by_user[user]
+            label = aggregate.label_by_user[user]
+            fsrs_params = aggregate.fsrs_params_by_user[user]
+            result = {
+                "metrics": _metrics_for_user(p, label),
+                "user": int(user),
+                "size": int(label.numel()),
+                "parameters": _result_parameters_by_split(fsrs_params),
+            }
+            f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
 
 def ceil_div(a: int, b: int) -> int:
@@ -405,6 +467,7 @@ def predict_test_set(fsrs_params: torch.Tensor, data: Data) -> torch.Tensor:
 def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data) -> EvaluationResult:
     print("eval on test")
     assert data.split_counts.size(0) == len(users)
+    assert fsrs_params.size(0) == len(users)
 
     p_concat = predict_test_set(fsrs_params, data)
     torch.cuda.empty_cache()
@@ -414,18 +477,31 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
     logloss_weighted_by_reviews = loss.mean()
     logloss_weighted_by_user = \
         (loss * torch.repeat_interleave(1.0 / data.test_index_lens, data.test_index_lens)).sum() / len(users)
+    p_by_user: dict[int, torch.Tensor] = {}
+    label_by_user: dict[int, torch.Tensor] = {}
+    fsrs_params_by_user: dict[int, torch.Tensor] = {}
+    if WRITE_RESULT:
+        test_index_lens = data.test_index_lens.cpu().tolist()
+        p_by_user_parts = p_concat.detach().cpu().split(test_index_lens)
+        label_by_user_parts = label.detach().cpu().split(test_index_lens)
+        p_by_user = dict(zip(users, p_by_user_parts))
+        label_by_user = dict(zip(users, label_by_user_parts))
+        fsrs_params_cpu = fsrs_params.detach().cpu()
+        fsrs_params_by_user = dict(zip(users, fsrs_params_cpu.unbind(0)))
+
     result = EvaluationResult(
         logloss_by_review=float(logloss_weighted_by_reviews.item()),
         logloss_by_user=float(logloss_weighted_by_user.item()),
         review_count=int(label.size(0)),
         user_count=len(users),
+        p_by_user=p_by_user,
+        label_by_user=label_by_user,
+        fsrs_params_by_user=fsrs_params_by_user,
     )
     # print(f"n: {result.review_count}")
     # print(f"Log loss avg by review: {result.logloss_by_review:.5f}")
     # print(f"Log loss avg by user: {result.logloss_by_user:.5f}")
 
-    # p_by_user = p_concat.split(data.test_index_lens)
-    # label_by_user = label.split(data.test_index_lens)
     # for user, pred, label in zip(users, p_by_user, label_by_user):
     #     logloss = log_loss(y_true=label.cpu().numpy(), y_pred=pred.cpu().numpy(), labels=[0, 1])
     #     print(f"User: {user}, logloss={logloss:.3f}")
@@ -546,6 +622,10 @@ def main() -> None:
     print(f"n reviews: {eval_aggregate.review_count}")
     print(f"Log loss avg by review: {eval_aggregate.logloss_by_review:.5f}")
     print(f"Log loss avg by user: {eval_aggregate.logloss_by_user:.5f}")
+
+    if WRITE_RESULT:
+        write_evaluation_results(eval_aggregate)
+
 
 
 if __name__ == "__main__":
