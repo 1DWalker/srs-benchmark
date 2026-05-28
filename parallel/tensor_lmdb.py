@@ -277,6 +277,8 @@ def get_tensor(
 
 
 def _tensor_from_buffer(raw, dtype: torch.dtype) -> torch.Tensor:
+    if len(raw) == 0:
+        return torch.empty(0, dtype=dtype)
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",

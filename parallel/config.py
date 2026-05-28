@@ -18,7 +18,7 @@ BATCH_PERM_SEED = 1234
 USER_START = 1
 USER_END = 10000
 BATCH_SIZE = 1024
-N_EPOCHS = 1
+N_EPOCHS = 8 # nonnegative integer
 
 # Requires a prepare.py run to change, and untested
 N_SPLITS = 5 

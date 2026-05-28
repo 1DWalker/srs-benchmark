@@ -343,6 +343,8 @@ def train(
         if num_training_steps_cat.numel() > 0
         else 0
     )
+    if train_splits_length_cat_max == 0:
+        return fsrs_params
     
     step_i_cat = torch.zeros_like(num_training_steps_cat)
     flat_fsrs_params = fsrs_params.view(-1, fsrs_params.size(-1))
