@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-clang parallel/csrc/test.cu -fplugin=/opt/enzyme/lib/ClangEnzyme-18.so -O2 --cuda-gpu-arch=sm_86 -lcudart -L/usr/local/cuda-11.8/lib64 -o parallel/csrc/a.exe &&
-parallel/csrc/a.exe
-echo "done."
+start_ns=$(date +%s%N)
+
+python setup.py -q build_ext --inplace
+python -m parallel.run
+
+end_ns=$(date +%s%N)
+elapsed_ms=$(((end_ns - start_ns) / 1000000))
+printf 'elapsed: %d.%03ds\n' "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))"
