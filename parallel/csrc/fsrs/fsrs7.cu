@@ -67,8 +67,7 @@ float fsrs7_forgetting_curve(
     const float weight2 = fsrs_params.base_weight2 * powf(state.s, fsrs_params.s_weight_power2);
     const float retention = (weight1 * r1 + weight2 * r2) / (weight1 + weight2);
 
-    // return 1e-5f + (1.0f - 2e-5f) * retention;
-    return retention;
+    return 1e-5f + (1.0f - 2e-5f) * retention;
 }
 
 __device__ __forceinline__
@@ -77,32 +76,24 @@ float fsrs7_stability_after_review_one_term(
     const float old_d,
     const float retention,
     const int8_t rating,
-    const float sinc_base,
-    const float sinc_s_exp,
-    const float sinc_r_mult,
-    const float fail_mult,
-    const float fail_d_exp,
-    const float fail_s_exp,
-    const float fail_r_mult,
-    const float hard_penalty_param,
-    const float easy_bonus_param
+    const fsrs_stability_after_review_params_t &params
 ) {
-    const float hard_penalty = rating == 2 ? hard_penalty_param : 1.0f;
-    const float easy_bonus = rating == 4 ? easy_bonus_param : 1.0f;
+    const float hard_penalty = rating == 2 ? params.hard_penalty : 1.0f;
+    const float easy_bonus = rating == 4 ? params.easy_bonus : 1.0f;
 
     const float new_s_fail =
-        fail_mult
-        * powf(old_d, -fail_d_exp)
-        * (powf(old_s + 1.0f, fail_s_exp) - 1.0f)
-        * expf((1.0f - retention) * fail_r_mult);
+        params.fail_mult
+        * powf(old_d, -params.fail_d_exp)
+        * (powf(old_s + 1.0f, params.fail_s_exp) - 1.0f)
+        * expf((1.0f - retention) * params.fail_r_mult);
     const float pls = fminf(old_s, new_s_fail);
 
     const float s_inc =
         1.0f
-        + expf(sinc_base - 1.5f)
+        + expf(params.sinc_base - 1.5f)
         * (11.0f - old_d)
-        * powf(old_s, -sinc_s_exp)
-        * (expf((1.0f - retention) * sinc_r_mult) - 1.0f)
+        * powf(old_s, -params.sinc_s_exp)
+        * (expf((1.0f - retention) * params.sinc_r_mult) - 1.0f)
         * hard_penalty
         * easy_bonus;
     const float new_s_success = fmaxf(pls, old_s * s_inc);
@@ -158,15 +149,7 @@ fsrs_state_t fsrs7_step(
         fsrs_state.d,
         retention,
         rating,
-        fsrs_params.long_sinc_base,
-        fsrs_params.long_sinc_s_exp,
-        fsrs_params.long_sinc_r_mult,
-        fsrs_params.long_fail_mult,
-        fsrs_params.long_fail_d_exp,
-        fsrs_params.long_fail_s_exp,
-        fsrs_params.long_fail_r_mult,
-        fsrs_params.long_hard_penalty,
-        fsrs_params.long_easy_bonus
+        fsrs_params.long_stability
     );
 
     const float short_stability = fsrs7_stability_after_review_one_term(
@@ -174,15 +157,7 @@ fsrs_state_t fsrs7_step(
         fsrs_state.d,
         retention,
         rating,
-        fsrs_params.short_sinc_base,
-        fsrs_params.short_sinc_s_exp,
-        fsrs_params.short_sinc_r_mult,
-        fsrs_params.short_fail_mult,
-        fsrs_params.short_fail_d_exp,
-        fsrs_params.short_fail_s_exp,
-        fsrs_params.short_fail_r_mult,
-        fsrs_params.short_hard_penalty,
-        fsrs_params.short_easy_bonus
+        fsrs_params.short_stability
     );
 
     const float coefficient =

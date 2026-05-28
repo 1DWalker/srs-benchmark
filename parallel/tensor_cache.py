@@ -430,6 +430,7 @@ def _ensure_train_setup_cache(
     if _read_train_setup_manifest(cache_env) == expected:
         return
 
+    print("train setup cache miss; rebuilding")
     for split_i, _ in enumerate(user_splits):
         _build_train_setup(cache_env, split_i)
     _write_train_setup_manifest(cache_env, expected)
@@ -443,6 +444,7 @@ def _ensure_batch_perm_cache(
     if _read_batch_perm_manifest(cache_env) == expected:
         return
 
+    print("batch perm cache miss; rebuilding")
     for split_i, users in enumerate(user_splits):
         with cache_env.begin(write=False, buffers=True) as cache_txn:
             num_training_steps_per_epoch = get_array(

@@ -5,6 +5,18 @@ struct fsrs_state_t {
     float d;
 };
 
+struct fsrs_stability_after_review_params_t {
+    float sinc_base;
+    float sinc_s_exp;
+    float sinc_r_mult;
+    float fail_mult;
+    float fail_d_exp;
+    float fail_s_exp;
+    float fail_r_mult;
+    float hard_penalty;
+    float easy_bonus;
+};
+
 struct fsrs_params_t {
     // 0..3: Initial stability by first rating.
     float s0_again;
@@ -18,26 +30,10 @@ struct fsrs_params_t {
     float next_d_mult;
 
     // 7..15: Long-term stability after review.
-    float long_sinc_base;
-    float long_sinc_s_exp;
-    float long_sinc_r_mult;
-    float long_fail_mult;
-    float long_fail_d_exp;
-    float long_fail_s_exp;
-    float long_fail_r_mult;
-    float long_hard_penalty;
-    float long_easy_bonus;
+    fsrs_stability_after_review_params_t long_stability;
 
     // 16..24: Short-term stability after review.
-    float short_sinc_base;
-    float short_sinc_s_exp;
-    float short_sinc_r_mult;
-    float short_fail_mult;
-    float short_fail_d_exp;
-    float short_fail_s_exp;
-    float short_fail_r_mult;
-    float short_hard_penalty;
-    float short_easy_bonus;
+    fsrs_stability_after_review_params_t short_stability;
 
     // 25..26: Long-short term transition function.
     float transition_decay;
@@ -62,24 +58,28 @@ static constexpr fsrs_params_t fsrs7_init_w = {
     .init_d0 = 5.6385f,
     .init_d1 = 0.4468f,
     .next_d_mult = 3.262f,
-    .long_sinc_base = 2.3054f,
-    .long_sinc_s_exp = 0.1688f,
-    .long_sinc_r_mult = 1.3325f,
-    .long_fail_mult = 0.3524f,
-    .long_fail_d_exp = 0.0049f,
-    .long_fail_s_exp = 0.7503f,
-    .long_fail_r_mult = 0.0896f,
-    .long_hard_penalty = 0.6625f,
-    .long_easy_bonus = 1.3f,
-    .short_sinc_base = 0.882f,
-    .short_sinc_s_exp = 0.3072f,
-    .short_sinc_r_mult = 3.5875f,
-    .short_fail_mult = 0.303f,
-    .short_fail_d_exp = 0.0107f,
-    .short_fail_s_exp = 0.2279f,
-    .short_fail_r_mult = 2.6413f,
-    .short_hard_penalty = 0.5594f,
-    .short_easy_bonus = 1.3f,
+    .long_stability = {
+        .sinc_base = 2.3054f,
+        .sinc_s_exp = 0.1688f,
+        .sinc_r_mult = 1.3325f,
+        .fail_mult = 0.3524f,
+        .fail_d_exp = 0.0049f,
+        .fail_s_exp = 0.7503f,
+        .fail_r_mult = 0.0896f,
+        .hard_penalty = 0.6625f,
+        .easy_bonus = 1.3f,
+    },
+    .short_stability = {
+        .sinc_base = 0.882f,
+        .sinc_s_exp = 0.3072f,
+        .sinc_r_mult = 3.5875f,
+        .fail_mult = 0.303f,
+        .fail_d_exp = 0.0107f,
+        .fail_s_exp = 0.2279f,
+        .fail_r_mult = 2.6413f,
+        .hard_penalty = 0.5594f,
+        .easy_bonus = 1.3f,
+    },
     .transition_decay = 2.5f,
     .transition_scale = 1.0f,
     .decay1 = 0.0723f,
@@ -100,24 +100,28 @@ static constexpr fsrs_params_t fsrs7_sigma = {
     .init_d0 = 0.523f,
     .init_d1 = 0.2528f,
     .next_d_mult = 0.4329f,
-    .long_sinc_base = 0.2966f,
-    .long_sinc_s_exp = 0.2139f,
-    .long_sinc_r_mult = 0.2889f,
-    .long_fail_mult = 0.1862f,
-    .long_fail_d_exp = 0.0829f,
-    .long_fail_s_exp = 0.175f,
-    .long_fail_r_mult = 0.3812f,
-    .long_hard_penalty = 0.3013f,
-    .long_easy_bonus = 0.9104f,
-    .short_sinc_base = 0.3234f,
-    .short_sinc_s_exp = 0.2448f,
-    .short_sinc_r_mult = 0.3273f,
-    .short_fail_mult = 0.1842f,
-    .short_fail_d_exp = 0.1542f,
-    .short_fail_s_exp = 0.1735f,
-    .short_fail_r_mult = 0.4608f,
-    .short_hard_penalty = 0.311f,
-    .short_easy_bonus = 0.864f,
+    .long_stability = {
+        .sinc_base = 0.2966f,
+        .sinc_s_exp = 0.2139f,
+        .sinc_r_mult = 0.2889f,
+        .fail_mult = 0.1862f,
+        .fail_d_exp = 0.0829f,
+        .fail_s_exp = 0.175f,
+        .fail_r_mult = 0.3812f,
+        .hard_penalty = 0.3013f,
+        .easy_bonus = 0.9104f,
+    },
+    .short_stability = {
+        .sinc_base = 0.3234f,
+        .sinc_s_exp = 0.2448f,
+        .sinc_r_mult = 0.3273f,
+        .fail_mult = 0.1842f,
+        .fail_d_exp = 0.1542f,
+        .fail_s_exp = 0.1735f,
+        .fail_r_mult = 0.4608f,
+        .hard_penalty = 0.311f,
+        .easy_bonus = 0.864f,
+    },
     .transition_decay = 0.4053f,
     .transition_scale = 0.162f,
     .decay1 = 0.0418f,
