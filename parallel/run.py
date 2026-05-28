@@ -26,7 +26,6 @@ from parallel.config import (
 )
 from parallel.fsrs import fsrs_v7_scheduler
 from parallel.fsrs import fsrs_v7_constants, fsrs_v7_helpers, fsrs_v7_optimizer
-from parallel.load_balancer import get_batches_test, get_batches_train
 from parallel.result_metrics import write_user_result_jsonl
 from parallel.tensor_cache import (
     TrainSetup,
