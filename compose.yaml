@@ -17,8 +17,8 @@ services:
         target: /anki-revlogs-10k
         read_only: true
       - type: volume
-        source: tensor-cache
-        target: /tensor-cache
+        source: data
+        target: /data
     deploy:
       resources:
         reservations:
@@ -28,4 +28,4 @@ services:
               capabilities: [gpu]
 
 volumes:
-  tensor-cache:
+  data:
