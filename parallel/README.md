@@ -28,7 +28,7 @@ copy is intentional: feature creation mutates the dataframe.
 | Blob Entry | Dtype | Shape | Meaning |
 | --- | --- | --- | --- |
 | `test_index` | `torch.int32` | `[test_reviews_total]` | Concatenated test reviews for all TSCV splits, as indices into the grouped raw tensors. |
-| `rmse_bins` | `torch.int8` | `[test_reviews_total]` | RMSE-bin category code for each entry in `test_index`. |
+| `rmse_bins` | `torch.int32` | `[test_reviews_total]` | RMSE-bin category code for each entry in `test_index`. |
 | `split` | `torch.int32` | `[n_splits]` | Number of test reviews recorded for each TSCV split. |
 
 `test_index` and `rmse_bins` have matching positions. For split `s`, the test

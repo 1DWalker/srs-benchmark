@@ -26,7 +26,6 @@ from parallel.config import (
     LMDB_PATH,
     LMDB_SIZE,
     N_SPLITS,
-    PREPARE_USER_IDS,
     USER_MAX_TRAIN_SPLIT_LENGTHS_KEY,
 )
 from models.model_factory import create_model
@@ -38,7 +37,7 @@ from parallel.tensor_lmdb import (
     user_tensor_prefix,
 )
 from parallel.tensors import UserTensorBlob
-from utils import get_bin
+from utils import rmse_matrix_bin_key
 
 
 SECONDS_PER_DAY = 86_400
@@ -249,7 +248,7 @@ def empty_benchmark_tensors() -> BenchmarkTensors:
     empty_int32 = torch.tensor([], dtype=torch.int32)
     return BenchmarkTensors(
         test_index=empty_int32,
-        rmse_bins=torch.tensor([], dtype=torch.int8),
+        rmse_bins=torch.tensor([], dtype=torch.int32),
         split=empty_int32,
         train_index=empty_int32,
         split_review_ord=empty_int32,
@@ -317,7 +316,7 @@ def build_benchmark_tensors(
     batch_size = getattr(model, "batch_size", config.batch_size)
     max_seq_len = config.max_seq_len
 
-    bins = feature_df.apply(get_bin, axis=1)
+    bins = feature_df.apply(rmse_matrix_bin_key, axis=1)
     bin_codes = bins.astype("category").cat.codes.to_numpy()
     test_index_values = review_th_to_grouped_index(
         feature_df["review_th"],
@@ -354,7 +353,7 @@ def build_benchmark_tensors(
     split_review_ord_array = concat_int32(split_review_ords)
     return BenchmarkTensors(
         test_index=torch.tensor(test_indices, dtype=torch.int32),
-        rmse_bins=torch.tensor(rmse_bins, dtype=torch.int8),
+        rmse_bins=torch.tensor(rmse_bins, dtype=torch.int32),
         split=torch.tensor(split_test_lengths, dtype=torch.int32),
         train_index=torch.tensor(train_indices_array, dtype=torch.int32),
         split_review_ord=torch.tensor(split_review_ord_array, dtype=torch.int32),
@@ -416,6 +415,7 @@ def main() -> None:
     mp.set_start_method("spawn", force=True)
 
     parser = create_parser()
+    parser.set_defaults(algo="FSRS-7", short=True, secs=True)
     args, _ = parser.parse_known_args()
     config = Config(args)
     user_ids = list(range(1, 10001))

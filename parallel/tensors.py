@@ -198,7 +198,7 @@ class DataBuilder:
         self.train_index = _TensorVector(torch.int32, device=self.device)
         self.split_review_ord = _TensorVector(torch.int32, device=self.device)
         self.test_index = _TensorVector(torch.int32, device=self.device)
-        self.rmse_bins = _TensorVector(torch.int8, device=self.device)
+        self.rmse_bins = _TensorVector(torch.int32, device=self.device)
         self.train_split_lengths = _TensorVector(torch.int32, device=self.device)
         self.splits = _TensorVector(torch.int32, device=self.device)
         self.split_counts = _TensorVector(torch.int32, device=self.device)
@@ -269,7 +269,7 @@ class DataBuilder:
         data.train_split_lengths = self.train_split_lengths.finish(torch.int32, shrink=shrink)
 
         data.test_index = self.test_index.finish(shrink=shrink)
-        data.rmse_bins = self.rmse_bins.finish(torch.int8, shrink=shrink)
+        data.rmse_bins = self.rmse_bins.finish(torch.int32, shrink=shrink)
         data.test_index_lens = torch.tensor(
             self.test_index_lens,
             dtype=torch.int32,
