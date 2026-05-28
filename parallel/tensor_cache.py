@@ -252,6 +252,7 @@ def load_cached_split(
     with cache_env.begin(write=False, buffers=True) as txn:
         data.user_flat_offset = get_tensor(txn, _cache_tensor_prefix(split_i, "user_flat_offset"), device)
     data.test_index = test_data.test_index
+    data.rmse_bins = test_data.rmse_bins
     data.splits = test_data.splits
     data.split_counts = test_data.split_counts
     data.test_index_lens = test_data.test_index_lens
@@ -326,11 +327,14 @@ def load_cached_test_only(
     split_i: int,
     device: torch.device | str,
     review_data: ReviewData,
+    load_rmse_bins: bool = True,
 ) -> Data:
     device = torch.device(device)
     with cache_env.begin(write=False, buffers=True) as txn:
         data = _new_partial_data(review_data)
         data.test_index = get_tensor(txn, _cache_tensor_prefix(split_i, "test_index"), device)
+        if load_rmse_bins:
+            data.rmse_bins = get_tensor(txn, _cache_tensor_prefix(split_i, "rmse_bins"), device)
         data.splits = get_tensor(txn, _cache_tensor_prefix(split_i, "splits"), device)
         data.split_counts = get_tensor(txn, _cache_tensor_prefix(split_i, "split_counts"), device)
         data.test_index_lens = get_tensor(
@@ -394,6 +398,17 @@ def _rebuild_tensor_cache(
                 infos,
                 "test_index",
                 "test_index",
+            ),
+        ),
+        (
+            "rmse_bins",
+            lambda split_i, infos: _build_flat_field(
+                source_env,
+                cache_env,
+                split_i,
+                infos,
+                "rmse_bins",
+                "rmse_bins",
             ),
         ),
         (
@@ -535,7 +550,7 @@ def _build_flat_field(
 def _numel_for_source_field(info: _SourceUserInfo, field: str) -> int:
     if field in ("train_index", "split_review_ord"):
         return info.train_len
-    if field == "test_index":
+    if field in ("test_index", "rmse_bins"):
         return info.test_len
     if field == "split":
         return info.split_len

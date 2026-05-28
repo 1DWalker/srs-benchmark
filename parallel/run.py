@@ -2,18 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from io import BytesIO
-import json
-from pathlib import Path
 
 import lmdb
-import numpy as np
-from sklearn.metrics import (
-    log_loss,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-    root_mean_squared_error,
-)
 import torch
 from tqdm import tqdm
 import time
@@ -36,6 +26,7 @@ from parallel.config import (
 from parallel.fsrs import fsrs_scheduler
 from parallel.fsrs import fsrs_v7_constants, fsrs_v7_helpers, fsrs_v7_optimizer
 from parallel.load_balancer import get_batches_test, get_batches_train
+from parallel.result_metrics import write_user_result_jsonl
 from parallel.tensor_cache import (
     TrainSetup,
     build_batch_perm_cat_for_users,
@@ -58,6 +49,7 @@ class EvaluationResult:
     user_count: int
     p_by_user: dict[int, torch.Tensor]
     label_by_user: dict[int, torch.Tensor]
+    rmse_bins_by_user: dict[int, torch.Tensor]
     fsrs_params_by_user: dict[int, torch.Tensor]
 
 
@@ -69,6 +61,7 @@ class EvaluationAggregate:
     user_count: int = 0
     p_by_user: dict[int, torch.Tensor] = field(default_factory=dict)
     label_by_user: dict[int, torch.Tensor] = field(default_factory=dict)
+    rmse_bins_by_user: dict[int, torch.Tensor] = field(default_factory=dict)
     fsrs_params_by_user: dict[int, torch.Tensor] = field(default_factory=dict)
 
     def add(self, result: EvaluationResult) -> None:
@@ -78,6 +71,7 @@ class EvaluationAggregate:
         self.user_count += result.user_count
         self.p_by_user.update(result.p_by_user)
         self.label_by_user.update(result.label_by_user)
+        self.rmse_bins_by_user.update(result.rmse_bins_by_user)
         self.fsrs_params_by_user.update(result.fsrs_params_by_user)
 
     @property
@@ -93,69 +87,18 @@ class EvaluationAggregate:
         return self.user_loss_sum / self.user_count
 
 
-def _rounded_parameter_list(parameters: torch.Tensor) -> list[float]:
-    return [round(float(value), 6) for value in parameters.tolist()]
-
-
-def _result_parameters_by_split(parameters: torch.Tensor) -> dict[str, list[float]]:
-    if parameters.ndim == 1:
-        return {"0": _rounded_parameter_list(parameters)}
-    return {
-        str(split_i): _rounded_parameter_list(split_parameters)
-        for split_i, split_parameters in enumerate(parameters)
-    }
-
-
-def _metrics_for_user(p: torch.Tensor, label: torch.Tensor) -> dict[str, float | None]:
-    import relplot
-    from statsmodels.nonparametric.smoothers_lowess import lowess  # type: ignore
-
-    p_array = p.numpy()
-    label_array = label.numpy().astype(int)
-    p_calibrated = lowess(
-        label_array,
-        p_array,
-        it=0,
-        delta=0.01 * (float(p_array.max()) - float(p_array.min())),
-        return_sorted=False,
-    )
-    y_hat_90 = (p_array >= 0.9).astype(int)
-    try:
-        auc = round(float(roc_auc_score(y_true=label_array, y_score=p_array)), 6)
-    except Exception:
-        auc = None
-    return {
-        "RMSE": round(float(root_mean_squared_error(y_true=label_array, y_pred=p_array)), 6),
-        "LogLoss": round(float(log_loss(y_true=label_array, y_pred=p_array, labels=[0, 1])), 6),
-        "smECE": round(float(relplot.smECE(p_array, label_array)), 6),
-        "AUC": auc,
-        "precision@90": round(float(precision_score(label_array, y_hat_90, zero_division=0)), 6),
-        "recall@90": round(float(recall_score(label_array, y_hat_90, zero_division=0)), 6),
-        "ICI": round(float(np.mean(np.abs(p_calibrated - p_array))), 6),
-        "MBE": round(float(np.mean(p_array - label_array)), 6),
-    }
-
-
 def write_evaluation_results(
     aggregate: EvaluationAggregate,
-    output_file: str | Path = WRITE_RESULT_FILE,
+    output_file: str = WRITE_RESULT_FILE,
 ) -> None:
-    output_path = Path(output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    users = sorted(aggregate.p_by_user)
-    with output_path.open("w", encoding="utf-8", newline="\n") as f:
-        for user in tqdm(users, desc="Writing to file"):
-            p = aggregate.p_by_user[user]
-            label = aggregate.label_by_user[user]
-            fsrs_params = aggregate.fsrs_params_by_user[user]
-            result = {
-                "metrics": _metrics_for_user(p, label),
-                "user": int(user),
-                "size": int(label.numel()),
-                "parameters": _result_parameters_by_split(fsrs_params),
-            }
-            f.write(json.dumps(result, ensure_ascii=False) + "\n")
+    write_user_result_jsonl(
+        output_file,
+        list(aggregate.p_by_user),
+        aggregate.p_by_user,
+        aggregate.label_by_user,
+        aggregate.rmse_bins_by_user,
+        aggregate.fsrs_params_by_user,
+    )
 
 
 def ceil_div(a: int, b: int) -> int:
@@ -501,13 +444,16 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         (loss * torch.repeat_interleave(1.0 / data.test_index_lens, data.test_index_lens)).sum() / len(users)
     p_by_user: dict[int, torch.Tensor] = {}
     label_by_user: dict[int, torch.Tensor] = {}
+    rmse_bins_by_user: dict[int, torch.Tensor] = {}
     fsrs_params_by_user: dict[int, torch.Tensor] = {}
     if WRITE_RESULT:
         test_index_lens = data.test_index_lens.cpu().tolist()
         p_by_user_parts = p_concat.detach().cpu().split(test_index_lens)
         label_by_user_parts = label.detach().cpu().split(test_index_lens)
+        rmse_bins_by_user_parts = data.rmse_bins.detach().cpu().split(test_index_lens)
         p_by_user = dict(zip(users, p_by_user_parts))
         label_by_user = dict(zip(users, label_by_user_parts))
+        rmse_bins_by_user = dict(zip(users, rmse_bins_by_user_parts))
         fsrs_params_cpu = fsrs_params.detach().cpu()
         fsrs_params_by_user = dict(zip(users, fsrs_params_cpu.unbind(0)))
 
@@ -518,6 +464,7 @@ def evaluate_on_test_set(fsrs_params: torch.Tensor, users: list[int], data: Data
         user_count=len(users),
         p_by_user=p_by_user,
         label_by_user=label_by_user,
+        rmse_bins_by_user=rmse_bins_by_user,
         fsrs_params_by_user=fsrs_params_by_user,
     )
     # print(f"n: {result.review_count}")
@@ -567,7 +514,13 @@ def evaluate_cached_split(
     review_data,
     fsrs_params: torch.Tensor,
 ) -> EvaluationResult:
-    test_data = load_cached_test_only(cache_env, split_i, DEVICE, review_data)
+    test_data = load_cached_test_only(
+        cache_env,
+        split_i,
+        DEVICE,
+        review_data,
+        load_rmse_bins=WRITE_RESULT,
+    )
     with torch.no_grad():
         return evaluate_on_test_set(fsrs_params, users, test_data)
 
